@@ -12,6 +12,10 @@
     - [ ] Write initial unit tests for core services and providers.
     - [ ] Add integration tests for critical user flows.
 
+- [ ] **Examples**
+    - [ ] Create an `example/` directory with a minimal working app.
+    - [ ] Write a basic demonstration of core features usage.
+
 - [ ] **Streaming**
     - [ ] Implement stream-based data fetching.
     - [ ] Add error handling and loading states for data streams.
