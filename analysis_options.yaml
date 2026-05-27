@@ -1,0 +1,44 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  errors:
+    missing_required_param: error
+    missing_return: error
+    todo: ignore
+
+linter:
+  rules:
+    require_trailing_commas: true
+    prefer_relative_imports: true
+    public_member_api_docs: true
+    constant_identifier_names: true
+    avoid_print: true
+    prefer_final_locals: true
+    avoid_slow_async_io: true
+    unawaited_futures: true
+    cancel_subscriptions: true
+    prefer_const_constructors: true
+    prefer_collection_literals: true
+    sort_child_properties_last: true
+    implementation_imports: true
+    avoid_classes_with_only_static_members: true
+    library_private_types_in_public_api: true
+    avoid_dynamic_calls: true
+    use_super_parameters: true
+    no_leading_underscores_for_local_identifiers: true
+    prefer_const_declarations: true
+    avoid_redundant_argument_values: true
+    directives_ordering: true
+
+    use_build_context_synchronously: false
+    prefer_final_fields: true
+    unnecessary_overrides: false
+    prefer_foreach: true
+    depend_on_referenced_packages: false
+    empty_catches: true
+    prefer_single_quotes: false
+    unnecessary_getters_setters: false
