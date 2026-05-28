@@ -55,11 +55,8 @@ class _FluentWorker {
   /// the primary communication handshake with the Main Isolate, and listens
   /// continuously for incoming streaming requests.
   void _start() async {
-    // Initialize FFI database factories for non-mobile environments
-    if (!Platform.isAndroid && !Platform.isIOS) {
-      sqfliteFfiInit();
-      databaseFactory = databaseFactoryFfi;
-    }
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
 
     // Set up communication channel: send the worker's inbound port back to Main Isolate
     final ReceivePort receivePort = ReceivePort();
