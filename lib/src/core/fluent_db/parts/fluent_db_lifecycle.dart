@@ -460,7 +460,7 @@ extension FluentDbLifecycle on FluentDb {
 
     if (isFullConfig) {
       await db.execute('PRAGMA foreign_keys = ${cfg.enableForeignKeys ? "ON" : "OFF"};');
-      await db.execute('PRAGMA journal_mode = ${cfg.journalMode.value};');
+      await db.rawQuery('PRAGMA journal_mode = ${cfg.journalMode.value};');
 
       FluentLog.debug('Applied structural PRAGMAs (FKs and Journal Mode)', tag: 'FluentDb:cfg');
     }
