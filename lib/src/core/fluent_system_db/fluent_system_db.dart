@@ -45,10 +45,10 @@ class _FluentSystemDb {
       },
       onConfigure: (db) async {
         // Apply high-performance WAL and light caching rules for background indexing
-        await db.execute('PRAGMA journal_mode = WAL;');
         await db.execute('PRAGMA synchronous = NORMAL;');
         await db.execute('PRAGMA cache_size = -500;');
         await db.execute('PRAGMA temp_store = MEMORY;');
+        await db.rawQuery('PRAGMA journal_mode = WAL;');
       },
     );
 
