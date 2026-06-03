@@ -10,6 +10,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import '../../fluent_sqflite.dart';
 
 part '../core/fluent_engine/fluent_engine.dart';
+part '../core/fluent_system_db/fluent_system_db.dart';
 part '../core/fluent_table_stats_tracker/fluent_table_stats_tracker.dart';
 part '../core/fluent_worker/fluent_worker.dart';
 part '../models/fluent_task.dart';

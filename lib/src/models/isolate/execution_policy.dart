@@ -29,7 +29,7 @@ class ExecutionPolicy {
   final bool? cancelIfDuplicate;
 
   /// The [ExecutionPolicy] constructor initializes.
-  const ExecutionPolicy({this.useIsolate, this.priority, this.chunkSize, this.timeout, this.cancelIfDuplicate});
+  const ExecutionPolicy({this.useIsolate = false, this.priority, this.chunkSize, this.timeout, this.cancelIfDuplicate});
 
   /// Calculates the optimized batch size for task execution based on the
   /// defined [chunkSize] policy.
@@ -71,7 +71,7 @@ class ExecutionPolicy {
 
   /// Standard policy for most CRUD operations.
   /// Uses isolate offloading, a 30s timeout, and prevents duplicate task queuing.
-  factory ExecutionPolicy.rootDefault() => const ExecutionPolicy(useIsolate: true, priority: 0, chunkSize: 200, timeout: Duration(seconds: 30), cancelIfDuplicate: true);
+  factory ExecutionPolicy.rootDefault() => const ExecutionPolicy(useIsolate: false, priority: 0, chunkSize: 200, timeout: Duration(seconds: 30), cancelIfDuplicate: true);
 
   /// Optimized for rapid, lightweight read/writes.
   /// Bypasses the isolate to eliminate message-passing overhead for low-latency needs.
@@ -79,15 +79,15 @@ class ExecutionPolicy {
 
   /// Designed for non-critical, long-running tasks.
   /// Lowered priority and small chunk sizes minimize impact on the main UI thread.
-  static const background = ExecutionPolicy(priority: -10, useIsolate: true, chunkSize: 50);
+  static const background = ExecutionPolicy(priority: -10, useIsolate: false, chunkSize: 50);
 
   /// Optimized for massive data synchronization.
   /// Maximizes [chunkSize] for throughput and grants a generous 5-minute timeout.
-  static const bulkUpload = ExecutionPolicy(priority: 5, useIsolate: true, chunkSize: 950, timeout: Duration(minutes: 5));
+  static const bulkUpload = ExecutionPolicy(priority: 5, useIsolate: false, chunkSize: 950, timeout: Duration(minutes: 5));
 
   /// Targeted at complex relational lookups.
   /// Includes deduplication to prevent slamming the database with repeated heavy queries.
-  static const heavyQuery = ExecutionPolicy(priority: 2, useIsolate: true, cancelIfDuplicate: true, timeout: Duration(seconds: 15));
+  static const heavyQuery = ExecutionPolicy(priority: 2, useIsolate: false, cancelIfDuplicate: true, timeout: Duration(seconds: 15));
 
   /// Policy for data that must be processed every time (e.g., force-refresh events).
   /// Disables [cancelIfDuplicate] to guarantee execution.

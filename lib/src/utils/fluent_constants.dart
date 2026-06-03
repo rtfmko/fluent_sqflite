@@ -6,4 +6,4 @@ part of '../core/fluent_sqlite_internal.dart';
 
 const int _systemId = -1;
 const String _systemDbName = 'fluent_system.db';
-const Duration _saveInterval = Duration(seconds: 1);
+const Duration _saveInterval = Duration(seconds: 30);

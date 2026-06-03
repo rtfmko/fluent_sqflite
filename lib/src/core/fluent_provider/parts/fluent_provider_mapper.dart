@@ -126,9 +126,9 @@ extension FluentProviderMapper<T extends FluentStorable> on FluentProvider<T> {
       policy: policy,
     );
 
-    final Map<String, dynamic> enrichedRow = await _processRow(row, task);
+    final List<Map<String, dynamic>> enrichedList = await _processRowsBatch([row], task);
 
-    return mapToModelSync(enrichedRow);
+    return mapToModelSync(enrichedList.first);
   }
 
   /// Transforms a list of raw database result maps into a list of hydrated domain models,
@@ -354,153 +354,176 @@ extension FluentProviderMapper<T extends FluentStorable> on FluentProvider<T> {
   /// * Type Sanitization: Decodes complex types (Enum, DateTime, JSON) from metadata.
   /// * Relational Graph Hydration: Recursively fetches and stitches related records
   ///   based on the [FluentDbRelation] definitions and execution [FluentTask] policy.
-  Future<Map<String, dynamic>> _processRow(Map<String, dynamic> row, FluentTask task, {Set<String>? visitedTables, int currentDepth = 0}) async {
+  Future<List<Map<String, dynamic>>> _processRowsBatch(List<Map<String, dynamic>> rows, FluentTask task, {Set<String>? visitedTables, int currentDepth = 0}) async {
+    if (rows.isEmpty) return rows;
+
     if (currentDepth >= 30) {
       FluentLog.warning('Safety recursion limit reached', tag: '$tableName:hydration', hint: 'Possible circular dependency detected in relational model mapping.');
-      return Map<String, dynamic>.from(row);
+      return rows.map((r) => Map<String, dynamic>.from(r)).toList();
     }
 
-    Map<String, dynamic> processedRow = Map<String, dynamic>.from(row);
+    final List<Map<String, dynamic>> processedRows = rows.map((r) => Map<String, dynamic>.from(r)).toList();
 
     final Set<String> currentVisited = visitedTables ?? <String>{};
     currentVisited.add(tableName);
 
     // Stage 1: Type Sanitization
     if (tableConfig.sanitizeTypes) {
-      final String metaKey = FluentDbColumn.systemMetadata().name;
-      final Object? metaRaw = processedRow[metaKey];
-
-      if (metaRaw is String && metaRaw.isNotEmpty) {
-        try {
-          final Map<String, dynamic> decoded = jsonDecode(metaRaw) as Map<String, dynamic>;
-
-          for (final String key in decoded.keys) {
-            final dynamic value = processedRow[key];
-            if (value == null) continue;
-
-            final String typeHint = decoded[key].toString();
-            switch (typeHint) {
-              case 'bool':
-                processedRow[key] = value == 1;
-                break;
-              case 'datetime':
-                processedRow[key] = value is int ? DateTime.fromMillisecondsSinceEpoch(value) : DateTime.tryParse(value.toString());
-                break;
-              case 'json':
-                if (value is String) processedRow[key] = jsonDecode(value);
-                break;
-              case 'enum':
-                final List<Enum>? values = modelSample.enumValues[key];
-                if (values != null) {
-                  processedRow[key] = tableConfig.storeEnumsAsNames ? values.byName(value.toString()) : values[value as int];
-                }
-                break;
-            }
-          }
-        } catch (e, s) {
-          FluentLog.error('Failed to sanitize row metadata', e, s, tag: '$tableName:hydration');
-        }
-        processedRow.remove(metaKey);
-      }
+      processedRows.forEach(_sanitizeRowInPlace);
     }
 
     // Stage 2: Relational Hydration
     if (!_hasRelations || _relationsMixin == null) {
       currentVisited.remove(tableName);
-      return processedRow;
+      return processedRows;
     }
 
-    processedRow = _castReadyRelations(processedRow);
+    // Local cast
+    for (int i = 0; i < processedRows.length; i++) {
+      processedRows[i] = _castReadyRelations(processedRows[i]);
+    }
 
     final Map<Type, FluentDbRelation> relations = _relationsMixin!.syncRelations;
-    final dynamic id = processedRow[_cachedPrimaryKey?.name ?? 'id'];
-
-    if (id == null || relations.isEmpty) {
+    if (relations.isEmpty) {
       currentVisited.remove(tableName);
-      return processedRow;
+      return processedRows;
     }
 
-    List<String>? skippedRelations;
-    final int nextDepth = currentDepth + 1;
+    final String pkName = _cachedPrimaryKey?.name ?? 'id';
 
+    // Take all parents ID
+    final List<dynamic> parentIds = processedRows.map((r) => r[pkName]).where((id) => id != null).toSet().toList();
+
+    if (parentIds.isEmpty) {
+      currentVisited.remove(tableName);
+      return processedRows;
+    }
+
+    final int nextDepth = currentDepth + 1;
     final int maxDepth = task.maxDepth;
     final bool ignoreLazy = task.ignoreLazy;
+    final int chunkSize = task.policy.chunkSize ?? 950;
 
     for (final MapEntry<Type, FluentDbRelation<FluentStorable>> entry in relations.entries) {
-      try {
-        final FluentDbRelation rel = entry.value;
-        final String key = rel.mapToKey;
-        final FluentProvider childDao = FluentDb.providerForType(entry.key);
+      final FluentDbRelation rel = entry.value;
+      final String key = rel.mapToKey;
+      final FluentProvider childDao = FluentDb.providerForType(entry.key);
 
-        if (processedRow[key] is List<FluentStorable> || processedRow[key] is FluentStorable) {
-          continue;
-        }
+      // Depth & Lazy Load Control
+      if ((rel.isLazy && !ignoreLazy) || (maxDepth != 0 && nextDepth > maxDepth)) {
+        for (final Map<String, dynamic> row in processedRows) {
+          if (row[key] == null) {
+            row['_unloaded_relations'] ??= <String>[];
+            final List<String> unloaded = row['_unloaded_relations'] as List<String>;
 
-        // Depth & Lazy Load Control
-        if ((rel.isLazy && !ignoreLazy) || (maxDepth != 0 && nextDepth > maxDepth)) {
-          skippedRelations ??= [];
-          skippedRelations.add(key);
-          continue;
-        }
-
-        if (currentVisited.contains(childDao.tableName)) continue;
-
-        final String remoteKey = rel.remoteKey ?? childDao.defaultForeignKey;
-        final List<Map<String, dynamic>> rawChildren = await childDao.db.query(childDao.tableName, where: '$remoteKey = ?', whereArgs: [id]);
-
-        FluentLog.debug('Enriching relation', tag: '$tableName:hydration', context: {'key': key, 'childCount': rawChildren.length});
-
-        final int childrenLen = rawChildren.length;
-
-        final List<Future<Map<String, dynamic>>> enrichmentFutures = List<Future<Map<String, dynamic>>>.generate(
-          childrenLen,
-          (i) => childDao._processRow(rawChildren[i], task, visitedTables: currentVisited, currentDepth: nextDepth),
-          growable: false,
-        );
-
-        final List<Map<String, dynamic>> enriched = await Future.wait(enrichmentFutures);
-        final int enrichedLen = enriched.length;
-
-        // Final Mapping Logic
-        if (rel.castType == FluentModelCast.modelList) {
-          if (enrichedLen == 0 && rel.nullable) {
-            processedRow[key] = null;
-          } else {
-            final List<FluentStorable> childModels = List<FluentStorable>.filled(enrichedLen, childDao.modelSample, growable: false);
-            for (int i = 0; i < enrichedLen; i++) {
-              childModels[i] = childDao._assembleModel(enriched[i]);
+            if (!unloaded.contains(key)) {
+              unloaded.add(key);
             }
-            processedRow[key] = childDao._createTypedList(childModels);
           }
-        } else if (rel.castType == FluentModelCast.model) {
-          processedRow[key] = enrichedLen > 0 ? childDao._assembleModel(enriched.first) : null;
-        } else {
-          processedRow[key] = rel.castType == FluentModelCast.mapList ? enriched : (enrichedLen > 0 ? enriched.first : null);
+        }
+        continue;
+      }
+
+      if (currentVisited.contains(childDao.tableName)) continue;
+
+      try {
+        final String remoteKey = rel.remoteKey ?? childDao.defaultForeignKey;
+        final List<Map<String, dynamic>> allRawChildren = [];
+
+        for (int i = 0; i < parentIds.length; i += chunkSize) {
+          final int end = (i + chunkSize > parentIds.length) ? parentIds.length : i + chunkSize;
+          final List<dynamic> chunk = parentIds.sublist(i, end);
+
+          final String placeholders = List.filled(chunk.length, '?').join(',');
+          final List<Map<String, dynamic>> results = await childDao.db.query(childDao.tableName, where: '$remoteKey IN ($placeholders)', whereArgs: chunk);
+          allRawChildren.addAll(results);
+        }
+
+        FluentLog.debug('Enriching relation (Batch)', tag: '$tableName:hydration', context: {'key': key, 'childCount': allRawChildren.length, 'parents': parentIds.length});
+
+        List<Map<String, dynamic>> enrichedChildren = [];
+
+        // Рекурсивно обрабатываем детей ТОЖЕ пачкой!
+        if (allRawChildren.isNotEmpty) {
+          enrichedChildren = await childDao._processRowsBatch(allRawChildren, task, visitedTables: {...currentVisited}, currentDepth: nextDepth);
+        }
+
+        // Memory Join: Группируем детей по ключу родителя
+        final Map<dynamic, List<Map<String, dynamic>>> groupedChildren = {};
+        for (var child in enrichedChildren) {
+          final pId = child[remoteKey];
+          groupedChildren.putIfAbsent(pId, () => []).add(child);
+        }
+
+        for (final Map<String, dynamic> row in processedRows) {
+          if (row[key] is List<FluentStorable> || row[key] is FluentStorable) {
+            continue;
+          }
+
+          final dynamic pId = row[pkName];
+          final List<Map<String, dynamic>> matches = groupedChildren[pId] ?? [];
+
+          // Final Mapping Logic
+          if (rel.castType == FluentModelCast.modelList) {
+            if (matches.isEmpty && rel.nullable) {
+              row[key] = null;
+            } else {
+              final List<FluentStorable> childModels = matches.map((m) => childDao._assembleModel(m)).toList(growable: false);
+              row[key] = childDao._createTypedList(childModels);
+            }
+          } else if (rel.castType == FluentModelCast.model) {
+            row[key] = matches.isNotEmpty ? childDao._assembleModel(matches.first) : null;
+          } else {
+            row[key] = rel.castType == FluentModelCast.mapList ? matches : (matches.isNotEmpty ? matches.first : null);
+          }
         }
       } catch (e, st) {
-        FluentLog.error('Relational enrichment failed for key: ${entry.value.mapToKey}', e, st, tag: '$tableName:hydration');
+        FluentLog.error('Relational batch enrichment failed for key: ${rel.mapToKey}', e, st, tag: '$tableName:hydration');
       }
     }
 
     currentVisited.remove(tableName);
-
-    if (skippedRelations != null && skippedRelations.isNotEmpty) {
-      processedRow['_unloaded_relations'] = skippedRelations;
-    }
-
-    return processedRow;
+    return processedRows;
   }
 
-  /// Transforms raw relational data (Maps/Lists) into typed model instances [FluentStorable]
-  /// before the final assembly phase.
-  ///
-  /// This routine acts as a pre-assembly validator:
-  /// * Schema Coercion: Ensures that relational fields populated by the SQL driver
-  ///   are converted into the proper domain model format.
-  /// * Nullability Enforcement: Automatically handles empty lists vs. `null` values
-  ///   based on the relational configuration.
-  /// * Copy-on-Write: Uses a "Copy-on-Write" pattern, creating a mutable copy of the
-  ///   row map only when a transformation is actually required.
+  void _sanitizeRowInPlace(Map<String, dynamic> processedRow) {
+    final String metaKey = FluentDbColumn.systemMetadata().name;
+    final Object? metaRaw = processedRow[metaKey];
+
+    if (metaRaw is String && metaRaw.isNotEmpty) {
+      try {
+        final Map<String, dynamic> decoded = jsonDecode(metaRaw) as Map<String, dynamic>;
+
+        for (final String key in decoded.keys) {
+          final dynamic value = processedRow[key];
+          if (value == null) continue;
+
+          final String typeHint = decoded[key].toString();
+          switch (typeHint) {
+            case 'bool':
+              processedRow[key] = value == 1;
+              break;
+            case 'datetime':
+              processedRow[key] = value is int ? DateTime.fromMillisecondsSinceEpoch(value) : DateTime.tryParse(value.toString());
+              break;
+            case 'json':
+              if (value is String) processedRow[key] = jsonDecode(value);
+              break;
+            case 'enum':
+              final List<Enum>? values = modelSample.enumValues[key];
+              if (values != null) {
+                processedRow[key] = tableConfig.storeEnumsAsNames ? values.byName(value.toString()) : values[value as int];
+              }
+              break;
+          }
+        }
+      } catch (e, s) {
+        FluentLog.error('Failed to sanitize row metadata', e, s, tag: '$tableName:hydration');
+      }
+      processedRow.remove(metaKey);
+    }
+  }
+
   Map<String, dynamic> _castReadyRelations(Map<String, dynamic> processedRow) {
     if (!_hasRelations || _relationsMixin == null) return processedRow;
 

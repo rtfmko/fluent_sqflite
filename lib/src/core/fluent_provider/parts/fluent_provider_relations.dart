@@ -260,7 +260,7 @@ extension FluentProviderRelations<T extends FluentStorable> on FluentProvider<T>
 
       if (sql.isNotEmpty) {
         try {
-          FluentLog.sql('Executing relational integrity orphan purge', arguments: args, tag: '$tableName:relations:sql');
+          FluentLog.sql(sql, arguments: args, tag: '$tableName:relations:sql');
 
           final int count = await executor.rawDelete(sql, args);
 
@@ -730,8 +730,8 @@ extension FluentProviderRelations<T extends FluentStorable> on FluentProvider<T>
     }
 
     // Association Mapping: Link parents to children via the intermediate pivot table
-    final Batch? targetBatch = batch;
-    final Transaction? targetTxn = txn;
+    final bool isLocalBatch = batch == null;
+    final Batch effectiveBatch = batch ?? txn!.batch();
 
     for (final MapEntry<int, List<FluentStorable>> entry in parentIndexToChildren.entries) {
       final int parentIdx = entry.key;
@@ -760,16 +760,16 @@ extension FluentProviderRelations<T extends FluentStorable> on FluentProvider<T>
         }
 
         final Map<String, dynamic> pivotRecord = {pivotParentKey: parentId, pivotChildKey: childId};
-
         final ConflictAlgorithm conflictAlgorithm = (task.helper?.updateIfExist ?? true) ? ConflictAlgorithm.replace : ConflictAlgorithm.ignore;
 
-        if (targetBatch != null) {
-          targetBatch.insert(pivotTable, pivotRecord, conflictAlgorithm: conflictAlgorithm);
-        } else {
-          await targetTxn!.insert(pivotTable, pivotRecord, conflictAlgorithm: conflictAlgorithm);
-        }
+        effectiveBatch.insert(pivotTable, pivotRecord, conflictAlgorithm: conflictAlgorithm);
       }
     }
+
+    if (isLocalBatch) {
+      await effectiveBatch.commit(noResult: true);
+    }
+
     FluentLog.debug('Many-to-many pivot association records staged successfully', tag: '$tableName:relations', context: {'pivotTable': pivotTable});
   }
 

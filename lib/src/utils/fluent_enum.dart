@@ -314,6 +314,12 @@ enum FluentDbAction {
 
   /// Retrieves or validates the current database table schema.
   readSchema,
+
+  /// Analyze system stats
+  analyzeStats,
+
+  /// Save system stats
+  saveStats,
 }
 
 /// Represents the computational or relational complexity of a specific database table.
@@ -358,14 +364,6 @@ enum IsolateCmd {
 
   /// Signals the worker to halt a currently processing [FluentTask] identified by its ID.
   cancel,
-
-  /// Requests the worker to persist current performance metrics to the disk or
-  /// telemetry store.
-  saveStats,
-
-  /// Requests the worker to perform internal diagnostic analysis on database
-  /// performance, index usage, or cache hit/miss rates.
-  analyzeStats,
 
   /// Signals the worker to perform an orderly shutdown, closing database
   /// handles and flushing buffers before the isolate is destroyed.

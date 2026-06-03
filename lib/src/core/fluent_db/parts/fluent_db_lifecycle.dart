@@ -66,6 +66,7 @@ extension FluentDbLifecycle on FluentDb {
     final Map<String, String> dbPaths = {};
     final Map<String, SQLitePerformanceConfig> performanceConfigs = {};
     final Map<String, List<String>> dbTables = {};
+    final Map<String, Database> dbNameWithDb = {};
     final Map<String, Map<String, int>> dbRelationsCount = {};
 
     final String databasesPath = await getDatabasesPath();
@@ -134,6 +135,8 @@ extension FluentDbLifecycle on FluentDb {
           },
         );
 
+        dbNameWithDb[group.dbName] = db;
+
         for (final FluentProvider dao in group.daos) {
           dao.setDb(db);
           dao.setDbName(group.dbName);
@@ -195,7 +198,14 @@ extension FluentDbLifecycle on FluentDb {
 
     FluentLog.info('Registry: Spawning FluentDb...', tag: 'FluentDb:init');
 
-    await FluentEngine().initMultiple(dbPaths: dbPaths, relationMap: globalRelationMap, configs: performanceConfigs, dbTables: dbTables, dbRelationsCount: dbRelationsCount);
+    await FluentEngine().initMultiple(
+      dbPaths: dbPaths,
+      relationMap: globalRelationMap,
+      configs: performanceConfigs,
+      dbTables: dbTables,
+      dbRelationsCount: dbRelationsCount,
+      dbNameWithDb: dbNameWithDb,
+    );
 
     _isInitialized = true;
     FluentLog.info('Registry: Initialization complete.', tag: 'FluentDb:init');

@@ -217,10 +217,12 @@ class FluentTask {
       case FluentDbAction.findValidItems:
       case FluentDbAction.rawGetItems:
       case FluentDbAction.save:
+      case FluentDbAction.saveStats:
         w += 60; // Heavier I/O or multi-step CRUD pipelines
         break;
 
       case FluentDbAction.findAll:
+      case FluentDbAction.analyzeStats:
       case FluentDbAction.updateWithRelations:
         w += 80; // Potential Full Table Scan or cascaded graph updates
         break;
@@ -273,6 +275,6 @@ class FluentTask {
 
   @override
   String toString() {
-    return 'FluentTask{id: $id, table: $table, dbName: $dbName, action: $action, data: $data, maxDepth: $maxDepth, ignoreLazy: $ignoreLazy, force: $force, relations: $relations, helper: $helper, policy: $policy, isSystem: $isSystem, staticWeight: $staticWeight, executionWeight: $executionWeight, fingerprint: $fingerprint}';
+    return 'FluentTask{id: $id, table: $table, dbName: $dbName, action: $action, maxDepth: $maxDepth, ignoreLazy: $ignoreLazy, force: $force, helper: $helper, policy: $policy, isSystem: $isSystem, staticWeight: $staticWeight, executionWeight: $executionWeight, fingerprint: $fingerprint}';
   }
 }

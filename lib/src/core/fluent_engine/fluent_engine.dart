@@ -64,7 +64,7 @@ class FluentEngine {
 
   /// Concurrency guards: flags tracking if the background isolate or the main thread
   /// executor are currently occupied, preventing race conditions.
-  bool _isIsolateWorkerBusy = false;
+  // bool _isIsolateWorkerBusy = false;
   bool _isMainWorkerBusy = false;
 
   /// Coordination locks for native transaction support; when true, the queue
@@ -73,10 +73,10 @@ class FluentEngine {
   bool _isPaused = false;
 
   /// Communication pipe to the background isolate, used to ship serialized tasks for processing.
-  SendPort? _toWorker;
+  // SendPort? _toWorker;
 
   /// Handle to the underlying background isolate thread.
-  Isolate? _isolateInstance;
+  // Isolate? _isolateInstance;
 
   /// Periodic timer for triggering maintenance tasks or telemetry flush cycles.
   Timer? _saveTimer;
@@ -86,6 +86,8 @@ class FluentEngine {
 
   /// Increments and returns the next unique operation ID.
   int get _nextId => ++_idCounter;
+
+  final _FluentSystemDb _systemDb = _FluentSystemDb();
 
   /// Safely pauses the task dispatching queue and suspends execution until the
   /// currently in-flight operations (on both Main thread and Background Isolate)
@@ -106,7 +108,8 @@ class FluentEngine {
     _isPaused = true;
 
     // If both workers are already idle, return immediately.
-    if (!_isIsolateWorkerBusy && !_isMainWorkerBusy) {
+    // if (!_isIsolateWorkerBusy && !_isMainWorkerBusy) {
+    if (!_isMainWorkerBusy) {
       FluentLog.debug('Queue paused instantly. Workers are idle.', tag: 'FluentEngine:pauseQueue');
       return;
     }
@@ -145,7 +148,8 @@ class FluentEngine {
   /// execution, it resolves the [_pauseCompleter] to notify the waiting thread
   /// that exclusive database access is now safe.
   void _checkPauseState() {
-    if (_isPaused && !_isIsolateWorkerBusy && !_isMainWorkerBusy) {
+    // if (_isPaused && !_isIsolateWorkerBusy && !_isMainWorkerBusy) {
+    if (_isPaused && !_isMainWorkerBusy) {
       if (_pauseCompleter != null && !_pauseCompleter!.isCompleted) {
         FluentLog.debug('Pipeline drained. Resolving pause request.', tag: 'FluentEngine:pause');
         _pauseCompleter!.complete();
@@ -170,26 +174,27 @@ class FluentEngine {
     required Map<String, SQLitePerformanceConfig> configs,
     required Map<String, List<String>> dbTables,
     required Map<String, Map<String, int>> dbRelationsCount,
+    required Map<String, Database> dbNameWithDb,
   }) async {
-    if (_toWorker != null) return;
+    // if (_toWorker != null) return;
 
     _configs.clear();
     _configs.addAll(configs);
 
-    final ReceivePort initReceivePort = ReceivePort();
-    try {
-      _isolateInstance = await Isolate.spawn(_fluentWorkerEntryPoint, initReceivePort.sendPort);
-      final Object? firstMsg = await initReceivePort.first;
-      if (firstMsg is! SendPort) {
-        throw Exception("Failed to get SendPort from Isolate");
-      }
-      _toWorker = firstMsg;
-    } finally {
-      initReceivePort.close();
-    }
+    // final ReceivePort initReceivePort = ReceivePort();
+    // try {
+    //   _isolateInstance = await Isolate.spawn(_fluentWorkerEntryPoint, initReceivePort.sendPort);
+    //   final Object? firstMsg = await initReceivePort.first;
+    //   if (firstMsg is! SendPort) {
+    //     throw Exception("Failed to get SendPort from Isolate");
+    //   }
+    //   _toWorker = firstMsg;
+    // } finally {
+    //   initReceivePort.close();
+    // }
 
-    final ReceivePort responsePort = ReceivePort();
-    responsePort.listen(_handleWorkerMessage);
+    // final ReceivePort responsePort = ReceivePort();
+    // responsePort.listen(_handleWorkerMessage);
 
     final Map<String, Map<String, dynamic>> isolateDbConfigs = {};
 
@@ -205,15 +210,20 @@ class FluentEngine {
       };
     }
 
-    _sendMessageToIsolate(
-      IsolateRequest(
-        cmd: IsolateCmd.init,
-        data: IsolateHelper(dbPaths: dbPaths, relationMap: relationMap, dbConfigs: isolateDbConfigs).toMap(),
-        replyPort: responsePort.sendPort,
-      ),
-    );
+    // _sendMessageToIsolate(
+    //   IsolateRequest(
+    //     cmd: IsolateCmd.init,
+    //     data: IsolateHelper(dbPaths: dbPaths, relationMap: relationMap, dbConfigs: isolateDbConfigs).toMap(),
+    //     replyPort: responsePort.sendPort,
+    //   ),
+    // );
+
+    await _systemDb.init(dbConfigs: isolateDbConfigs, databases: dbNameWithDb);
 
     FluentLog.info('FluentEngine: Isolate spawned with full APM and performance manifest', tag: 'FluentEngine:initMultiple', context: {'totalDatabases': dbPaths.length});
+
+    unawaited(_triggerDatabaseAnalysis());
+    _startAutoSaveTimer();
   }
 
   /// Dispatches a database task to the processing pipeline, applying "Request Collapsing"
@@ -404,14 +414,16 @@ class FluentEngine {
     if (_isPaused) return;
 
     // Flush telemetry statistics if idle
-    if (_queue.isEmpty) {
-      if (!_isIsolateWorkerBusy && !_isMainWorkerBusy) {
-        _checkAndFlushStats();
-      }
-      return;
-    }
+    // if (_queue.isEmpty) {
+    //   // if (!_isIsolateWorkerBusy && !_isMainWorkerBusy) {
+    //   // if (!_isMainWorkerBusy) {
+    //   //   _checkAndFlushStats();
+    //   // }
+    //   return;
+    // }
 
-    if (_toWorker == null) return;
+    if (_isMainWorkerBusy) return;
+    // if (_toWorker == null) return;
 
     FluentTask? taskToExecute;
     bool isWriteAction = false;
@@ -434,7 +446,8 @@ class FluentEngine {
       // --- STRATEGY A: strictSequential ---
       // Exclusive lock: ensures zero concurrent I/O. Safe for destructive operations.
       if (strategy == FluentDbExecutionStrategy.strictSequential) {
-        if (_isMainWorkerBusy || _isIsolateWorkerBusy) {
+        // if (_isMainWorkerBusy || _isIsolateWorkerBusy) {
+        if (_isMainWorkerBusy) {
           continue;
         }
 
@@ -448,7 +461,8 @@ class FluentEngine {
       // --- STRATEGY B: sequentialWAL ---
       // Single-thread-like order in a WAL environment.
       if (strategy == FluentDbExecutionStrategy.sequentialWAL) {
-        if (_isMainWorkerBusy || _isIsolateWorkerBusy) {
+        // if (_isMainWorkerBusy || _isIsolateWorkerBusy) {
+        if (_isMainWorkerBusy) {
           continue;
         }
 
@@ -477,31 +491,32 @@ class FluentEngine {
             break;
           }
         } else {
-          final bool shouldGoToIsolate = currentTask.policy.useIsolate ?? (currentTask.executionWeight >= 25);
+          // final bool shouldGoToIsolate = currentTask.policy.useIsolate ?? (currentTask.executionWeight >= 25);
 
-          if (shouldGoToIsolate || currentTask.force) {
-            if (!_isIsolateWorkerBusy) {
-              taskToExecute = currentTask;
-              isWriteAction = false;
-              targetIndex = i;
-              selectedConfig = config;
-              break;
-            }
-          } else {
-            if (!_isMainWorkerBusy) {
-              taskToExecute = currentTask;
-              isWriteAction = true;
-              targetIndex = i;
-              selectedConfig = config;
-              break;
-            } else if (!_isIsolateWorkerBusy) {
-              taskToExecute = currentTask;
-              isWriteAction = false;
-              targetIndex = i;
-              selectedConfig = config;
-              break;
-            }
+          // if (shouldGoToIsolate || currentTask.force) {
+          //   if (!_isIsolateWorkerBusy) {
+          //     taskToExecute = currentTask;
+          //     isWriteAction = false;
+          //     targetIndex = i;
+          //     selectedConfig = config;
+          //     break;
+          //   }
+          // } else {
+          if (!_isMainWorkerBusy) {
+            taskToExecute = currentTask;
+            isWriteAction = true;
+            targetIndex = i;
+            selectedConfig = config;
+            break;
           }
+          // else if (!_isIsolateWorkerBusy) {
+          //   taskToExecute = currentTask;
+          //   isWriteAction = false;
+          //   targetIndex = i;
+          //   selectedConfig = config;
+          //   break;
+          // }
+          // }
         }
       }
     }
@@ -522,26 +537,26 @@ class FluentEngine {
 
     _queue.removeAt(targetIndex);
 
-    if (isWriteAction) {
-      _isMainWorkerBusy = true;
+    // if (isWriteAction) {
+    _isMainWorkerBusy = true;
 
-      _executeInMain(taskToExecute)
-          .then((result) {
-            _isMainWorkerBusy = false;
-            _checkPauseState();
-            _processNext();
-          })
-          .catchError((error) {
-            _isMainWorkerBusy = false;
-            _checkPauseState();
-            _processNext();
-          });
+    _executeInMain(taskToExecute)
+        .then((result) {
+          _isMainWorkerBusy = false;
+          _checkPauseState();
+          _processNext();
+        })
+        .catchError((error) {
+          _isMainWorkerBusy = false;
+          _checkPauseState();
+          _processNext();
+        });
 
-      _processNext();
-    } else {
-      _isIsolateWorkerBusy = true;
-      _sendMessageToIsolate(IsolateRequest(cmd: IsolateCmd.execute, task: taskToExecute));
-    }
+    _processNext();
+    // } else {
+    // _isIsolateWorkerBusy = true;
+    // _sendMessageToIsolate(IsolateRequest(cmd: IsolateCmd.execute, task: taskToExecute));
+    // }
   }
 
   /// Monitors and synchronizes database telemetry and performance statistics.
@@ -553,24 +568,29 @@ class FluentEngine {
   /// 3. **Offloading:** Dispatches the statistics payload to the background
   ///    isolate for persistent storage without blocking the main execution thread.
   /// 4. **Cleanup:** Resets the dirty flag to prevent redundant IO operations.
-  void _checkAndFlushStats() {
-    final FluentTableStatsTracker tracker = FluentTableStatsTracker();
-    if (tracker.isDirty) {
-      final List<Map<String, dynamic>> dirtyData = tracker.exportDirtyData();
-      if (dirtyData.isNotEmpty) {
-        FluentLog.debug('Flushing accumulated telemetry stats', tag: 'FluentEngine:stats', context: {'statsCount': dirtyData.length});
-
-        _sendMessageToIsolate(
-          IsolateRequest(
-            cmd: IsolateCmd.saveStats,
-            task: FluentTask(id: _systemId, action: FluentDbAction.none),
-            data: dirtyData,
-          ),
-        );
-        tracker.clearDirtyFlag();
-      }
-    }
-  }
+  // void _checkAndFlushStats() {
+  //   final FluentTableStatsTracker tracker = FluentTableStatsTracker();
+  //   if (tracker.isDirty) {
+  //     // Идеально для выполнения в моменты простоя (Main Isolate свободен)
+  //     unawaited(_triggerSaveStats());
+  //   }
+  //   // if (tracker.isDirty) {
+  //   //   final List<Map<String, dynamic>> dirtyData = tracker.exportDirtyData();
+  //   //   if (dirtyData.isNotEmpty) {
+  //   //     FluentLog.debug('Flushing accumulated telemetry stats', tag: 'FluentEngine:stats', context: {'statsCount': dirtyData.length});
+  //   //
+  //   //     _triggerSaveStats();
+  //   //     // _sendMessageToIsolate(
+  //   //     //   IsolateRequest(
+  //   //     //     cmd: IsolateCmd.saveStats,
+  //   //     //     task: FluentTask(id: _systemId, action: FluentDbAction.none),
+  //   //     //     data: dirtyData,
+  //   //     //   ),
+  //   //     // );
+  //   //     tracker.clearDirtyFlag();
+  //   //   }
+  //   // }
+  // }
 
   /// Safely routes a serialized request to the background database isolate.
   ///
@@ -580,14 +600,14 @@ class FluentEngine {
   /// 2. **Serialization:** Converts the [IsolateRequest] object into a
   ///    cross-thread-safe primitive map for transport.
   /// 3. **Dispatch:** Posts the serialized message to the Isolate's message loop.
-  void _sendMessageToIsolate(IsolateRequest message) {
-    if (_toWorker == null) {
-      FluentLog.warning('Attempted to send message to uninitialized Isolate', tag: 'FluentEngine:transport', hint: 'Ensure that initMultiple() has been called and the Isolate is running.');
-      return;
-    }
-
-    _toWorker?.send(message.toMap());
-  }
+  // void _sendMessageToIsolate(IsolateRequest message) {
+  //   if (_toWorker == null) {
+  //     FluentLog.warning('Attempted to send message to uninitialized Isolate', tag: 'FluentEngine:transport', hint: 'Ensure that initMultiple() has been called and the Isolate is running.');
+  //     return;
+  //   }
+  //
+  //   _toWorker?.send(message.toMap());
+  // }
 
   /// The central message dispatcher for the Isolate-to-Main thread communication pipe.
   ///
@@ -694,7 +714,7 @@ class FluentEngine {
   /// 4. **Pipeline Resumption:** Triggers the next task in the queue.
   void _handleOkStatus(IsolateResponse response) {
     final int id = response.taskId;
-    _isIsolateWorkerBusy = false;
+    // _isIsolateWorkerBusy = false;
     _checkPauseState();
 
     final List<Map<String, dynamic>> lastData = _parseData(response.data);
@@ -872,7 +892,7 @@ class FluentEngine {
   void _handleError(IsolateResponse response) {
     final int id = response.taskId;
 
-    _isIsolateWorkerBusy = false;
+    // _isIsolateWorkerBusy = false;
     final String errorMessage = response.data?.toString() ?? 'Unknown Isolate Error';
     FluentLog.error(
       'Database worker operation failed',
@@ -935,6 +955,56 @@ class FluentEngine {
     });
   }
 
+  /// Triggers a non-blocking background analysis of the database schema and
+  /// performance metrics to optimize future query execution.
+  ///
+  /// **Workflow:**
+  /// 1. **Request Dispatch:** Issues an `analyzeStats` command to the worker isolate.
+  /// 2. **Async Wait:** Uses a [Completer] to suspend execution until the
+  ///    background isolate returns the finalized performance profile.
+  /// 3. **Memory Sync:** Once resolved, the FluentEngine updates the
+  ///    [FluentTableStatsTracker] in-memory state with fresh data.
+  Future<void> _triggerDatabaseAnalysis() async {
+    if (_queue.any((t) => t.action == FluentDbAction.analyzeStats)) {
+      return;
+    }
+
+    FluentLog.info('Queueing database analysis via pipeline', tag: 'FluentEngine:analysis');
+
+    final FluentTask analysisTask = FluentTask(action: FluentDbAction.analyzeStats, isSystem: true, policy: ExecutionPolicy.background);
+
+    try {
+      // Задача встает в общую очередь и ждет, пока база освободится
+      final dynamic rawResult = await _executeSystemTask(analysisTask);
+      final List<Map<String, dynamic>>? rawList = rawResult as List<Map<String, dynamic>>?;
+
+      if (rawList != null && rawList.isNotEmpty) {
+        final FluentTableStatsTracker tracker = FluentTableStatsTracker();
+
+        for (final Map<String, dynamic> statRow in rawList) {
+          final TableStats incomingStats = TableStats.fromMap(statRow);
+          final String key = '${incomingStats.dbName}:${incomingStats.tableName}';
+
+          final TableStats? existingStats = tracker._statsMap[key];
+          if (existingStats != null) {
+            existingStats.rowCount = math.max(existingStats.rowCount, incomingStats.rowCount);
+            if (incomingStats.totalReads > existingStats.totalReads) {
+              existingStats.totalReads = incomingStats.totalReads;
+            }
+            if (incomingStats.totalWrites > existingStats.totalWrites) {
+              existingStats.totalWrites = incomingStats.totalWrites;
+            }
+          } else {
+            tracker._statsMap[key] = incomingStats;
+          }
+        }
+        FluentLog.info('Table Stats Tracker patched successfully', tag: 'FluentEngine:analysis');
+      }
+    } catch (e, s) {
+      FluentLog.error('Live analytics session failed', e, s, tag: 'FluentEngine:analysis');
+    }
+  }
+
   /// Triggers a persistence cascade to write accumulated telemetry statistics to the disk.
   ///
   /// **Workflow:**
@@ -947,67 +1017,34 @@ class FluentEngine {
   /// 4. **Resilience:** If the save operation fails, the dirty flag is restored,
   ///    ensuring the next auto-save cycle will attempt to re-persist the data.
   Future<void> _triggerSaveStats() async {
-    if (_toWorker == null) return;
+    final FluentTableStatsTracker tracker = FluentTableStatsTracker();
+    if (!tracker.isDirty) {
+      return;
+    }
+    if (_queue.any((t) => t.action == FluentDbAction.saveStats)) {
+      FluentLog.debug('Skipping saveStats: Operation already queued', tag: 'FluentEngine:persistence');
+      return;
+    }
 
-    final List<TableStats> currentStats = FluentTableStatsTracker().getAllStats;
+    tracker.clearDirtyFlag();
+
+    final List<TableStats> currentStats = tracker.getAllStats;
     if (currentStats.isEmpty) return;
 
-    // Set dirty flag to false immediately to prevent redundant overlapping calls
     _hasUnsavedChanges = false;
-
-    final Completer<dynamic> completer = Completer<dynamic>();
-    _pendingRequests[_systemId] = completer;
 
     final List<Map<String, dynamic>> payload = currentStats.map((s) => s.buildJson()).toList();
 
-    FluentLog.debug('Synchronizing telemetry to disk', tag: 'FluentEngine:persistence', context: {'statCount': payload.length});
+    final FluentTask persistTask = FluentTask(action: FluentDbAction.saveStats, data: payload, isSystem: true, policy: ExecutionPolicy.background);
 
-    _sendMessageToIsolate(
-      IsolateRequest(
-        cmd: IsolateCmd.saveStats,
-        task: FluentTask(id: _systemId, action: FluentDbAction.none),
-        data: payload,
-      ),
-    );
+    FluentLog.debug('Queueing telemetry synchronization', tag: 'FluentEngine:persistence');
 
     try {
-      await completer.future;
+      await _executeSystemTask(persistTask);
       FluentLog.info('Telemetry successfully synchronized with disk', tag: 'FluentEngine:persistence');
     } catch (e, s) {
       _hasUnsavedChanges = true;
-      FluentLog.error('Failed to persist statistics', e, s, tag: 'FluentEngine:persistence', context: {'error': e.toString()});
-    }
-  }
-
-  /// Triggers a non-blocking background analysis of the database schema and
-  /// performance metrics to optimize future query execution.
-  ///
-  /// **Workflow:**
-  /// 1. **Request Dispatch:** Issues an `analyzeStats` command to the worker isolate.
-  /// 2. **Async Wait:** Uses a [Completer] to suspend execution until the
-  ///    background isolate returns the finalized performance profile.
-  /// 3. **Memory Sync:** Once resolved, the FluentEngine updates the
-  ///    [FluentTableStatsTracker] in-memory state with fresh data.
-  Future<void> _triggerDatabaseAnalysis() async {
-    if (_toWorker == null) return;
-
-    FluentLog.info('Triggering background database analysis cascade', tag: 'FluentEngine:analysis');
-
-    final Completer<dynamic> completer = Completer<dynamic>();
-    _pendingRequests[_systemId] = completer;
-
-    _sendMessageToIsolate(
-      IsolateRequest(
-        cmd: IsolateCmd.analyzeStats,
-        task: FluentTask(id: _systemId, action: FluentDbAction.none),
-      ),
-    );
-
-    try {
-      await completer.future;
-      FluentLog.info('Live analysis completed and applied to RAM memory', tag: 'FluentEngine:analysis');
-    } catch (e, s) {
-      FluentLog.error('Live analytics session failed', e, s, tag: 'FluentEngine:analysis', context: {'error': e.toString()});
+      FluentLog.error('Failed to persist statistics', e, s, tag: 'FluentEngine:persistence');
     }
   }
 
@@ -1041,6 +1078,34 @@ class FluentEngine {
   Future<dynamic> _executeInMain(FluentTask task) async {
     final Stopwatch sw = Stopwatch()..start();
     final String tableName = task.table;
+
+    if (task.isSystem) {
+      try {
+        dynamic systemResult;
+
+        switch (task.action) {
+          case FluentDbAction.analyzeStats:
+            systemResult = await _systemDb.analyzeStats();
+            break;
+
+          case FluentDbAction.saveStats:
+            final payload = task.data as List<dynamic>?;
+            await _systemDb.saveStats(payload);
+            systemResult = true;
+            break;
+
+          default:
+            throw Exception('Unknown system action: ${task.action}');
+        }
+
+        _pendingRequests.remove(task.id)?.complete(systemResult);
+        return systemResult;
+      } catch (e, s) {
+        FluentLog.error('System task execution failed', e, s, tag: 'FluentEngine:system');
+        _pendingRequests.remove(task.id)?.completeError(e);
+        rethrow;
+      }
+    }
 
     try {
       final FluentProvider provider = FluentDb.getProviderByTable(tableName);
@@ -1079,7 +1144,6 @@ class FluentEngine {
 
           FluentTableStatsTracker().registerCascadeSuccess(dbName: task.dbName, tableName: tableName, elapsedMs: elapsedMs, isWrite: true, affectedRows: 1);
 
-          unawaited(_triggerSaveStats());
         } else {
           int finalDelta = 0;
           if (task.action == FluentDbAction.save) finalDelta = 1;
@@ -1214,17 +1278,17 @@ class FluentEngine {
     _chunkAccumulators.remove(id);
 
     // If the task was active (not in queue), reset the worker state to allow next task
-    if (!wasInQueue && _isIsolateWorkerBusy) {
-      _isIsolateWorkerBusy = false;
-      Future.microtask(() => _processNext());
-    }
+    // if (!wasInQueue && _isIsolateWorkerBusy) {
+    //   _isIsolateWorkerBusy = false;
+    //   Future.microtask(() => _processNext());
+    // }
 
-    _sendMessageToIsolate(
-      IsolateRequest(
-        cmd: IsolateCmd.cancel,
-        task: FluentTask(id: id, action: FluentDbAction.none),
-      ),
-    );
+    // _sendMessageToIsolate(
+    //   IsolateRequest(
+    //     cmd: IsolateCmd.cancel,
+    //     task: FluentTask(id: id, action: FluentDbAction.none),
+    //   ),
+    // );
   }
 
   /// Performs a catastrophic recovery of the database isolate.
@@ -1241,10 +1305,10 @@ class FluentEngine {
     FluentLog.warning('Initiating emergency hard reset', tag: 'FluentEngine:lifecycle', hint: 'This operation should only be used as a last resort when the worker isolate is unresponsive.');
 
     // Immediate termination
-    if (_isolateInstance != null) {
-      _isolateInstance!.kill(priority: Isolate.immediate);
-      _isolateInstance = null;
-    }
+    // if (_isolateInstance != null) {
+    //   _isolateInstance!.kill(priority: Isolate.immediate);
+    //   _isolateInstance = null;
+    // }
 
     await _performCleanup(wasEmergency: true);
     FluentLog.warning('Hard reset completed successfully', tag: 'FluentEngine:lifecycle');
@@ -1267,12 +1331,12 @@ class FluentEngine {
   Future<void> shutdown() async {
     FluentLog.info('Initiating shutdown', tag: 'FluentEngine:lifecycle');
 
-    _sendMessageToIsolate(
-      IsolateRequest(
-        cmd: IsolateCmd.terminate,
-        task: FluentTask(id: _systemId, action: FluentDbAction.none),
-      ),
-    );
+    // _sendMessageToIsolate(
+    //   IsolateRequest(
+    //     cmd: IsolateCmd.terminate,
+    //     task: FluentTask(id: _systemId, action: FluentDbAction.none),
+    //   ),
+    // );
 
     await _performCleanup(wasEmergency: false);
     FluentLog.info('Graceful shutdown completed successfully', tag: 'FluentEngine:lifecycle', context: {'isolateTerminated': true});
@@ -1280,8 +1344,8 @@ class FluentEngine {
 
   /// Centralized cleanup logic ensuring state consistency and log reporting.
   Future<void> _performCleanup({required bool wasEmergency}) async {
-    _toWorker = null;
-    _isIsolateWorkerBusy = false;
+    // _toWorker = null;
+    // _isIsolateWorkerBusy = false;
     _isMainWorkerBusy = false;
 
     // Reject pending requests

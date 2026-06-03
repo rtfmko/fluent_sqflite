@@ -100,6 +100,7 @@ class FluentTableStatsTracker {
   /// This method serves as the primary hook for the [FluentEngine] to
   /// report task completion, facilitating real-time performance monitoring.
   void registerSuccess({required FluentTask task, required int elapsedMs, required bool isWrite, int? rows, int? delta}) {
+    if (task.isSystem) return;
     final String key = _makeKeyFromTask(task);
     final TableStats stats = _statsMap.putIfAbsent(key, () => TableStats(task: task));
 

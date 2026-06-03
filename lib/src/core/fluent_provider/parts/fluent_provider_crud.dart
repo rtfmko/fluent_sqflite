@@ -383,10 +383,10 @@ extension FluentProviderCrud<T extends FluentStorable> on FluentProvider<T> {
   Future<T> _rowEnrichmentAndAssembleWorker(Map<String, dynamic> row, FluentTask task) async {
     try {
       // Execute cascading foreign-key resolution and child object tree hydration
-      final Map<String, dynamic> enriched = await _processRow(row, task);
+      final List<Map<String, dynamic>> enrichedList = await _processRowsBatch([row], task);
 
       // Materialize the final strongly-typed data model from the fully hydrated map
-      return _assembleModel(enriched);
+      return _assembleModel(enrichedList.first);
     } catch (e, s) {
       FluentLog.error(
         'Hydration layer failed during singular row enrichment processing',
@@ -792,15 +792,15 @@ extension FluentProviderCrud<T extends FluentStorable> on FluentProvider<T> {
     }
 
     // SCENARIO B: RELATIONAL CASCADE — Table has complex child structures requiring hydration loops
-    // Execute synchronous relational matching constraints and append nested models via the supervisor task context
-    final Map<String, dynamic> enriched = await _processRow(rawRow, task);
+    final List<Map<String, dynamic>> enrichedList = await _processRowsBatch([rawRow], task);
 
     FluentLog.debug(
       'Relational hydration mapping sequence for identity lookup finalized safely',
       tag: '$tableName:pipeline',
       context: {'tableName': tableName, 'taskId': task.id, 'optimizationApplied': 'cascade_enrichment'},
     );
-    return _assembleModel(enriched);
+
+    return _assembleModel(enrichedList.first);
   }
 
   /// Fetches a batch collection of typed objects [T] from [$tableName] satisfying custom query constraints.
