@@ -28,8 +28,10 @@ class ExecutionPolicy {
   /// task (based on [FluentTask.fingerprint]) is already awaiting execution.
   final bool? cancelIfDuplicate;
 
+  final Object? customTag;
+
   /// The [ExecutionPolicy] constructor initializes.
-  const ExecutionPolicy({this.useIsolate = false, this.priority, this.chunkSize, this.timeout, this.cancelIfDuplicate});
+  const ExecutionPolicy({this.useIsolate = false, this.priority, this.chunkSize, this.timeout, this.cancelIfDuplicate, this.customTag});
 
   /// Calculates the optimized batch size for task execution based on the
   /// defined [chunkSize] policy.
@@ -52,7 +54,14 @@ class ExecutionPolicy {
   }
 
   /// Serializes the [ExecutionPolicy] instance into a JSON-compatible map.
-  Map<String, dynamic> toMap() => {'useIsolate': useIsolate, 'priority': priority, 'chunkSize': chunkSize, 'timeoutMs': timeout?.inMilliseconds, 'cancelIfDuplicate': cancelIfDuplicate};
+  Map<String, dynamic> toMap() => {
+    'useIsolate': useIsolate,
+    'priority': priority,
+    'chunkSize': chunkSize,
+    'timeoutMs': timeout?.inMilliseconds,
+    'cancelIfDuplicate': cancelIfDuplicate,
+    'customTag': customTag,
+  };
 
   /// Deserializes a [Map] back into a [ExecutionPolicy] instance.
   factory ExecutionPolicy.fromMap(Map<String, dynamic> map) => ExecutionPolicy(
@@ -61,6 +70,7 @@ class ExecutionPolicy {
     chunkSize: map['chunkSize'] is int ? map['chunkSize'] as int : null,
     timeout: map['timeoutMs'] is int ? Duration(milliseconds: map['timeoutMs'] as int) : null,
     cancelIfDuplicate: map['cancelIfDuplicate'] is bool ? map['cancelIfDuplicate'] as bool : null,
+    customTag: map['customTag'],
   );
 
   /// Defines common pre-configured execution policies for various task patterns.
@@ -107,6 +117,7 @@ class ExecutionPolicy {
       chunkSize: effectiveChunkSize,
       timeout: timeout ?? def.timeout,
       cancelIfDuplicate: cancelIfDuplicate ?? def.cancelIfDuplicate,
+      customTag: customTag ?? def.customTag,
     );
   }
 
@@ -127,17 +138,20 @@ class ExecutionPolicy {
       chunkSize: chunkSize ?? parent.chunkSize,
       timeout: timeout ?? parent.timeout,
       cancelIfDuplicate: cancelIfDuplicate ?? parent.cancelIfDuplicate,
+      customTag: customTag ?? parent.customTag,
     );
   }
 
   /// Creates a copy of this [ExecutionPolicy] with the specified fields replaced.
-  ExecutionPolicy copyWith({bool? useIsolate, int? priority, int? chunkSize, Duration? timeout, bool? spawnDedicatedIsolate, bool? cancelIfDuplicate, int? memoryLimitMb}) => ExecutionPolicy(
-    useIsolate: useIsolate ?? this.useIsolate,
-    priority: priority ?? this.priority,
-    chunkSize: chunkSize ?? this.chunkSize,
-    timeout: timeout ?? this.timeout,
-    cancelIfDuplicate: cancelIfDuplicate ?? this.cancelIfDuplicate,
-  );
+  ExecutionPolicy copyWith({bool? useIsolate, int? priority, int? chunkSize, Duration? timeout, bool? spawnDedicatedIsolate, bool? cancelIfDuplicate, int? memoryLimitMb, Object? customTag}) =>
+      ExecutionPolicy(
+        useIsolate: useIsolate ?? this.useIsolate,
+        priority: priority ?? this.priority,
+        chunkSize: chunkSize ?? this.chunkSize,
+        timeout: timeout ?? this.timeout,
+        cancelIfDuplicate: cancelIfDuplicate ?? this.cancelIfDuplicate,
+        customTag: customTag ?? this.customTag,
+      );
 
   @override
   String toString() {

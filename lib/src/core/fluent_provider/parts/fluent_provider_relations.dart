@@ -52,7 +52,8 @@ extension FluentProviderRelations<T extends FluentStorable> on FluentProvider<T>
   /// [policy] defines prioritization, query collapsing, and concurrency thresholds managed by the coordinator.
   ///
   /// Returns a [Future<void>] that completes successfully once the record and its relational graph are committed.
-  Future<void> updateWithRelations(T item, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<void> updateWithRelations(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) {
+    final ExecutionPolicy effectivePolicy = tag != null ? policy.copyWith(customTag: tag) : policy;
     // Transform model entity into a flattened SQL-compatible map structure
     final Map<String, dynamic> preparedData = _prepareSqlJson(item);
 
@@ -84,7 +85,7 @@ extension FluentProviderRelations<T extends FluentStorable> on FluentProvider<T>
       data: item,
       relations: [preparedData],
       helper: TableHelper(id: id, dataMap: preparedData),
-      policy: policy,
+      policy: effectivePolicy,
     );
 
     FluentLog.debug(

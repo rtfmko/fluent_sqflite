@@ -113,7 +113,12 @@ class _FluentSystemDb {
 
             final TableStats existingStats = statsCacheMap[key] ?? TableStats(dbName: dbName, tableName: tableName, relationsCount: relationsCount);
 
-            existingStats.rowCount = count ?? 0;
+            final int newCount = count ?? 0;
+
+            if (existingStats.rowCount != newCount) {
+              existingStats.rowCount = newCount;
+              updatedStatsToCache.add(existingStats);
+            }
 
             if (!statsCacheMap.containsKey(key)) {
               statsCacheMap[key] = existingStats;

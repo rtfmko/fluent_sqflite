@@ -272,6 +272,43 @@ class FluentDb {
     return incoming;
   }
 
+  /// Subscribes to database modification events (Save, Update, Delete) for a specific model type.
+  ///
+  /// This method provides a reactive interface to track changes in the database.
+  /// It filters the global event stream based on the provided [T] model type,
+  /// optional [tag] for targeted filtering, and specific [actions].
+  ///
+  /// **Example Usage:**
+  /// ```dart
+  /// // Listen for 'save' and 'delete' events on 'Profile' models
+  /// // triggered specifically by the background sync worker.
+  /// FluentDb.onEvent<Profile>(
+  ///   tag: SyncSource.api,
+  ///   actions: [FluentDbAction.save, FluentDbAction.delete]
+  /// ).listen((event) {
+  ///   print('Profile changed via API! Action: ${event.action}');
+  /// });
+  /// ```
+  ///
+  /// Returns a filtered [Stream] of [FluentChangeEvent] objects.
+  static Stream<FluentChangeEvent<T>> onEvent<T extends FluentStorable>({Object? tag, List<FluentDbAction>? actions}) {
+    Stream<FluentChangeEvent<dynamic>> stream = FluentEngine().changeStream;
+
+    if (T != FluentStorable) {
+      stream = stream.where((event) => event.modelType == T);
+    }
+
+    if (tag != null) {
+      stream = stream.where((event) => event.customTag == tag);
+    }
+
+    if (actions != null && actions.isNotEmpty) {
+      stream = stream.where((event) => actions.contains(event.action));
+    }
+
+    return stream.cast<FluentChangeEvent<T>>();
+  }
+
   /// These static convenience methods provide a type-safe interface for performing
   /// CRUD operations through the appropriate `FluentProvider` resolved via the registry.
   ///
@@ -285,8 +322,10 @@ class FluentDb {
   /// ```dart
   /// await FluentDb.saveItem(User(id: 1, name: 'John Doe'), updateIfExist: true);
   /// ```
-  static Future<void> saveItem<T extends FluentStorable>(T item, {bool updateIfExist = false, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().saveItem(item, updateIfExist: updateIfExist, policy: policy);
+  static Future<void> saveItem<T extends FluentStorable>(T item, {bool updateIfExist = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) {
+    final ExecutionPolicy effectivePolicy = tag != null ? policy.copyWith(customTag: tag) : policy;
+    return providerByType<T>().saveItem(item, updateIfExist: updateIfExist, policy: effectivePolicy);
+  }
 
   /// Saves a list of items of type [T] atomically.
   ///
@@ -294,8 +333,10 @@ class FluentDb {
   /// ```dart
   /// await FluentDb.saveItems([user1, user2, user3]);
   /// ```
-  static Future<void> saveItems<T extends FluentStorable>(List<T> items, {bool updateIfExist = false, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().saveItems(items, updateIfExist: updateIfExist, policy: policy);
+  static Future<void> saveItems<T extends FluentStorable>(List<T> items, {bool updateIfExist = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) {
+    final ExecutionPolicy effectivePolicy = tag != null ? policy.copyWith(customTag: tag) : policy;
+    return providerByType<T>().saveItems(items, updateIfExist: updateIfExist, policy: effectivePolicy);
+  }
 
   /// Retrieves a single record of type [T].
   ///
@@ -393,7 +434,10 @@ class FluentDb {
   /// ```dart
   /// await FluentDb.update<User>(updatedUserInstance);
   /// ```
-  static Future<void> update<T extends FluentStorable>(T item, {ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().update(item, policy: policy);
+  static Future<void> update<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) {
+    final ExecutionPolicy effectivePolicy = tag != null ? policy.copyWith(customTag: tag) : policy;
+    return providerByType<T>().update(item, policy: effectivePolicy);
+  }
 
   /// Performs a targeted, partial update on a single field of a record identified by ID.
   ///
@@ -419,7 +463,10 @@ class FluentDb {
   /// ```dart
   /// await FluentDb.delete<User>(userInstance);
   /// ```
-  static Future<void> delete<T extends FluentStorable>(T item, {ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().delete(item, policy: policy);
+  static Future<void> delete<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) {
+    final ExecutionPolicy effectivePolicy = tag != null ? policy.copyWith(customTag: tag) : policy;
+    return providerByType<T>().delete(item, policy: effectivePolicy);
+  }
 
   /// Deletes records matching a specific field value.
   ///
@@ -489,22 +536,29 @@ class FluentDb {
   ///
   /// await FluentDb.saveAllMixed(mixedItems, updateIfExists: true);
   /// ```
-  static Future<void> saveAll<T extends FluentStorable>(List<T> itemsToSave, {bool updateIfExists = false}) async {
+  /// Persists a heterogeneous collection of [FluentStorable] items.
+  static Future<void> saveAll<T extends FluentStorable>(List<T> itemsToSave, {bool updateIfExists = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
     if (itemsToSave.isEmpty) return;
-    final List<Future<void>> tasks = List<Future<void>>.filled(itemsToSave.length, Future.value(), growable: false);
 
-    int index = 0;
-    for (final T entry in itemsToSave) {
-      tasks[index++] = executeTask<FluentStorable, void>(
-        task: FluentTask(
-          action: FluentDbAction.save,
-          data: entry,
-          helper: TableHelper(updateIfExist: updateIfExists),
-        ),
-      );
+    final ExecutionPolicy effectivePolicy = tag != null ? policy.copyWith(customTag: tag) : policy;
+
+    final Map<Type, List<FluentStorable>> groupedItems = {};
+    for (final T item in itemsToSave) {
+      groupedItems.putIfAbsent(item.runtimeType, () => []).add(item);
     }
 
-    await Future.wait(tasks);
+    final List<Future<void>> batchTasks = [];
+
+    for (final MapEntry<Type, List<FluentStorable>> entry in groupedItems.entries) {
+      final Type targetType = entry.key;
+      final List<FluentStorable> typedItems = entry.value;
+
+      final FluentProvider provider = providerForType(targetType);
+
+      batchTasks.add(provider.saveItems(typedItems, updateIfExist: updateIfExists, policy: effectivePolicy));
+    }
+
+    await Future.wait(batchTasks);
   }
 
   /// Dispatches a database task to the background `FluentEngine` for execution.

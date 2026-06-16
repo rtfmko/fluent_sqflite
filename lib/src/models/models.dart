@@ -1,3 +1,4 @@
+export 'fluent_change_event.dart';
 export 'fluent_db_column.dart';
 export 'fluent_db_migration.dart';
 export 'fluent_group.dart';

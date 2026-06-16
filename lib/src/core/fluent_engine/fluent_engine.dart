@@ -87,6 +87,21 @@ class FluentEngine {
   /// Increments and returns the next unique operation ID.
   int get _nextId => ++_idCounter;
 
+  /// Global broadcast bus for all database modification events.
+  ///
+  /// This controller acts as the central hub for dispatching change notifications
+  /// across the application. It is defined as a broadcast stream to allow
+  /// multiple independent listeners (e.g., UI widgets, BLoCs, background services)
+  /// to subscribe to database updates simultaneously.
+  final StreamController<FluentChangeEvent<dynamic>> _changeEventBus = StreamController.broadcast();
+
+  /// The public reactive stream that exposes all database mutations.
+  ///
+  /// Use [FluentDb.onEvent] to subscribe to this stream with type-safe filtering,
+  /// rather than listening to this stream directly. This ensures that your
+  /// listeners only receive events relevant to their specific model types or tags.
+  Stream<FluentChangeEvent<dynamic>> get changeStream => _changeEventBus.stream;
+
   final _FluentSystemDb _systemDb = _FluentSystemDb();
 
   /// Safely pauses the task dispatching queue and suspends execution until the
@@ -439,9 +454,12 @@ class FluentEngine {
       final bool currentIsWrite =
           currentTask.action == FluentDbAction.save ||
           currentTask.action == FluentDbAction.update ||
-          currentTask.action == FluentDbAction.delete ||
+          currentTask.action == FluentDbAction.updateSingleField ||
           currentTask.action == FluentDbAction.updateMultipleFields ||
-          currentTask.action == FluentDbAction.updateSingleField;
+          currentTask.action == FluentDbAction.updateWithRelations ||
+          currentTask.action == FluentDbAction.delete ||
+          currentTask.action == FluentDbAction.deleteBy ||
+          currentTask.action == FluentDbAction.deleteItemsByIds;
 
       // --- STRATEGY A: strictSequential ---
       // Exclusive lock: ensures zero concurrent I/O. Safe for destructive operations.
@@ -1128,9 +1146,23 @@ class FluentEngine {
       final bool isWriteOp =
           task.action == FluentDbAction.save ||
           task.action == FluentDbAction.update ||
-          task.action == FluentDbAction.delete ||
+          task.action == FluentDbAction.updateSingleField ||
           task.action == FluentDbAction.updateMultipleFields ||
-          task.action == FluentDbAction.updateSingleField;
+          task.action == FluentDbAction.updateWithRelations ||
+          task.action == FluentDbAction.delete ||
+          task.action == FluentDbAction.deleteBy ||
+          task.action == FluentDbAction.deleteItemsByIds;
+
+      final bool isStreamOp = task.action == FluentDbAction.save || task.action == FluentDbAction.update || task.action == FluentDbAction.delete || task.action == FluentDbAction.updateWithRelations;
+
+      if (isStreamOp) {
+        try {
+          final FluentProvider<FluentStorable> provider = FluentDb.getProviderByTable(tableName);
+          _changeEventBus.add(FluentChangeEvent(modelType: provider.modelSample.runtimeType, action: task.action, data: result, customTag: task.policy.customTag));
+        } catch (e) {
+          FluentLog.warning('Failed to dispatch change event to reactive stream', tag: 'FluentEngine:stream', context: {'table': tableName, 'action': task.action.name, 'error': e.toString()});
+        }
+      }
 
       // Performance Telemetry: Flag heavy operations
       if (isWriteOp) {
@@ -1143,7 +1175,6 @@ class FluentEngine {
           );
 
           FluentTableStatsTracker().registerCascadeSuccess(dbName: task.dbName, tableName: tableName, elapsedMs: elapsedMs, isWrite: true, affectedRows: 1);
-
         } else {
           int finalDelta = 0;
           if (task.action == FluentDbAction.save) finalDelta = 1;
@@ -1225,7 +1256,15 @@ class FluentEngine {
     final double relationsMultiplier = 1.0 + (stats.relationsCount * 0.25);
 
     // Performance degradation factor: Adjusts weight for high-latency operations
-    final bool isWrite = task.action == FluentDbAction.update || task.action == FluentDbAction.delete || task.action == FluentDbAction.save;
+    final bool isWrite =
+        task.action == FluentDbAction.save ||
+        task.action == FluentDbAction.update ||
+        task.action == FluentDbAction.updateSingleField ||
+        task.action == FluentDbAction.updateMultipleFields ||
+        task.action == FluentDbAction.updateWithRelations ||
+        task.action == FluentDbAction.delete ||
+        task.action == FluentDbAction.deleteBy ||
+        task.action == FluentDbAction.deleteItemsByIds;
 
     final double avgTimeMs = isWrite ? stats.avgWriteTimeMs : stats.avgReadTimeMs;
 
