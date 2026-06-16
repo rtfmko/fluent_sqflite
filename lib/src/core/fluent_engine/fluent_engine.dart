@@ -1049,8 +1049,6 @@ class FluentEngine {
     final List<TableStats> currentStats = tracker.getAllStats;
     if (currentStats.isEmpty) return;
 
-    _hasUnsavedChanges = false;
-
     final List<Map<String, dynamic>> payload = currentStats.map((s) => s.buildJson()).toList();
 
     final FluentTask persistTask = FluentTask(action: FluentDbAction.saveStats, data: payload, isSystem: true, policy: ExecutionPolicy.background);
@@ -1060,6 +1058,7 @@ class FluentEngine {
     try {
       await _executeSystemTask(persistTask);
       FluentLog.info('Telemetry successfully synchronized with disk', tag: 'FluentEngine:persistence');
+      _hasUnsavedChanges = false;
     } catch (e, s) {
       _hasUnsavedChanges = true;
       FluentLog.error('Failed to persist statistics', e, s, tag: 'FluentEngine:persistence');
