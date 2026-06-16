@@ -12,11 +12,10 @@ class FluentChangeEvent<T> {
   /// The type of operation performed on the database (e.g., [FluentDbAction.save]).
   final FluentDbAction action;
 
-  /// The data payload associated with the event.
+  /// The list of items affected by this database operation.
   ///
-  /// For single-item operations, this contains the affected [T] object.
-  /// For bulk operations, this typically contains the `List<T>` of affected items.
-  final T? data;
+  /// Always returns a [List], even if only a single item was saved/deleted.
+  final List<T> items;
 
   /// An optional custom identifier or tag used to filter events.
   ///
@@ -25,12 +24,7 @@ class FluentChangeEvent<T> {
   final Object? customTag;
 
   /// Creates a [FluentChangeEvent] instance.
-  FluentChangeEvent({
-    required this.modelType,
-    required this.action,
-    this.data,
-    this.customTag,
-  });
+  FluentChangeEvent({required this.modelType, required this.action, this.items = const [], this.customTag});
 
   @override
   String toString() => 'ChangeEvent(type: $modelType, action: ${action.name}, tag: $customTag)';

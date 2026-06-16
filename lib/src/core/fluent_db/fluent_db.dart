@@ -306,7 +306,12 @@ class FluentDb {
       stream = stream.where((event) => actions.contains(event.action));
     }
 
-    return stream.cast<FluentChangeEvent<T>>();
+    return stream.map((event) => FluentChangeEvent<T>(
+      modelType: event.modelType,
+      action: event.action,
+      items: event.items.cast<T>(),
+      customTag: event.customTag,
+    ));
   }
 
   /// These static convenience methods provide a type-safe interface for performing

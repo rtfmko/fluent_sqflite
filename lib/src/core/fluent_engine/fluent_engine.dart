@@ -1158,7 +1158,15 @@ class FluentEngine {
       if (isStreamOp) {
         try {
           final FluentProvider<FluentStorable> provider = FluentDb.getProviderByTable(tableName);
-          _changeEventBus.add(FluentChangeEvent(modelType: provider.modelSample.runtimeType, action: task.action, data: result, customTag: task.policy.customTag));
+          List<dynamic> normalizedItems = [];
+
+          if (task.data is List) {
+            normalizedItems = List.from(task.data as List);
+          } else if (task.data != null) {
+            normalizedItems = [task.data];
+          }
+
+          _changeEventBus.add(FluentChangeEvent(modelType: provider.modelSample.runtimeType, action: task.action, items: normalizedItems, customTag: task.policy.customTag));
         } catch (e) {
           FluentLog.warning('Failed to dispatch change event to reactive stream', tag: 'FluentEngine:stream', context: {'table': tableName, 'action': task.action.name, 'error': e.toString()});
         }
