@@ -44,8 +44,9 @@ class TableHelper {
   /// If true, automatically appends a validity constraint (e.g., `is_deleted = 0`) to the query.
   final bool onlyValid;
 
-  /// If true, forces the result set to be ordered by expiration date.
-  final bool? sortByExpireDate;
+  /// Defines the sorting order by expiration date.
+  /// If null, no specific expiration-based ordering is applied.
+  final SortDirection? sortDirection;
 
   /// Custom raw SQL query string to be executed; bypasses standard builder logic.
   final String? sql;
@@ -79,7 +80,7 @@ class TableHelper {
     this.column,
     this.updateIfExist = true,
     this.onlyValid = false,
-    this.sortByExpireDate,
+    this.sortDirection,
     this.multiple = true,
   });
 
@@ -96,7 +97,7 @@ class TableHelper {
     Map<String, dynamic>? dataMap,
     bool? updateIfExist,
     bool? onlyValid,
-    bool? sortByExpireDate,
+    SortDirection? sortDirection,
     String? sql,
     List<Object?>? arguments,
     bool? multiple,
@@ -116,7 +117,7 @@ class TableHelper {
     column: column ?? this.column,
     updateIfExist: updateIfExist ?? this.updateIfExist,
     onlyValid: onlyValid ?? this.onlyValid,
-    sortByExpireDate: sortByExpireDate ?? this.sortByExpireDate,
+    sortDirection: sortDirection ?? this.sortDirection,
     multiple: multiple ?? this.multiple,
   );
 
@@ -136,7 +137,7 @@ class TableHelper {
     'column': column,
     'updateIfExist': updateIfExist,
     'onlyValid': onlyValid,
-    'sortByExpireDate': sortByExpireDate,
+    'sortDirection': sortDirection?.index,
     'multiple': multiple,
   };
 
@@ -156,12 +157,12 @@ class TableHelper {
     column: map['column'] is String ? map['column'] as String : null,
     updateIfExist: map['updateIfExist'] is bool ? map['updateIfExist'] as bool : false,
     onlyValid: map['onlyValid'] is bool ? map['onlyValid'] as bool : false,
-    sortByExpireDate: map['sortByExpireDate'] is bool ? map['sortByExpireDate'] as bool : false,
+    sortDirection: map['sortDirection'] is int ? SortDirection.values.elementAt(map['sortDirection'] as int) : null,
     multiple: map['multiple'] is bool ? map['multiple'] as bool : true,
   );
 
   @override
   String toString() {
-    return 'TableHelper{limit: $limit, offset: $offset, where: $where, whereArgs: $whereArgs, orderBy: $orderBy, id: $id, key: $key, value: $value, dataMap: $dataMap, updateIfExist: $updateIfExist, onlyValid: $onlyValid, sortByExpireDate: $sortByExpireDate, sql: $sql, arguments: $arguments, multiple: $multiple, column: $column}';
+    return 'TableHelper{limit: $limit, offset: $offset, where: $where, whereArgs: $whereArgs, orderBy: $orderBy, id: $id, key: $key, value: $value, dataMap: $dataMap, updateIfExist: $updateIfExist, onlyValid: $onlyValid, sortDirection: $sortDirection, sql: $sql, arguments: $arguments, multiple: $multiple, column: $column}';
   }
 }

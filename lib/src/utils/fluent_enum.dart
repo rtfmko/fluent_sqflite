@@ -407,3 +407,12 @@ enum IsolateStatus {
   /// [IsolateCmd.terminate] command and released system resources.
   terminated,
 }
+
+/// Defines the directional order for sorting database query results.
+enum SortDirection {
+  /// Sorts results in ascending order (smallest to largest).
+  asc,
+
+  /// Sorts results in descending order (largest to smallest).
+  desc,
+}

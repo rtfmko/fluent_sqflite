@@ -365,15 +365,15 @@ class FluentDb {
   ///
   /// **Example:**
   /// ```dart
-  /// final List<Session> activeSessions = await FluentDb.findValidItems<Session>(limit: 5, sortByExpireDate: true);
+  /// final List<Session> activeSessions = await FluentDb.findValidItems<Session>(limit: 5, sortDirection: SortDirection.asc);
   /// ```
   static Future<List<T>> findValidItems<T extends FluentStorable>({
     int? limit,
-    bool? sortByExpireDate,
+    SortDirection? sortDirection,
     int maxDepth = 1,
     bool ignoreLazy = false,
     ExecutionPolicy policy = const ExecutionPolicy(),
-  }) => providerByType<T>().findValidItems(limit: limit, sortByExpireDate: sortByExpireDate, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy);
+  }) => providerByType<T>().findValidItems(limit: limit, sortDirection: sortDirection, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy);
 
   /// Performs a lookup based on a specific property key and value.
   ///

@@ -456,7 +456,7 @@ extension FluentProviderCrud<T extends FluentStorable> on FluentProvider<T> {
   /// relational parameters into a unified [FluentTask] before passing it to the thread-pool router.
   ///
   /// [limit] defines the maximum upper bounds constraint for returned database entries. Pass `null` for unlimited rows.
-  /// [sortByExpireDate] flags the underlying query builder to inject explicit chronological order constraints.
+  /// [sortDirection] defines the sorting order by expiration date.
   /// [maxDepth] determines the deep-linking threshold when traversing nested relational child models.
   /// [ignoreLazy] overrides proxy patterns to immediately evaluate related sub-tables where applicable.
   /// [policy] defines prioritization, query collapsing, and concurrency controls managed by the coordinator.
@@ -467,20 +467,20 @@ extension FluentProviderCrud<T extends FluentStorable> on FluentProvider<T> {
   /// ```dart
   /// final activeVouchers = await voucherRepository.findValidItems(
   ///   limit: 10,
-  ///   sortByExpireDate: true,
+  ///   sortDirection: SortDirection.asc,
   ///   maxDepth: 1,
   ///   policy: const ExecutionPolicy(cancelIfDuplicate: true), // Enable query collapsing protection
   /// );
   /// ```
   @internal
-  Future<List<T>> findValidItems({int? limit, bool? sortByExpireDate, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<List<T>> findValidItems({int? limit, SortDirection? sortDirection, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) {
     FluentLog.debug(
       'Initiating localized query pipeline for unexpired validation row selection',
       tag: '$tableName:operation',
       context: {
         'tableName': tableName,
         'limit': limit ?? 'unlimited',
-        'sortByExpireDate': sortByExpireDate,
+        'sortDirection': sortDirection,
         'maxDepth': maxDepth,
         'ignoreLazy': ignoreLazy,
         'hasCustomPolicy': policy != const ExecutionPolicy(),
@@ -493,7 +493,7 @@ extension FluentProviderCrud<T extends FluentStorable> on FluentProvider<T> {
       dbName: dbName,
       maxDepth: maxDepth,
       ignoreLazy: ignoreLazy,
-      helper: TableHelper(limit: limit, multiple: true, sortByExpireDate: sortByExpireDate),
+      helper: TableHelper(limit: limit, multiple: true, sortDirection: sortDirection),
       policy: policy,
     );
 
@@ -510,7 +510,7 @@ extension FluentProviderCrud<T extends FluentStorable> on FluentProvider<T> {
   ///
   /// Dispatches structured operational logging maps via [FluentLog.debug] or [FluentLog.error].
   Future<List<T>> _executeFindValidItemsTaskOnMain(FluentTask task) async {
-    final bool? sortByExpireDate = task.helper?.sortByExpireDate;
+    final SortDirection? sortDirection = task.helper?.sortDirection;
     final int? limit = task.helper?.limit;
     final int now = DateTime.now().millisecondsSinceEpoch;
 
@@ -520,14 +520,12 @@ extension FluentProviderCrud<T extends FluentStorable> on FluentProvider<T> {
     FluentLog.debug(
       'Executing Main-thread unexpired validation selection routine',
       tag: '$tableName:pipeline',
-      context: {'tableName': tableName, 'taskId': task.id, 'limit': limit ?? 'unlimited', 'expiryColumn': expiryCol, 'timestampThreshold': now, 'sortByExpireDate': sortByExpireDate},
+      context: {'tableName': tableName, 'taskId': task.id, 'limit': limit ?? 'unlimited', 'expiryColumn': expiryCol, 'timestampThreshold': now, 'sortDirection': sortDirection},
     );
 
     try {
-      String? orderBy;
-      if (sortByExpireDate != null) {
-        orderBy = sortByExpireDate ? '$expiryCol ASC' : '$expiryCol DESC';
-      }
+      final String? orderBy = sortDirection != null ? '$expiryCol ${sortDirection.name.toUpperCase()}' : null;
+
       // Execute the low-level raw query constraints directly against the database driver
       final List<Map<String, dynamic>> result = await executor.query(tableName, where: '$expiryCol IS NULL OR $expiryCol > ?', whereArgs: [now], limit: limit, orderBy: orderBy);
 
