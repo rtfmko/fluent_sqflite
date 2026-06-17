@@ -369,7 +369,7 @@ class FluentDb {
   /// ```
   static Future<List<T>> findValidItems<T extends FluentStorable>({
     int? limit,
-    bool sortByExpireDate = false,
+    bool? sortByExpireDate,
     int maxDepth = 1,
     bool ignoreLazy = false,
     ExecutionPolicy policy = const ExecutionPolicy(),

@@ -45,7 +45,7 @@ class TableHelper {
   final bool onlyValid;
 
   /// If true, forces the result set to be ordered by expiration date.
-  final bool sortByExpireDate;
+  final bool? sortByExpireDate;
 
   /// Custom raw SQL query string to be executed; bypasses standard builder logic.
   final String? sql;
@@ -79,7 +79,7 @@ class TableHelper {
     this.column,
     this.updateIfExist = true,
     this.onlyValid = false,
-    this.sortByExpireDate = false,
+    this.sortByExpireDate,
     this.multiple = true,
   });
 

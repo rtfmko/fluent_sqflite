@@ -473,7 +473,7 @@ extension FluentProviderCrud<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<List<T>> findValidItems({int? limit, bool sortByExpireDate = false, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<List<T>> findValidItems({int? limit, bool? sortByExpireDate, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) {
     FluentLog.debug(
       'Initiating localized query pipeline for unexpired validation row selection',
       tag: '$tableName:operation',
@@ -510,7 +510,7 @@ extension FluentProviderCrud<T extends FluentStorable> on FluentProvider<T> {
   ///
   /// Dispatches structured operational logging maps via [FluentLog.debug] or [FluentLog.error].
   Future<List<T>> _executeFindValidItemsTaskOnMain(FluentTask task) async {
-    final bool sortByExpireDate = task.helper?.sortByExpireDate ?? false;
+    final bool? sortByExpireDate = task.helper?.sortByExpireDate;
     final int? limit = task.helper?.limit;
     final int now = DateTime.now().millisecondsSinceEpoch;
 
@@ -524,8 +524,10 @@ extension FluentProviderCrud<T extends FluentStorable> on FluentProvider<T> {
     );
 
     try {
-      final String? orderBy = sortByExpireDate ? '$expiryCol ASC' : null;
-
+      String? orderBy;
+      if (sortByExpireDate != null) {
+        orderBy = sortByExpireDate ? '$expiryCol ASC' : '$expiryCol DESC';
+      }
       // Execute the low-level raw query constraints directly against the database driver
       final List<Map<String, dynamic>> result = await executor.query(tableName, where: '$expiryCol IS NULL OR $expiryCol > ?', whereArgs: [now], limit: limit, orderBy: orderBy);
 
