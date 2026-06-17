@@ -249,7 +249,7 @@ class FluentTask {
         w += 80; // Penalty for lacking LIMIT: High risk of large result sets
       }
 
-      if (h.sortByExpireDate || h.orderBy != null) {
+      if (h.sortByExpireDate != null || h.orderBy != null) {
         w += 30; // Sort operations require extra memory/CPU (temp tables)
       }
 
