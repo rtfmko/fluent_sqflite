@@ -215,8 +215,6 @@ abstract class FluentStorable {
     // Collections are serialized as TEXT/JSON
     if (value is List || value is Map) return FluentDbColumn.text(key);
 
-    FluentLog.warning('Unknown type for "$key" (${value.runtimeType}). Adding to diagnostics...', tag: 'FluentStorable:inferColumn', context: {'field': key, 'detectedType': value.runtimeType.toString()});
-
     throw FluentSchemaException(
       modelName: runtimeType.toString(),
       columnName: key,
