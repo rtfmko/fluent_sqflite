@@ -168,7 +168,7 @@ class SystemStatsProvider extends FluentProvider<TableStats> {
     try {
       await batch.commit(noResult: true);
 
-      FluentLog.info('Successfully persisted ${statsList.length} telemetry entries to disk.', tag: 'TableStats:persist');
+      FluentLog.debug('Successfully persisted ${statsList.length} telemetry entries to disk.', tag: 'TableStats:persist');
     } catch (e, s) {
       FluentLog.error('Failed to persist telemetry batch.', e, s, tag: 'TableStats:persist', hint: 'Check database connectivity or disk write permissions.');
       rethrow;

@@ -195,6 +195,13 @@ class FluentTableStatsTracker {
     FluentLog.debug('Dirty flag cleared.', tag: 'FluentTableStats:cleanup');
   }
 
+  /// Marks the stats tracker as 'dirty', indicating that pending changes
+  /// need to be persisted to the system storage.
+  void markAsDirty() {
+    _isDirty = true;
+    FluentLog.debug('Stats marked as dirty. Pending changes queued for next sync.', tag: 'FluentTableStats:dirty');
+  }
+
   /// Generates a formatted ASCII diagnostic report for a database table.
   ///
   /// This method performs an on-demand reconciliation of current [TableStats]

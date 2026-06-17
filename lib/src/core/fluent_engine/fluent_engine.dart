@@ -81,9 +81,6 @@ class FluentEngine {
   /// Periodic timer for triggering maintenance tasks or telemetry flush cycles.
   Timer? _saveTimer;
 
-  /// Dirty-state flag indicating if there are telemetry metrics awaiting persistence.
-  bool _hasUnsavedChanges = false;
-
   /// Increments and returns the next unique operation ID.
   int get _nextId => ++_idCounter;
 
@@ -347,7 +344,6 @@ class FluentEngine {
   /// 4. If all parameters are equal, FIFO order is preserved by placing the
   ///    new task after existing ones.
   void _enqueue(FluentTask task) {
-    _hasUnsavedChanges = true;
 
     // Calculate execution weight if not already assigned
     if (task.executionWeight == 0) {
@@ -793,8 +789,6 @@ class FluentEngine {
       } else {
         tracker.registerSuccess(task: response.task!, elapsedMs: response.executionTime, isWrite: isWriteAction, rows: response.totalRows);
       }
-
-      _hasUnsavedChanges = true;
     }
 
     _processNext();
@@ -965,7 +959,7 @@ class FluentEngine {
   void _startAutoSaveTimer() {
     _saveTimer?.cancel();
     _saveTimer = Timer.periodic(_saveInterval, (timer) async {
-      if (_hasUnsavedChanges) {
+      if (FluentTableStatsTracker().isDirty) {
         FluentLog.debug('Auto-save interval reached: Flushing pending stats', tag: 'FluentEngine:persistence');
 
         await _triggerSaveStats();
@@ -1057,10 +1051,9 @@ class FluentEngine {
 
     try {
       await _executeSystemTask(persistTask);
-      FluentLog.info('Telemetry successfully synchronized with disk', tag: 'FluentEngine:persistence');
-      _hasUnsavedChanges = false;
+      FluentLog.debug('Telemetry successfully synchronized with disk', tag: 'FluentEngine:persistence');
     } catch (e, s) {
-      _hasUnsavedChanges = true;
+      tracker.markAsDirty();
       FluentLog.error('Failed to persist statistics', e, s, tag: 'FluentEngine:persistence');
     }
   }
@@ -1197,8 +1190,6 @@ class FluentEngine {
 
         FluentTableStatsTracker().registerCascadeSuccess(dbName: task.dbName, tableName: tableName, elapsedMs: elapsedMs, isWrite: false, affectedRows: finalRows);
       }
-
-      _hasUnsavedChanges = true;
 
       _pendingRequests.remove(task.id)?.complete(result);
 

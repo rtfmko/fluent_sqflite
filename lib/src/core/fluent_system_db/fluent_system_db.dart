@@ -68,7 +68,7 @@ class _FluentSystemDb {
         }).toList();
 
         await _systemStatsProvider.saveStatsBatch(_systemDb!, statsToSave);
-        FluentLog.info('Synchronized ${statsToSave.length} table telemetry matrix profiles to system disk.', tag: 'FluentSystemDb:saveStats');
+        FluentLog.debug('Synchronized ${statsToSave.length} table telemetry matrix profiles to system disk.', tag: 'FluentSystemDb:saveStats');
       }
     } catch (e, st) {
       FluentLog.error('ERROR: Synchronization of statistics to disk failed.', e, st);
