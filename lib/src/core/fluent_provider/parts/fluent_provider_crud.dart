@@ -509,7 +509,8 @@ extension FluentProviderCrud<T extends FluentStorable> on FluentProvider<T> {
   /// * Triggers chunked multi-tier data structure worker routines if sub-relation tables must be resolved.
   ///
   /// Dispatches structured operational logging maps via [FluentLog.debug] or [FluentLog.error].
-  Future<List<T>> _executeFindValidItemsTaskOnMain(FluentTask task, {bool sortByExpireDate = false}) async {
+  Future<List<T>> _executeFindValidItemsTaskOnMain(FluentTask task) async {
+    final bool sortByExpireDate = task.helper?.sortByExpireDate ?? false;
     final int? limit = task.helper?.limit;
     final int now = DateTime.now().millisecondsSinceEpoch;
 
