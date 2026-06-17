@@ -337,7 +337,9 @@ extension FluentProviderMapper<T extends FluentStorable> on FluentProvider<T> {
       finalSqlJson[FluentDbColumn.systemMetadata().name] = jsonEncode(typeMetadata);
     }
 
-    final int? expiry = item.expiryDate?.millisecondsSinceEpoch;
+    final DateTime? effectiveExpiryDate = item.expiryDate ?? (item.expiryDuration != null ? DateTime.now().add(item.expiryDuration!) : null);
+
+    final int? expiry = effectiveExpiryDate?.millisecondsSinceEpoch;
     if (expiry != null) {
       finalSqlJson[modelSample.expiryColumn] = expiry;
     }
