@@ -353,6 +353,10 @@ enum FluentDbAction {
 
   /// Permanently and forcefully removes all soft-deleted records from the table, bypassing retention policies.
   forcePurgeSoftDeleted,
+
+  /// A system-level broadcast indicating that the entire database has been wiped.
+  /// UI listeners should intercept this action to clear their local state (e.g., set lists to empty).
+  wipeAll,
 }
 
 /// Represents the computational or relational complexity of a specific database table.

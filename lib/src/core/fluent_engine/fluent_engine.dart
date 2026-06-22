@@ -280,6 +280,15 @@ class FluentEngine {
     return executionFuture;
   }
 
+  /// Injects a system-level event directly into the reactive stream without
+  /// performing any database I/O. Useful for broadcasting app-wide state resets.
+  void broadcastSystemAction(FluentDbAction action, {required Type modelType}) {
+    if (!_changeEventBus.isClosed) {
+      _changeEventBus.add(FluentChangeEvent(modelType: modelType, action: action, items: []));
+      FluentLog.debug('System event broadcasted', tag: 'FluentEngine:broadcast', context: {'action': action.name, 'model': modelType.toString()});
+    }
+  }
+
   /// Prepares and submits a database task into the execution pipeline.
   ///
   /// **Workflow:**

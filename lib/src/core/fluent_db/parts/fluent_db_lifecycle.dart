@@ -405,6 +405,13 @@ extension FluentDbLifecycle on FluentDb {
   Future<void> destroyAllDatabases() async {
     FluentLog.warning('Initiating total data wipe. All databases will be destroyed.', tag: 'FluentDb:destroyAll');
 
+    for (final Type modelType in _providers.keys) {
+      FluentEngine().broadcastSystemAction(FluentDbAction.wipeAll, modelType: modelType);
+    }
+
+    // Added delay for UI to render new states
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
     final Set<Database> uniqueDbs = _providers.values.map((p) => p.db).where((db) => db.isOpen).toSet();
     final List<String> pathsToDelete = uniqueDbs.map((db) => db.path).toList();
 
@@ -422,6 +429,23 @@ extension FluentDbLifecycle on FluentDb {
     await FluentEngine().destroy();
 
     FluentLog.info('Total data wipe completed successfully. Engine is reset.', tag: 'FluentDb:destroyAll');
+  }
+
+  /// Performs a complete wipe of all data, notifies the UI to clear its state,
+  /// and then immediately re-initializes the database engine using the last known configuration.
+  ///
+  /// This is the recommended method for handling "User Logout" scenarios, ensuring
+  /// that no previous user's data remains in memory or on disk, while leaving
+  /// the app ready for a new user to log in.
+  Future<void> destroyAllDatabasesAndRestart({List<FluentGroup> Function(List<FluentGroup> currentConfig)? updateConfig}) async {
+    FluentLog.info('Executing Wipe & Restart sequence...', tag: 'FluentDb:wipeAndRestart');
+
+    await destroyAllDatabases();
+
+    FluentLog.debug('Re-initializing engine with clean state', tag: 'FluentDb:wipeAndRestart');
+    await restart(updateConfig: updateConfig);
+
+    FluentLog.info('Wipe & Restart sequence completed successfully.', tag: 'FluentDb:wipeAndRestart');
   }
 
   /// Permanently removes a specific database file from the file system.
