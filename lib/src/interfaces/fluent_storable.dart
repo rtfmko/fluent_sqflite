@@ -13,25 +13,107 @@ import '../../fluent_sqflite.dart';
 /// relationship management, and data lifecycle tracking (expiry).
 abstract class FluentStorable {
   /// The column name used to track record expiration, default is "expiry_date".
-  final String expiryColumn = "expiry_date";
+  ///
+  /// This field enables the engine to automatically identify and prune
+  /// expired records based on your defined business logic (e.g., cache TTL,
+  /// temporary sessions, or expiring feature flags).
+  ///
+  /// ### Usage Example:
+  /// ```dart
+  /// // Override to specify a custom column for TTL tracking
+  /// @override
+  /// String get expiryColumn => "session_expires_at";
+  /// ```
+  String get expiryColumn => "expiry_date";
 
   /// Internal cache mapping model [Type]s to their resolved [FluentDbColumn] schema.
   static final Map<Type, List<FluentDbColumn>> _schemaCache = {};
 
   /// Returns the name of the primary key field. Defaults to 'id'.
+  ///
+  /// Override this method in your [FluentStorable] model if your database table
+  /// uses a non-standard primary key column name.
+  ///
+  /// ### Usage Example:
+  /// ```dart
+  /// class User extends FluentStorable {
+  ///   // If your table uses 'user_uuid' instead of 'id'
+  ///   @override
+  ///   String getPrimaryKeyName() => 'user_uuid';
+  /// }
+  /// ```
   String getPrimaryKeyName() => 'id';
 
+  /// Retrieves the physical value of the primary key for this instance.
+  ///
+  /// **Automatic Fallback:** By default, this dynamically extracts the value
+  /// using `buildJson()[getPrimaryKeyName()]`. This provides maximum convenience
+  /// without requiring manual boilerplate in every model.
+  ///
+  /// **Performance Tip:** For high-frequency operations (like bulk deletes or
+  /// mass updates), override this getter in your model to return the ID directly
+  /// (e.g., `=> id;`). This bypasses JSON serialization and achieves O(1) zero-allocation performance.
+  dynamic get primaryKeyValue {
+    final Map<String, dynamic> json = buildJson();
+    return json[getPrimaryKeyName()];
+  }
+
   /// Provides a mapping for Enum fields to ensure proper database serialization.
+  ///
+  /// This map tells the [FluentProvider] which [Enum] type corresponds to each
+  /// database column, enabling automatic conversion between database values
+  /// (int or string) and Dart [Enum] instances.
+  ///
+  /// ### Usage Example:
+  /// ```dart
+  /// enum UserStatus { active, inactive, banned }
+  /// enum UserRole { admin, editor, guest }
+  ///
+  /// class User extends FluentStorable {
+  ///   @override
+  ///   Map<String, List<Enum>> get enumValues => {
+  ///     'status': UserStatus.values,
+  ///     'role': UserRole.values,
+  ///   };
+  /// }
+  /// ```
+  ///
+  /// **Note:** Ensure that `tableConfig.storeEnumsAsNames` matches your
+  /// database schema strategy. If `true`, the engine expects and stores
+  /// string representations (e.g., 'active'). If `false` (default), it
+  /// uses the enum index (e.g., `0`).
   Map<String, List<Enum>> get enumValues => {};
 
   /// Defines columns that should be manually included in the schema, overriding
   /// automatic inference or adding fields not present in `buildJson()`.
+  ///
+  /// This is useful for columns managed exclusively by database triggers,
+  /// default value constraints, or legacy fields that you do not want to map
+  /// to your Dart entity class.
+  ///
+  /// ### Usage Example:
+  /// ```dart
+  /// @override
+  /// List<FluentDbColumn> get missingColumns => [
+  ///   // Include a column that is populated by a SQLite trigger
+  ///   FluentDbColumn(
+  ///     name: 'last_modified_timestamp',
+  ///     type: FluentDbDataType.integer,
+  ///     isNullable: false,
+  ///     defaultValue: 'CURRENT_TIMESTAMP',
+  ///   ),
+  ///   // Include a hidden indexing column
+  ///   FluentDbColumn.text('search_vector_idx'),
+  /// ];
+  /// ```
   List<FluentDbColumn> get missingColumns => [];
 
   /// Stores internal file-system or synchronization metadata.
+  @internal
   final Map<String, dynamic> fsMetadataInternal = {};
 
   /// Tracks relationship keys that have not yet been fetched from the database.
+  @internal
   final Set<String> unloadedRelations = {};
 
   /// Checks if a field has been loaded into memory.
@@ -44,12 +126,37 @@ abstract class FluentStorable {
   R? getDynamicValue<R>(String key) => _dynamicStore[key] as R?;
 
   /// List of [FluentDbMigration] objects associated with this model's schema evolution.
-  List<FluentDbMigration> migrations = [];
+  ///
+  /// Override this getter to define incremental structural changes to your database table.
+  /// The [FluentDb] orchestrator will automatically iterate through these definitions,
+  /// applying new columns and executing custom SQL commands to keep the schema in sync.
+  ///
+  /// ### Usage Example:
+  /// ```dart
+  /// @override
+  /// List<FluentDbMigration> get migrations => [
+  ///   // Migration step for version 2: Adding new metadata columns
+  ///   FluentDbMigration(
+  ///     columns: [
+  ///       FluentDbColumn(name: 'age', type: FluentDbDataType.integer, isNotNull: false),
+  ///       FluentDbColumn(name: 'bio', type: FluentDbDataType.text, isNotNull: true),
+  ///     ],
+  ///   ),
+  /// ];
+  /// ```
+  List<FluentDbMigration> get migrations => const [];
 
   /// The timestamp when this record expires.
+  ///
+  /// If set, the [FluentEngine] will automatically filter or prune this
+  /// record once the current time exceeds this value.
   DateTime? expiryDate;
 
   /// The duration after which this record should be considered expired.
+  ///
+  /// Override this getter to define a default Time-To-Live (TTL) for instances
+  /// of this model. When initializing a new record, the engine can use this
+  /// to automatically calculate the [expiryDate].
   Duration? expiryDuration;
 
   /// Internal storage for loaded relational data.
@@ -73,6 +180,7 @@ abstract class FluentStorable {
   ///
   /// This is useful for UI state, calculated properties, or transient data
   /// that should exist on the model instance but not in the schema.
+  @internal
   void setDynamicField(String key, dynamic value) {
     _dynamicStore[key] = value;
     FluentLog.debug('Dynamic field updated', tag: 'FluentStorable:setDynamic', context: {'key': key});
@@ -82,6 +190,7 @@ abstract class FluentStorable {
   ///
   /// The [FluentProvider] will use this to track which relationships need to be
   /// fetched on-demand when accessed by the application.
+  @internal
   void setUnloaded(List<String> keys) {
     unloadedRelations.addAll(keys);
     FluentLog.debug('Relations marked as unloaded', tag: 'FluentStorable:setUnloaded', context: {'keys': keys.join(', ')});
@@ -91,6 +200,7 @@ abstract class FluentStorable {
   ///
   /// This is typically called by the [FluentProvider] after a lazy-load operation
   /// successfully fetches the related model from the database.
+  @internal
   void setRelation(String key, dynamic data) {
     _extras[key] = data;
     FluentLog.debug('Relation injected', tag: 'FluentStorable:setRelation', context: {'key': key});
@@ -100,6 +210,7 @@ abstract class FluentStorable {
   ///
   /// Useful for tracking internal synchronization state or foreign key references
   /// that are not part of the primary model's data payload.
+  @internal
   void injectRelationId(String key, dynamic value) {
     fsMetadataInternal[key] = value;
     FluentLog.debug('Internal relation ID injected', tag: 'FluentStorable:injectRelation', context: {'key': key});
@@ -167,7 +278,11 @@ abstract class FluentStorable {
 
     final List<FluentDbColumn> finallySchema = uniqueColumns.values.toList();
 
-    FluentLog.debug('Schema CREATED for $currentType.', tag: 'FluentStorable:tableSchema', context: {'model': currentType.toString(), 'columns': finallySchema.map((c) => "${c.name}(${c.type.name})").join(', ')});
+    FluentLog.debug(
+      'Schema CREATED for $currentType.',
+      tag: 'FluentStorable:tableSchema',
+      context: {'model': currentType.toString(), 'columns': finallySchema.map((c) => "${c.name}(${c.type.name})").join(', ')},
+    );
 
     _schemaCache[currentType] = finallySchema;
     return finallySchema;

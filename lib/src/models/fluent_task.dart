@@ -11,7 +11,7 @@ part of '../core/fluent_sqlite_internal.dart';
 /// and identity) required to execute the operation safely across isolate boundaries.
 class FluentTask {
   /// Unique identifier for the task; used for tracking, status updates, and cancellation.
-  int id;
+  final int id;
 
   /// The target table name for this operation.
   final String table;
@@ -115,6 +115,12 @@ class FluentTask {
     policy: policy ?? this.policy,
   );
 
+  /// Indicates whether this operation performs a write action on the database.
+  bool get isWriteOp => action.isWriteOp;
+
+  /// Indicates whether this operation supports data streaming functionality.
+  bool get isStreamOp => action.isStreamOp;
+
   /// Serializes the [FluentTask] instance into a JSON-compatible map.
   Map<String, dynamic> toMap() => {
     'id': id,
@@ -198,6 +204,7 @@ class FluentTask {
       case FluentDbAction.exists:
       case FluentDbAction.updateSingleField:
       case FluentDbAction.rawGetItem:
+      case FluentDbAction.restore:
         w += 15; // O(1) or O(log N) index lookups
         break;
 
@@ -209,6 +216,8 @@ class FluentTask {
       case FluentDbAction.updateMultipleFields:
       case FluentDbAction.delete:
       case FluentDbAction.deleteBy:
+      case FluentDbAction.hardDelete:
+      case FluentDbAction.hardDeleteBy:
         w += 35;
         break;
 
@@ -218,6 +227,7 @@ class FluentTask {
       case FluentDbAction.rawGetItems:
       case FluentDbAction.save:
       case FluentDbAction.saveStats:
+      case FluentDbAction.findDeletedItems:
         w += 60; // Heavier I/O or multi-step CRUD pipelines
         break;
 
@@ -230,7 +240,13 @@ class FluentTask {
       case FluentDbAction.deleteItemsByIds:
       case FluentDbAction.clearTable:
       case FluentDbAction.clearExpired:
-        w += 100; // Bulk modifications, heavy impact
+      case FluentDbAction.hardDeleteItemsByIds:
+      case FluentDbAction.purgeSoftDeleted:
+      case FluentDbAction.forcePurgeSoftDeleted:
+      case FluentDbAction.restoreItemsByIds:
+      case FluentDbAction.updateAll:
+      case FluentDbAction.updateMultipleFieldsByIds:
+        w += 100; // Bulk modifications and mass table sweeps
         break;
 
       case FluentDbAction.execute:

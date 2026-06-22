@@ -33,9 +33,10 @@ extension FluentDbLifecycle on FluentDb {
   /// 3. **Validation:** Checks schema integrity and performs topological sorting for dependency-safe creation.
   /// 4. **Persistence:** Initializes SQLite instances and synchronizes schema evolution.
   /// 5. **Coordination:** Spawns the [FluentEngine] for background processing.
+  /// 6. **Maintenance:** Triggers an initial global purge of soft-deleted records.
   ///
   /// [isRetry] acts as a safety guard to prevent infinite loops during recovery in dev mode.
-  Future<void> init(Iterable<FluentGroup> groups, {bool isDev = false, bool isRetry = false}) async {
+  Future<void> init(Iterable<FluentGroup> groups, {Duration? purgeDuration, bool isDev = false, bool isRetry = false}) async {
     if (_isInitialized) return;
 
     final Map<String, FluentGroup> uniqueGroupsMap = {};
@@ -61,7 +62,11 @@ extension FluentDbLifecycle on FluentDb {
     }
 
     FluentDb._lastConfig = activeGroups;
-    isDevMod = isDev;
+    _isDevMod = isDev;
+
+    if (purgeDuration != null) {
+      FluentDb._softDeleteRetentionPeriod = purgeDuration;
+    }
 
     final Map<String, String> dbPaths = {};
     final Map<String, SQLitePerformanceConfig> performanceConfigs = {};
@@ -84,7 +89,7 @@ extension FluentDbLifecycle on FluentDb {
           if (dao case final FluentRelationsMixin relDao) {
             FluentLog.debug('Linking relations for ${dao.tableName}', tag: 'FluentDb:init');
 
-            relDao.syncRelations.forEach((targetType, relation) {
+            relDao.resolvedRelations.forEach((targetType, relation) {
               final Type oldType = relation.modelType;
               relation.bindType(targetType);
               if (oldType != relation.modelType) {
@@ -106,7 +111,7 @@ extension FluentDbLifecycle on FluentDb {
 
           if (dao case final FluentRelationsMixin relDao) {
             FluentLog.debug('Provider finalized', tag: 'FluentDb:init', context: {'table': dao.tableName, 'incomingRelations': relDao.incomingRelations.length});
-            relationsManifest[dao.tableName] = relDao.syncRelations.length;
+            relationsManifest[dao.tableName] = relDao.resolvedRelations.length;
           } else {
             relationsManifest[dao.tableName] = 0;
           }
@@ -155,7 +160,7 @@ extension FluentDbLifecycle on FluentDb {
           context: {'dbName': group.dbName, 'isRetry': isRetry},
         );
 
-        if (isDevMod && !isRetry) {
+        if (_isDevMod && !isRetry) {
           FluentLog.warning(
             'DevMode: Recreating database "${group.dbName}"...',
             tag: 'FluentDb:init',
@@ -173,7 +178,7 @@ extension FluentDbLifecycle on FluentDb {
     final Map<String, List<Map<String, dynamic>>> globalRelationMap = {};
 
     for (final FluentRelationsMixin relDao in _providers.values.whereType<FluentRelationsMixin>()) {
-      final Map<Type, FluentDbRelation> syncRels = relDao.syncRelations;
+      final Map<Type, FluentDbRelation> syncRels = relDao.resolvedRelations;
       if (syncRels.isEmpty) continue;
 
       final List<Map<String, dynamic>> tableRelationsList = [];
@@ -209,6 +214,8 @@ extension FluentDbLifecycle on FluentDb {
 
     _isInitialized = true;
     FluentLog.info('Registry: Initialization complete.', tag: 'FluentDb:init');
+
+    unawaited(_purgeSoftDeletedGlobal());
   }
 
   /// Performs a topological sort of [providers] to ensure parent-child dependencies
@@ -243,7 +250,7 @@ extension FluentDbLifecycle on FluentDb {
       FluentLog.debug('Visiting provider', tag: 'FluentDb:getSorted', context: {'table': provider.tableName});
 
       if (provider is FluentRelationsMixin) {
-        final Map<Type, FluentDbRelation> relations = provider.syncRelations;
+        final Map<Type, FluentDbRelation> relations = provider.resolvedRelations;
         for (final Type targetType in relations.keys) {
           final targetProvider = typeToProvider[targetType];
           if (targetProvider != null) visit(targetProvider);
@@ -274,7 +281,7 @@ extension FluentDbLifecycle on FluentDb {
   void _verifyAndFixIntegrity(FluentProvider dao) {
     if (dao is! FluentRelationsMixin) return;
 
-    final Map<Type, FluentDbRelation> relations = dao.syncRelations;
+    final Map<Type, FluentDbRelation> relations = dao.resolvedRelations;
 
     FluentLog.debug('Checking integrity for DAO', tag: 'FluentDb:verifyAndFix', context: {'table': dao.tableName});
 
@@ -342,7 +349,7 @@ extension FluentDbLifecycle on FluentDb {
 
     final List<FluentGroup> configToUse = updateConfig != null ? updateConfig(List.from(FluentDb._lastConfig ?? [])) : FluentDb._lastConfig ?? [];
     await closeAll();
-    await init(configToUse, isDev: isDevMod);
+    await init(configToUse, isDev: _isDevMod);
   }
 
   /// Hot-swaps the performance configuration for the database associated with the provided provider type.
@@ -363,14 +370,16 @@ extension FluentDbLifecycle on FluentDb {
 
   /// Gracefully shuts down all active database connections and resets the registry state.
   ///
+  /// [dbs] An optional set of specific databases to close. If not provided,
+  /// all currently open databases in the registry will be shut down.
   /// This method performs the following steps:
   /// 1. **De-duplication:** Identifies unique open database connections from all providers.
   /// 2. **Teardown:** Safely closes each connection to prevent file corruption or handle leaks.
   /// 3. **Reset:** Clears all registered providers and sets the initialization flag to false.
-  Future<void> closeAll() async {
+  Future<void> closeAll({Set<Database>? dbs}) async {
     FluentLog.debug('Closing all database connections...', tag: 'FluentDb:close');
 
-    final Set<Database> uniqueDbs = _providers.values.map((p) => p.db).where((db) => db.isOpen).toSet();
+    final Set<Database> uniqueDbs = dbs ?? _providers.values.map((p) => p.db).where((db) => db.isOpen).toSet();
 
     for (final Database db in uniqueDbs) {
       try {
@@ -382,9 +391,37 @@ extension FluentDbLifecycle on FluentDb {
       }
     }
     _providers.clear();
+    _tableToProviderIndex.clear();
     _isInitialized = false;
     await FluentEngine().shutdown();
     FluentLog.info('Registry reset: All connections closed and providers cleared.', tag: 'FluentDb:close');
+  }
+
+  /// Safely shuts down all database operations, closes connections, and permanently
+  /// deletes all database files from the file system.
+  ///
+  /// This method is intended for use cases like user logout or complete app reset.
+  /// It ensures that no file locks remain before attempting deletion.
+  Future<void> destroyAllDatabases() async {
+    FluentLog.warning('Initiating total data wipe. All databases will be destroyed.', tag: 'FluentDb:destroyAll');
+
+    final Set<Database> uniqueDbs = _providers.values.map((p) => p.db).where((db) => db.isOpen).toSet();
+    final List<String> pathsToDelete = uniqueDbs.map((db) => db.path).toList();
+
+    await closeAll(dbs: uniqueDbs);
+
+    for (final String path in pathsToDelete) {
+      try {
+        FluentLog.debug('Deleting physical database file', tag: 'FluentDb:destroyAll', context: {'path': path});
+        await databaseFactory.deleteDatabase(path);
+      } catch (e, st) {
+        FluentLog.error('Failed to delete database file', e, st, tag: 'FluentDb:destroyAll', context: {'path': path});
+      }
+    }
+
+    await FluentEngine().destroy();
+
+    FluentLog.info('Total data wipe completed successfully. Engine is reset.', tag: 'FluentDb:destroyAll');
   }
 
   /// Permanently removes a specific database file from the file system.

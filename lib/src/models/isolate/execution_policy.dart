@@ -2,6 +2,8 @@
 // Use of this source code is governed by an Apache-2.0 license that can be
 // found in the LICENSE file.
 
+// ignore_for_file: avoid_redundant_argument_values
+
 /// Defines the operational strategy for executing a [FluentTask].
 ///
 /// This class governs the "how" and "when" of database operations, controlling
@@ -28,6 +30,15 @@ class ExecutionPolicy {
   /// task (based on [FluentTask.fingerprint]) is already awaiting execution.
   final bool? cancelIfDuplicate;
 
+  /// A custom user-defined identifier used for granular event filtering and telemetry.
+  ///
+  /// This tag allows developers to trace, group, or filter reactive events within
+  /// the [FluentChangeEventBus]. By assigning a unique identifier, you can easily
+  /// listen to lifecycle changes for specific logical operations (e.g., 'cart_cleanup',
+  /// 'user_sync') across the application.
+  ///
+  /// If provided, this tag is propagated through the task pipeline and attached
+  /// to the resulting [FluentChangeEvent], enabling precise reactive UI updates.
   final Object? customTag;
 
   /// The [ExecutionPolicy] constructor initializes.

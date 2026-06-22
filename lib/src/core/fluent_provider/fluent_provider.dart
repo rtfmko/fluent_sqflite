@@ -12,20 +12,34 @@ import '../../exceptions/exceptions.dart';
 import '../../interfaces/interfaces.dart';
 import '../../models/models.dart';
 import '../../relations/relations.dart';
+import '../../soft_delete/soft_delete.dart';
 import '../../utils/utils.dart';
 import '../core.dart';
 import '../fluent_sqlite_internal.dart';
 import '../utils/utils.dart';
 
-part 'parts/fluent_provider_crud.dart';
-
-part 'parts/fluent_provider_mapper.dart';
-
-part 'parts/fluent_provider_relation_loader.dart';
-
-part 'parts/fluent_provider_relations.dart';
-
-part 'parts/fluent_provider_schema.dart';
+part 'parts/crud/executors/fluent_execute_delete.dart';
+part 'parts/crud/executors/fluent_execute_find.dart';
+part 'parts/crud/executors/fluent_execute_maintenance.dart';
+part 'parts/crud/executors/fluent_execute_query.dart';
+part 'parts/crud/executors/fluent_execute_raw.dart';
+part 'parts/crud/executors/fluent_execute_restore.dart';
+part 'parts/crud/executors/fluent_execute_save.dart';
+part 'parts/crud/executors/fluent_execute_update.dart';
+part 'parts/crud/fluent_delete.dart';
+part 'parts/crud/fluent_find.dart';
+part 'parts/crud/fluent_maintenance.dart';
+part 'parts/crud/fluent_query.dart';
+part 'parts/crud/fluent_raw.dart';
+part 'parts/crud/fluent_restore.dart';
+part 'parts/crud/fluent_save.dart';
+part 'parts/crud/fluent_update.dart';
+part 'parts/fluent_crud_helper.dart';
+part 'parts/fluent_mapper.dart';
+part 'parts/fluent_provider_sync.dart';
+part 'parts/fluent_relation_loader.dart';
+part 'parts/fluent_relations.dart';
+part 'parts/fluent_schema.dart';
 
 /// The foundational abstract base class for all database provider implementations.
 ///
@@ -169,6 +183,7 @@ abstract class FluentProvider<T extends FluentStorable> {
   /// transaction block.
   ///
   /// [txn] The active transaction executor to delegate operations to.
+  @internal
   void setTransactionExecutor(DatabaseExecutor txn) {
     _transactionExecutor = txn;
   }
@@ -179,6 +194,7 @@ abstract class FluentProvider<T extends FluentStorable> {
   /// This should be called immediately upon the completion of a transaction block
   /// to ensure that subsequent standard operations do not accidentally execute
   /// within the scope of a closed or stale transaction.
+  @internal
   void restoreOriginalExecutor() {
     _transactionExecutor = null;
   }
@@ -193,6 +209,7 @@ abstract class FluentProvider<T extends FluentStorable> {
   ///    naming convention `[parent_table]_[parent_pk]` (snake_case).
   ///
   /// Returns the column name as a [String] if a valid reference exists, otherwise `null`.
+  @internal
   String? resolveRemoteKey(FluentProvider childProvider) {
     final Type childType = childProvider.runtimeType;
 
@@ -201,7 +218,7 @@ abstract class FluentProvider<T extends FluentStorable> {
     }
 
     if (_hasRelations && _relationsMixin != null) {
-      final FluentDbRelation<FluentStorable>? rel = _relationsMixin!.syncRelations[childProvider.modelType];
+      final FluentDbRelation<FluentStorable>? rel = _relationsMixin!.resolvedRelations[childProvider.modelType];
       if (rel?.remoteKey != null) {
         final String explicitKey = (rel as FluentDbRelation).remoteKey!;
         _remoteKeyCache[childType] = explicitKey;
@@ -288,6 +305,7 @@ abstract class FluentProvider<T extends FluentStorable> {
   ///    assign keys if not explicitly defined.
   /// 3. **Backlink Propagation:** Automatically injects inverse relationships
   ///    (Many-to-One) into target providers to ensure two-way data integrity.
+  @internal
   void linkRelations(Iterable<FluentProvider> allProviders) {}
 
   /// Initializes a new instance of the provider.
@@ -305,6 +323,7 @@ abstract class FluentProvider<T extends FluentStorable> {
   ///
   /// [json] The cached map representation of the entity.
   /// Returns a fully hydrated instance of [T].
+  @protected
   T fromCacheJson(Map<String, dynamic> json);
 
   /// Assembles a raw SQL record into a fully hydrated domain model [T].
@@ -369,6 +388,7 @@ abstract class FluentProvider<T extends FluentStorable> {
   /// This method acts as the central traffic controller for the database engine.
   /// It utilizes Dart's exhaustive `switch` expression to guarantee that every
   /// defined [FluentDbAction] is mapped to a specific execution handler.
+  @internal
   Future<dynamic> internalExecute(FluentTask task) async {
     FluentLog.debug('Routing task execution', tag: '$tableName:execute', context: {'action': task.action.toString(), 'task': task.toString()});
 
@@ -383,6 +403,8 @@ abstract class FluentProvider<T extends FluentStorable> {
       FluentDbAction.updateSingleField => _executeUpdateByKeyTaskOnMain(task),
       FluentDbAction.updateMultipleFields => _executeUpdateFieldsMultipleTaskOnMain(task),
       FluentDbAction.updateWithRelations => _executeUpdateWithRelationsTaskOnMain(task),
+      FluentDbAction.updateAll => _executeUpdateAllTaskOnMain(task),
+      FluentDbAction.updateMultipleFieldsByIds => _executeUpdateMultipleFieldsByIdsTaskOnMain(task),
       FluentDbAction.clearExpired => _executeClearExpiredItemsTaskOnMain(task),
       FluentDbAction.clearTable => _executeClearTableTaskOnMain(task),
       FluentDbAction.delete => _executeDeleteTaskOnMain(task),
@@ -392,7 +414,15 @@ abstract class FluentProvider<T extends FluentStorable> {
       FluentDbAction.count => _executeCountTaskOnMain(task),
       FluentDbAction.rawGetItem => _executeRawGetItemByTaskOnMain(task),
       FluentDbAction.rawGetItems => _executeRawGetItemsByTaskOnMain(task),
-      FluentDbAction.execute => await db.rawQuery(task.helper?.sql ?? '', task.helper?.whereArgs),
+      FluentDbAction.execute => _executeRawSqlTaskOnMain(task),
+      FluentDbAction.findDeletedItems => _executeFindTaskOnMain(task),
+      FluentDbAction.restore => _executeUpdateByKeyTaskOnMain(task),
+      FluentDbAction.restoreItemsByIds => _executeRestoreItemsByIdsTaskOnMain(task),
+      FluentDbAction.hardDelete => _executeDeleteTaskOnMain(task),
+      FluentDbAction.hardDeleteBy => _executeDeleteByTaskOnMain(task),
+      FluentDbAction.hardDeleteItemsByIds => _executeDeleteItemsByIdsTaskOnMain(task),
+      FluentDbAction.purgeSoftDeleted => _executePurgeSoftDeletedTaskOnMain(task),
+      FluentDbAction.forcePurgeSoftDeleted => _executeForcePurgeSoftDeletedTaskOnMain(task),
       _ => () {
         FluentLog.error(
           'Unsupported task action attempted',
@@ -410,12 +440,14 @@ abstract class FluentProvider<T extends FluentStorable> {
   ///
   /// Used during the initialization phase to establish the connection
   /// before the provider begins processing any CRUD tasks.
+  @internal
   void setDb(Database db) {
     _db = db;
     FluentLog.debug('Database instance assigned', tag: '$runtimeType:init');
   }
 
   /// Sets the database name identifier, used for multi-database configurations.
+  @internal
   void setDbName(String dbName) {
     _dbName = dbName;
     FluentLog.debug('Database name set to "$dbName"', tag: '$runtimeType:init');
@@ -428,6 +460,7 @@ abstract class FluentProvider<T extends FluentStorable> {
   ///
   /// [registerFn] The callback provided by the registry to handle
   /// type-safe registration of the [FluentProvider].
+  @internal
   void registerSelf(void Function<M extends FluentStorable>(FluentProvider<M>) registerFn) {
     FluentLog.debug('Registering provider instance', tag: '$runtimeType:init');
     registerFn<T>(this);

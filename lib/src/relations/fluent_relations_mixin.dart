@@ -2,6 +2,8 @@
 // Use of this source code is governed by an Apache-2.0 license that can be
 // found in the LICENSE file.
 
+import 'package:flutter/foundation.dart';
+
 import '../core/core.dart';
 import '../core/utils/utils.dart';
 import '../interfaces/interfaces.dart';
@@ -24,20 +26,55 @@ import '../utils/utils.dart';
 /// capabilities and automated JOIN support.
 mixin FluentRelationsMixin<T extends FluentStorable> on FluentProvider<T> {
   /// Internal cache for resolved relationship definitions.
+  /// Used to avoid redundant reflection or graph traversal during schema resolution.
   Map<Type, FluentDbRelation>? _relationsCache;
 
   /// Map of relationships targeting this model from other entities.
-  final Map<Type, FluentDbRelation> incomingRelations = {};
+  ///
+  /// This map acts as a registry for bidirectional links (backlinks), automatically
+  /// populated during the schema discovery phase to ensure data integrity across
+  /// the entity graph.
+  ///
+  /// **Note:** This collection is read-only for public consumers. Modifications
+  /// are managed internally by the framework to prevent desynchronization.
+  final Map<Type, FluentDbRelation> _incomingRelations = {};
+
+  /// Returns an unmodifiable view of all relationships directed at this model
+  /// from other entities (e.g., backlinks or foreign key references).
+  Map<Type, FluentDbRelation> get incomingRelations => Map.unmodifiable(_incomingRelations);
 
   /// Defines the relationships this model has with other [FluentStorable] entities.
   ///
-  /// Subclasses should override this to return a map of related model types
-  /// to their respective [FluentDbRelation] configurations.
+  /// Subclasses must override this to explicitly declare associations. This configuration
+  /// allows the engine to resolve JOIN queries, manage foreign key constraints,
+  /// and hydrate nested objects automatically.
+  ///
+  /// ### Usage Example:
+  /// ```dart
+  /// @override
+  /// Map<Type, FluentDbRelation<FluentStorable>> get relations => {
+  ///   // 1:N relationship: One user has many posts
+  ///   Post: FluentDbRelation<Post>(
+  ///     mapToKey: 'posts',
+  ///     castType: FluentModelCast.modelList,
+  ///   ),
+  ///   // 1:1 relationship: One user has one profile
+  ///   Profile: FluentDbRelation<Profile>(
+  ///     mapToKey: 'profile',
+  ///     castType: FluentModelCast.model,
+  ///     isLazy: false,
+  ///   ),
+  /// };
+  /// ```
   Map<Type, FluentDbRelation> get relations => {};
 
-  /// Provides the synchronized relationship map, initializing the cache if
-  /// not already populated.
-  Map<Type, FluentDbRelation> get syncRelations => _relationsCache ??= relations;
+  /// Returns a synchronized, cached map of all relationships associated with this model.
+  ///
+  /// This getter implements lazy-loading for the relationship graph:
+  /// * On first access, it triggers the [relations] configuration and populates the internal cache.
+  /// * Subsequent calls return the cached map, minimizing reflection and instantiation overhead.
+  /// * Returns an [UnmodifiableMapView] to protect the integrity of the relationship registry.
+  Map<Type, FluentDbRelation> get resolvedRelations => Map.unmodifiable(_relationsCache ??= relations);
 
   /// Returns a list of all [Type]s that this model is related to.
   List<Type> get relatedTypes => relations.keys.toList();
@@ -45,13 +82,14 @@ mixin FluentRelationsMixin<T extends FluentStorable> on FluentProvider<T> {
   /// Retrieves the [FluentDbRelation] configuration for a specific related [Type].
   FluentDbRelation? relationFor(Type type) => relations[type];
 
+  @internal
   @override
   void linkRelations(Iterable<FluentProvider> allProviders) {
-    if (syncRelations.isEmpty) return;
+    if (resolvedRelations.isEmpty) return;
 
     FluentLog.info('🔗 [LINK-START] Linking relations for table: "$tableName"', tag: 'FluentRelationMixin');
 
-    for (final MapEntry<Type, FluentDbRelation> entry in syncRelations.entries) {
+    for (final MapEntry<Type, FluentDbRelation> entry in resolvedRelations.entries) {
       final Type targetModelType = entry.key;
       final FluentDbRelation relation = entry.value;
 
@@ -97,7 +135,7 @@ mixin FluentRelationsMixin<T extends FluentStorable> on FluentProvider<T> {
 
         if (targetProvider is FluentRelationsMixin && (remoteFk == null || localFk == null)) {
           final FluentRelationsMixin<FluentStorable> neighborMixin = targetProvider;
-          final FluentDbRelation<FluentStorable>? neighborRel = neighborMixin.syncRelations[modelType];
+          final FluentDbRelation<FluentStorable>? neighborRel = neighborMixin.resolvedRelations[modelType];
 
           if (neighborRel != null) {
             remoteFk ??= neighborRel.localKey;
@@ -221,8 +259,9 @@ mixin FluentRelationsMixin<T extends FluentStorable> on FluentProvider<T> {
   ///
   /// [type] The [Type] of the model originating the relation.
   /// [relation] The [FluentDbRelation] configuration defining the inverse link.
+  @internal
   void addIncomingRelation(Type type, FluentDbRelation relation) {
-    incomingRelations[type] = relation;
+    _incomingRelations[type] = relation;
     refreshSchema();
 
     FluentLog.debug(

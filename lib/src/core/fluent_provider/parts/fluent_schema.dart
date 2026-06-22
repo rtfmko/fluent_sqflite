@@ -36,7 +36,7 @@ part of '../fluent_provider.dart';
 /// See also:
 /// * [FluentLog], for structured DDL audit tracing.
 /// * [FluentProviderRelations], for relational traversal orchestration.
-extension FluentProviderSchema<T extends FluentStorable> on FluentProvider<T> {
+extension FluentSchema<T extends FluentStorable> on FluentProvider<T> {
   /// Generates a standardized `CREATE TABLE` SQL statement based on the provider's schema definition.
   ///
   /// This operational utility ensures uniform schema creation across the persistence layer:
@@ -455,15 +455,29 @@ CREATE TABLE IF NOT EXISTS $pivotName (
     }
   }
 
-  /// Assembles and initializes the full table schema, reconciling model definitions,
-  /// migration overlays, and relational foreign key constraints.
+  /// Assembles and initializes the full table schema by reconciling model definitions,
+  /// migration history, and relational dependency constraints.
   ///
-  /// This compilation routine follows a strict three-stage lifecycle:
-  /// 1. Base Model Resolution: Extracts columns from [modelSample] and merges with system columns.
-  /// 2. Migration Overlay: Applies incremental DDL changes (rename/add) from [modelSample.migrations].
-  /// 3. Relational Mapping: Injects dynamic foreign-key columns based on [FluentRelationsMixin].
+  /// This compilation routine executes a deterministic three-stage lifecycle to generate
+  /// the definitive structural mapping for the database storage layer:
   ///
-  /// Returns a cached, immutable list of [FluentDbColumn] definitions for the table.
+  /// 1. **Base Model Resolution:** Initializes columns from [modelSample], filtering
+  ///    out system-reserved fields to prevent definition collisions.
+  /// 2. **Migration Overlay:** Sequentially applies incremental DDL schema transformations
+  ///    (renames, additions) defined in [modelSample.migrations], ensuring the schema
+  ///    remains compatible with versioned data states.
+  /// 3. **Relational Mapping:** Dynamically injects foreign-key constraints via
+  ///    [FluentRelationsMixin]. It reconciles cross-table references, automatically
+  ///    deriving data types from target schemas and applying `ON DELETE` cascading
+  ///    logic where defined.
+  ///
+  /// Additionally, this routine performs internal housekeeping:
+  /// * Resolves the primary key (defaulting to 'id' if not explicitly defined).
+  /// * Populates schema caches for query optimization (`_cachedTableColumns`, `_cachedRelationKeys`).
+  /// * Injects soft-delete tracking columns if the model implements [FluentSoftDeletable].
+  ///
+  /// Returns a cached, immutable list of [FluentDbColumn] definitions reflecting
+  /// the final physical state of the table.
   List<FluentDbColumn> get getFullSchema {
     if (_cachedFullSchema != null && _isSchemaInitialized) {
       return _cachedFullSchema!;
@@ -555,7 +569,7 @@ CREATE TABLE IF NOT EXISTS $pivotName (
         }
       }
 
-      for (final FluentDbRelation<FluentStorable> rel in mixin.syncRelations.values) {
+      for (final FluentDbRelation<FluentStorable> rel in mixin.resolvedRelations.values) {
         processRelation(rel, 'SYNC');
       }
       for (final FluentDbRelation<FluentStorable> rel in mixin.incomingRelations.values) {
@@ -578,10 +592,15 @@ CREATE TABLE IF NOT EXISTS $pivotName (
     if (isRelationsProvider) {
       final castedMixin = this as FluentRelationsMixin<T>;
       _relationsMixin = castedMixin;
-      _cachedRelationKeys = castedMixin.syncRelations.values.map((r) => r.mapToKey).toSet();
+      _cachedRelationKeys = castedMixin.resolvedRelations.values.map((r) => r.mapToKey).toSet();
     } else {
       _relationsMixin = null;
       _cachedRelationKeys = const <String>{};
+    }
+
+    if (modelSample is FluentSoftDeletable) {
+      final FluentSoftDeletable sample = modelSample as FluentSoftDeletable;
+      finalizedSchema.add(FluentDbColumn.systemSoftDelete(sample.softDeleteColumn));
     }
 
     _cachedFullSchema = finalizedSchema;

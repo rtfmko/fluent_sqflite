@@ -101,7 +101,29 @@ extension FluentDbMaintenance on FluentDb {
       FluentLog.info('Maintenance for "${group.dbName}" completed.', tag: 'FluentDb:maintenance');
     } catch (e, st) {
       FluentLog.error('Critical storage error during maintenance of "${group.dbName}"', e, st, tag: 'FluentDb:maintenance');
-      if (isDevMod) rethrow;
+      if (_isDevMod) rethrow;
+    }
+  }
+
+  /// Iterates through all registered providers and triggers a background
+  /// maintenance task to purge soft-deleted records from models that
+  /// implement [FluentSoftDeletable].
+  ///
+  /// This method is typically invoked as part of system maintenance cycles
+  /// to reclaim storage and enforce data retention policies. It catches and
+  /// logs errors per-provider to ensure that a failure in one table does
+  /// not halt the cleanup process for others.
+  Future<void> _purgeSoftDeletedGlobal() async {
+    FluentLog.debug('Starting global soft-delete purge procedure', tag: 'FluentDb:purge');
+
+    for (final FluentProvider provider in _providers.values) {
+      if (provider.modelSample is FluentSoftDeletable) {
+        try {
+          await provider.purgeSoftDeleted(policy: ExecutionPolicy.background);
+        } catch (e) {
+          FluentLog.warning('Auto-purge failed for ${provider.tableName}', tag: 'FluentDb:purge', context: {'error': e.toString()});
+        }
+      }
     }
   }
 }

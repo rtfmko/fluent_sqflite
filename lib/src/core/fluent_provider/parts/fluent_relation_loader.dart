@@ -35,7 +35,7 @@ extension FluentRelationsLoader<T extends FluentStorable> on FluentRelationsMixi
   /// Eagerly loads and hydrates external relational entity graphs mapped to the target [model] instance.
   ///
   /// This relational resolution driver automates cross-table schema joining via selective future collection:
-  /// * Evaluates available relationship definitions early, bypassing orchestration overhead if [syncRelations] is empty.
+  /// * Evaluates available relationship definitions early, bypassing orchestration overhead if [resolvedRelations] is empty.
   /// * Filters relational structures to execute data resolution only for definitions flagged with `autoLoad`.
   /// * Dynamically fetches target access points from [FluentDb] using runtime typing signatures.
   /// * Diverges processing pipelines using specific matching strategies for `oneToOne`, `manyToOne`, and `oneToMany` loops.
@@ -46,7 +46,7 @@ extension FluentRelationsLoader<T extends FluentStorable> on FluentRelationsMixi
   ///
   /// Returns a [Future<T>] completing with the fully hydrated, structurally rich object model graph.
   Future<T> loadAllRelations(T model, Map<String, dynamic> rawJson) async {
-    final relations = syncRelations;
+    final relations = resolvedRelations;
     if (relations.isEmpty) return model;
 
     final List<Future<void>> futures = [];

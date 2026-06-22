@@ -8,7 +8,7 @@ part of '../fluent_provider.dart';
 
 /// Enterprise-grade data mapping and serialization engine for [FluentProvider].
 ///
-/// The [FluentProviderMapper] extension facilitates the high-performance translation
+/// The [FluentMapper] extension facilitates the high-performance translation
 /// between raw relational database records (Maps) and typed domain models ([T]).
 /// It serves as the bidirectional "Codec" layer for the persistence system.
 ///
@@ -36,7 +36,7 @@ part of '../fluent_provider.dart';
 /// See also:
 /// * [FluentLog], for structured audit tracing of serialization/hydration events.
 /// * [FluentTask], for policy-driven execution of asynchronous hydration.
-extension FluentProviderMapper<T extends FluentStorable> on FluentProvider<T> {
+extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
   /// Transforms a raw database result map into a fully hydrated domain model instance,
   /// including the resolution of nested relational objects.
   ///
@@ -54,7 +54,7 @@ extension FluentProviderMapper<T extends FluentStorable> on FluentProvider<T> {
     }
 
     final T model = _assembleModel(enrichedRow);
-    final Map<Type, FluentDbRelation<FluentStorable>> syncRels = _relationsMixin!.syncRelations;
+    final Map<Type, FluentDbRelation<FluentStorable>> syncRels = _relationsMixin!.resolvedRelations;
 
     FluentLog.debug('Hydrating relational graph for model', tag: '$tableName:hydration', context: {'modelId': model.getPrimaryKeyName(), 'relationalKeys': syncRels.keys.toString()});
 
@@ -158,7 +158,7 @@ extension FluentProviderMapper<T extends FluentStorable> on FluentProvider<T> {
 
     FluentLog.debug('Initiating bulk relational hydration', tag: '$tableName:hydration', context: {'rowCount': rowsLength});
 
-    final Map<Type, FluentDbRelation> syncRels = _relationsMixin!.syncRelations;
+    final Map<Type, FluentDbRelation> syncRels = _relationsMixin!.resolvedRelations;
     final List<T> models = List<T>.filled(rowsLength, modelSample, growable: false);
 
     for (int index = 0; index < rowsLength; index++) {
@@ -337,6 +337,10 @@ extension FluentProviderMapper<T extends FluentStorable> on FluentProvider<T> {
       finalSqlJson[FluentDbColumn.systemMetadata().name] = jsonEncode(typeMetadata);
     }
 
+    if (item is FluentSoftDeletable) {
+      finalSqlJson[(item as FluentSoftDeletable).softDeleteColumn] = item.deletedAt?.toIso8601String();
+    }
+
     final DateTime? effectiveExpiryDate = item.expiryDate ?? (item.expiryDuration != null ? DateTime.now().add(item.expiryDuration!) : null);
 
     final int? expiry = effectiveExpiryDate?.millisecondsSinceEpoch;
@@ -385,7 +389,7 @@ extension FluentProviderMapper<T extends FluentStorable> on FluentProvider<T> {
       processedRows[i] = _castReadyRelations(processedRows[i]);
     }
 
-    final Map<Type, FluentDbRelation> relations = _relationsMixin!.syncRelations;
+    final Map<Type, FluentDbRelation> relations = _relationsMixin!.resolvedRelations;
     if (relations.isEmpty) {
       currentVisited.remove(tableName);
       return processedRows;
@@ -529,7 +533,7 @@ extension FluentProviderMapper<T extends FluentStorable> on FluentProvider<T> {
   Map<String, dynamic> _castReadyRelations(Map<String, dynamic> processedRow) {
     if (!_hasRelations || _relationsMixin == null) return processedRow;
 
-    final Map<Type, FluentDbRelation<FluentStorable>> relations = _relationsMixin!.syncRelations;
+    final Map<Type, FluentDbRelation<FluentStorable>> relations = _relationsMixin!.resolvedRelations;
     if (relations.isEmpty) return processedRow;
 
     Map<String, dynamic> result = processedRow;

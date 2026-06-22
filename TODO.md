@@ -16,6 +16,9 @@
     - [ ] Create an `example/` directory with a minimal working app.
     - [ ] Write a basic demonstration of core features usage.
 
+- [ ] **FluentDbMigration**
+    - [ ] Add `rawSql` to execute during migrations.
+
 - [x] **Streaming**
     - [x] Implement stream-based data fetching.
 
@@ -27,3 +30,5 @@
 ## ✅ Completed
 - [x] Initial project setup.
 - [x] Implement stream-based data fetching.
+- [x] Added SoftDelete.
+- [x] Added syncWithServer.

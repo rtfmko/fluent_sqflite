@@ -146,6 +146,9 @@ class FluentDbColumn {
   /// System column for automated data expiration.
   static FluentDbColumn systemExpiryDate(String name) => FluentDbColumn(name: name, type: FluentDbDataType.integer, autoCorrectAllowed: false);
 
+  /// System column for soft delete.
+  static FluentDbColumn systemSoftDelete(String name) => FluentDbColumn(name: name, type: FluentDbDataType.text, autoCorrectAllowed: false);
+
   /// Generates the SQL column definition string used for table creation (DDL).
   ///
   /// This method constructs a valid SQLite column definition by evaluating

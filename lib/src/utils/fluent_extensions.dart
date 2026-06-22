@@ -2,6 +2,9 @@
 // Use of this source code is governed by an Apache-2.0 license that can be
 // found in the LICENSE file.
 
+import '../models/models.dart';
+import 'utils.dart';
+
 /// Utility extensions for [Map] to simplify database-to-model conversions.
 ///
 /// These methods provide safe ways to extract and cast data from raw JSON maps
@@ -83,10 +86,73 @@ extension FluentDateTimeX on DateTime {
   /// of [DateTime.toIso8601String()] when microsecond precision varies.
   ///
   /// Example: "05:46:24.123"
-  String get toFluentTimestamp {
-    return "${hour.toString().padLeft(2, '0')}:"
-        "${minute.toString().padLeft(2, '0')}:"
-        "${second.toString().padLeft(2, '0')}."
-        "${millisecond.toString().padLeft(3, '0')}";
+  String get toFluentTimestamp =>
+      "${hour.toString().padLeft(2, '0')}:"
+      "${minute.toString().padLeft(2, '0')}:"
+      "${second.toString().padLeft(2, '0')}."
+      "${millisecond.toString().padLeft(3, '0')}";
+}
+
+/// Adds ergonomic utility methods to [ExecutionPolicy] to simplify
+/// database task configuration within the `fluent_sqflite` library.
+extension ExecutionPolicyUtils on ExecutionPolicy {
+  /// Returns a new [ExecutionPolicy] with the [tag] applied if provided,
+  /// otherwise returns the original policy.
+  ///
+  /// This method is primarily used in the [FluentDb] static API to conditionally
+  /// attach custom metadata tags to tasks, which are later used for event filtering
+  /// and logging within the engine's reactive stream.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Only applies the tag 'cleanup_task' if it is not null
+  /// final ExecutionPolicy policy = const ExecutionPolicy().withTag(tag);
+  /// await FluentDb.clearTable<User>(policy: policy);
+  /// ```
+  ExecutionPolicy withTag(Object? tag) {
+    if (tag == null) return this;
+    return copyWith(customTag: tag);
   }
+}
+
+/// Adds functional classification utilities to [FluentDbAction] to streamline
+/// database task routing and reactive stream management.
+extension FluentDbActionX on FluentDbAction {
+  /// Defines the subset of operations that perform data mutations within the database.
+  ///
+  /// This set is used by the [FluentEngine] to determine if a task requires
+  /// transactional integrity and post-execution persistence verification.
+  static const Set<FluentDbAction> _writeActions = {
+    FluentDbAction.save,
+    FluentDbAction.update,
+    FluentDbAction.updateSingleField,
+    FluentDbAction.updateMultipleFields,
+    FluentDbAction.updateWithRelations,
+    FluentDbAction.updateAll,
+    FluentDbAction.updateMultipleFieldsByIds,
+    FluentDbAction.delete,
+    FluentDbAction.deleteBy,
+    FluentDbAction.deleteItemsByIds,
+    FluentDbAction.restore,
+    FluentDbAction.restoreItemsByIds,
+    FluentDbAction.hardDelete,
+    FluentDbAction.hardDeleteBy,
+    FluentDbAction.hardDeleteItemsByIds,
+    FluentDbAction.purgeSoftDeleted,
+    FluentDbAction.forcePurgeSoftDeleted,
+  };
+
+  /// Defines the set of operations that trigger database stream notifications.
+  ///
+  /// This includes all mutation operations as well as administrative tasks
+  /// that affect the overall state of the table (e.g., clearing expired items),
+  /// ensuring that observers receive timely updates regarding the data layer.
+  static const Set<FluentDbAction> _streamActions = {..._writeActions, FluentDbAction.clearExpired, FluentDbAction.clearTable};
+
+  /// Returns `true` if the current operation modifies the underlying database state.
+  bool get isWriteOp => _writeActions.contains(this);
+
+  /// Returns `true` if the current operation necessitates an update to reactive
+  /// stream controllers.
+  bool get isStreamOp => _streamActions.contains(this);
 }

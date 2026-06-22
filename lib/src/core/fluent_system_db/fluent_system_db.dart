@@ -23,6 +23,32 @@ class _FluentSystemDb {
     await _ensureSystemDbOpen();
   }
 
+  /// Gracefully closes the system telemetry connection and permanently deletes
+  /// its physical file from the disk.
+  Future<void> destroySystemDb() async {
+    if (_systemDb == null) return;
+
+    final String path = _systemDb!.path;
+
+    try {
+      if (_systemDb!.isOpen) {
+        FluentLog.debug('Closing system telemetry database...', tag: 'FluentSystemDb:destroy');
+        await _systemDb!.close();
+      }
+
+      FluentLog.debug('Deleting physical system database file', tag: 'FluentSystemDb:destroy', context: {'path': path});
+      await databaseFactory.deleteDatabase(path);
+
+      _systemDb = null;
+      _dbConfigs.clear();
+      _databases.clear();
+
+      FluentLog.info('System telemetry database successfully deleted.', tag: 'FluentSystemDb:destroy');
+    } catch (e, st) {
+      FluentLog.error('Failed to destroy system telemetry database', e, st, tag: 'FluentSystemDb:destroy', context: {'path': path});
+    }
+  }
+
   /// Ensures that the dedicated telemetry system database connection is active.
   ///
   /// If the system handle is uninitialized, it mounts the [_systemDbName] file,

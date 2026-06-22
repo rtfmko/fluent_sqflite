@@ -33,142 +33,13 @@ part of '../fluent_provider.dart';
 ///
 /// ### Architectural Contract
 /// This extension requires the underlying [FluentProvider] to support the [FluentRelationsMixin],
-/// which provides the necessary metadata definitions for [syncRelations], foreign keys, and
+/// which provides the necessary metadata definitions for [resolvedRelations], foreign keys, and
 /// relational configuration.
 ///
 /// See also:
 /// * [FluentRelationsMixin], the structural foundation for relational-aware providers.
 /// * [FluentTask], the container for transactional operations and relational dependency metadata.
-extension FluentProviderRelations<T extends FluentStorable> on FluentProvider<T> {
-  /// Persists a model [item] to the database, including all associated relational entity graph updates.
-  ///
-  /// This heavy operational routine processes deep object modifications within a singular transaction:
-  /// * Flattens domain model entities into SQL-compliant map frames via [_prepareSqlJson].
-  /// * Validates primary key integrity, throwing an exception if the entity context fails existence checks.
-  /// * Packages the model, its relational state map, and update constraints into a uniform [FluentTask].
-  /// * Offloads the heavy transactional orchestration to the [FluentDb] supervisor.
-  ///
-  /// [item] defines the storable entity requiring synchronization with the persistent storage layer.
-  /// [policy] defines prioritization, query collapsing, and concurrency thresholds managed by the coordinator.
-  ///
-  /// Returns a [Future<void>] that completes successfully once the record and its relational graph are committed.
-  Future<void> updateWithRelations(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) {
-    final ExecutionPolicy effectivePolicy = tag != null ? policy.copyWith(customTag: tag) : policy;
-    // Transform model entity into a flattened SQL-compatible map structure
-    final Map<String, dynamic> preparedData = _prepareSqlJson(item);
-
-    final String pkName = _cachedPrimaryKey?.name ?? 'id';
-    final dynamic id = preparedData[pkName];
-
-    if (id == null) {
-      final FluentSchemaException exception = FluentSchemaException(
-        modelName: tableName,
-        columnName: pkName,
-        details: 'Database transactional update aborted due to missing primary key constraint',
-        stackTrace: StackTrace.current,
-      );
-      FluentLog.error(
-        exception.message,
-        exception,
-        exception.stackTrace,
-        tag: '$tableName:exception',
-        hint: 'Ensure that the model entity possesses a valid and initialized primary key value before attempting persistence.',
-        context: {'tableName': tableName, 'primaryKeyColumn': pkName},
-      );
-      throw exception;
-    }
-
-    final FluentTask task = FluentTask(
-      action: FluentDbAction.updateWithRelations,
-      table: tableName,
-      dbName: dbName,
-      data: item,
-      relations: [preparedData],
-      helper: TableHelper(id: id, dataMap: preparedData),
-      policy: effectivePolicy,
-    );
-
-    FluentLog.debug(
-      'Initiating deep model update synchronization sequence with relational dependency resolution',
-      tag: '$tableName:operation',
-      context: {'tableName': tableName, 'targetRecordId': id.toString(), 'hasCustomPolicy': policy != const ExecutionPolicy()},
-    );
-
-    return FluentDb.executeTask<T, void>(provider: this, task: task);
-  }
-
-  /// Performs an atomic, transactional update of a domain entity and its entire relational sub-graph.
-  ///
-  /// This pipeline ensures deep-graph consistency by wrapping mutation operations in a serializable transaction:
-  /// * Segregates core model fields from relational join keys to preserve table-specific schema integrity.
-  /// * Executes primary record updates via a strict [pkName] constraint, flagging non-existent targets as warnings.
-  /// * Delegates child-entity cascades to the [_relationsMixin], propagating the [txn] handle to ensure atomic commit/rollback.
-  /// * Maintains strict thread isolation via [finally] blocks, guaranteeing that `restoreOriginalExecutor` occurs
-  ///   regardless of intermediate mutation or network failures.
-  ///
-  /// [task] provides the execution context, holding both the primary model map and the list of associated relational state snapshots.
-  Future<void> _executeUpdateWithRelationsTaskOnMain(FluentTask task) async {
-    final T item = task.data as T;
-    final Map<String, dynamic> preparedData = task.relations!.first;
-    final String pkName = _cachedPrimaryKey?.name ?? 'id';
-    final dynamic id = task.helper?.id;
-
-    FluentLog.debug(
-      'Executing Main-thread transactional deep-model update sequence',
-      tag: '$tableName:pipeline',
-      context: {'tableName': tableName, 'targetRecordId': id.toString(), 'taskId': task.id},
-    );
-
-    try {
-      await db.transaction((txn) async {
-        setTransactionExecutor(txn);
-
-        // Filter: Separate core table fields from relational keys to prevent SQL injection or schema mismatch errors
-        final Map<String, dynamic> sqlFields = {};
-        final Set<String> relKeys = relationKeys;
-
-        for (final MapEntry<String, dynamic> entry in preparedData.entries) {
-          if (!relKeys.contains(entry.key)) {
-            sqlFields[entry.key] = entry.value;
-          }
-        }
-
-        final int count = await txn.update(tableName, sqlFields, where: '$pkName = ?', whereArgs: [id]);
-
-        if (count == 0) {
-          FluentLog.warning(
-            'Target record for update could not be located in storage layer',
-            tag: '$tableName:pipeline',
-            hint: 'Attempted to perform an update on a non-existent identifier. Verify record existence or evaluate if an insert operation is required.',
-            context: {'tableName': tableName, 'targetRecordId': id.toString()},
-          );
-        }
-
-        if (_hasRelations && _relationsMixin != null) {
-          FluentLog.debug('Processing deep-linked relational entity associations', tag: '$tableName:pipeline', context: {'tableName': tableName, 'taskId': task.id});
-
-          final List<T> batchList = List<T>.filled(1, item, growable: false);
-
-          await _relationsMixin!._processBatchRelations(txn, batchList, task, parentJsons: task.relations, currentDepth: 0, visitedTables: <String>{tableName});
-        }
-      });
-
-      FluentLog.debug('Deep transactional model update successfully persisted', tag: '$tableName:pipeline', context: {'tableName': tableName, 'targetRecordId': id.toString()});
-    } catch (e, stackTrace) {
-      FluentLog.error(
-        'Deep model transactional update aborted due to execution driver failure',
-        e,
-        stackTrace,
-        tag: '$tableName:exception',
-        hint: 'Examine primary key constraints, foreign key referential integrity, or transient connection deadlocks.',
-        context: {'tableName': tableName, 'targetRecordId': id.toString()},
-      );
-      rethrow;
-    } finally {
-      restoreOriginalExecutor();
-    }
-  }
-
+extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
   /// Executes a relational integrity audit to purge orphaned child records from the storage layer.
   ///
   /// This maintenance routine ensures that child entities lacking a valid parent reference
@@ -185,7 +56,7 @@ extension FluentProviderRelations<T extends FluentStorable> on FluentProvider<T>
     if (!_hasRelations || _relationsMixin == null) return;
 
     final FluentRelationsMixin<T> mixin = _relationsMixin!;
-    final Map<Type, FluentDbRelation<FluentStorable>> syncRels = mixin.syncRelations;
+    final Map<Type, FluentDbRelation<FluentStorable>> syncRels = mixin.resolvedRelations;
     if (syncRels.isEmpty) return;
 
     final String parentPk = _cachedPrimaryKey?.name ?? 'id';
@@ -261,14 +132,14 @@ extension FluentProviderRelations<T extends FluentStorable> on FluentProvider<T>
 
       if (sql.isNotEmpty) {
         try {
-          FluentLog.sql(sql, arguments: args, tag: '$tableName:relations:sql');
+          FluentLog.sql(sql, arguments: args, tag: '$tableName:cleanupOrphans:sql');
 
           final int count = await executor.rawDelete(sql, args);
 
           if (count > 0) {
             FluentLog.debug(
               'Relational integrity audit finalized: Orphaned records purged from child storage',
-              tag: '$tableName:relations',
+              tag: '$tableName:cleanupOrphans',
               context: {'parentTable': currentTable, 'childTable': childTable, 'orphanedRowsRemoved': count},
             );
           }
@@ -277,7 +148,7 @@ extension FluentProviderRelations<T extends FluentStorable> on FluentProvider<T>
             'Relational orphan cleanup sequence aborted due to execution driver failure',
             e,
             st,
-            tag: '$tableName:relations',
+            tag: '$tableName:cleanupOrphans',
             hint: 'Verify foreign key indexing on the child table and check for referential locking constraints.',
             context: {'childTable': childTable},
           );
@@ -312,7 +183,7 @@ extension FluentProviderRelations<T extends FluentStorable> on FluentProvider<T>
     final int nextDepth = currentDepth + 1;
     final int maxAllowedDepth = (task.action != FluentDbAction.save) ? (task.maxDepth != 0 ? task.maxDepth : 99) : 99;
     if (nextDepth > maxAllowedDepth) {
-      FluentLog.warning('Relational depth-limit exceeded; aborting sub-graph hydration', tag: '$tableName:pipeline', context: {'currentDepth': currentDepth, 'maxDepth': maxAllowedDepth});
+      FluentLog.warning('Relational depth-limit exceeded; aborting sub-graph hydration', tag: '$tableName:executeAddExecutor', context: {'currentDepth': currentDepth, 'maxDepth': maxAllowedDepth});
       return;
     }
 
@@ -363,7 +234,7 @@ extension FluentProviderRelations<T extends FluentStorable> on FluentProvider<T>
 
     // Atomic Commit: Finalize root batch and map auto-increment IDs back to cache
     if (isRootBatch) {
-      FluentLog.sql('Executing batched upsert operations', tag: '$tableName:sql');
+      FluentLog.sql('Executing batched upsert operations', tag: '$tableName:sql:executeAddExecutor');
 
       final List<Object?> results = await batch.commit(noResult: false);
       _checkBatchResults(results);
@@ -449,7 +320,7 @@ extension FluentProviderRelations<T extends FluentStorable> on FluentProvider<T>
   /// Recursive orchestrator for batch-processing relational dependencies in entity graphs.
   ///
   /// This engine performs complex multi-table coordination during batch operations:
-  /// * Graph Traversal: Iterates through defined [syncRelations], executing lookups via [FluentDb].
+  /// * Graph Traversal: Iterates through defined [resolvedRelations], executing lookups via [FluentDb].
   /// * Identity Conflict Resolution: Detects duplicate object references across the batch and enforces
   ///   idempotent state updates for entities marked with auto-increment keys.
   /// * Cardinality Routing: Automatically dispatches processing to [manyToMany] or [oneOrMany] handlers
@@ -471,7 +342,7 @@ extension FluentProviderRelations<T extends FluentStorable> on FluentProvider<T>
   }) async {
     if (!_hasRelations || _relationsMixin == null) return;
 
-    final Map<Type, FluentDbRelation<FluentStorable>> relations = _relationsMixin!.syncRelations;
+    final Map<Type, FluentDbRelation<FluentStorable>> relations = _relationsMixin!.resolvedRelations;
     if (relations.isEmpty) return;
 
     final int nextDepth = currentDepth;
@@ -790,7 +661,7 @@ extension FluentProviderRelations<T extends FluentStorable> on FluentProvider<T>
   Future<void> ensureLoaded<R extends FluentStorable>(T model, {int maxDepth = 1}) async {
     if (!_hasRelations || _relationsMixin == null) return;
 
-    final relations = _relationsMixin!.syncRelations;
+    final relations = _relationsMixin!.resolvedRelations;
     if (relations.isEmpty) return;
 
     final String parentPkName = _cachedPrimaryKey?.name ?? 'id';

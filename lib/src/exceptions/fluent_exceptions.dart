@@ -221,13 +221,7 @@ class FluentEngineException extends FluentException {
   /// * [component]: The internal module where the failure originated.
   /// * [engineState]: Optional snapshot of the engine state for debugging.
   /// * [stackTrace]: The execution path leading to the systemic failure.
-  FluentEngineException(
-      String message, {
-        required this.component,
-        this.engineState,
-        this.task,
-        StackTrace? stackTrace,
-      }) : super(message, stackTrace);
+  FluentEngineException(String message, {required this.component, this.engineState, this.task, StackTrace? stackTrace}) : super(message, stackTrace);
 
   @override
   String toString() {
@@ -235,4 +229,18 @@ class FluentEngineException extends FluentException {
         '${engineState != null ? '\nEngine State: $engineState' : ''}'
         '${task != null ? '\nTask: $task' : ''}';
   }
+}
+
+/// Exception thrown when a synchronization operation between the local
+/// database and a remote server fails.
+///
+/// Use this to signal errors related to network transport, invalid sync
+/// strategies, or missing callbacks. This exception allows for centralized
+/// error handling within the synchronization pipeline.
+class FluentSyncException extends FluentException {
+  /// Creates a [FluentSyncException].
+  ///
+  /// * [message]: A descriptive explanation of the sync failure.
+  /// * [stackTrace]: The execution path leading to the failure.
+  FluentSyncException(String message, {StackTrace? stackTrace}) : super(message, stackTrace);
 }

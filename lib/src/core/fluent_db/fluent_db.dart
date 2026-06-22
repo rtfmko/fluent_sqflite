@@ -58,11 +58,21 @@ class FluentDb {
   /// Internal storage mapping `Type` (model or provider class) to the corresponding `FluentProvider` instance.
   final Map<Type, FluentProvider> _providers = {};
 
+  /// Defines the retention interval for soft-deleted records before they become
+  /// eligible for permanent removal.
+  ///
+  /// Defaults to [defaultSoftDeleteRetentionPeriod] to balance storage efficiency
+  /// with data recovery capabilities.
+  static Duration _softDeleteRetentionPeriod = defaultSoftDeleteRetentionPeriod;
+
+  /// Retrieves the current retention period configured for the soft-delete maintenance cycle.
+  static Duration get softDeleteRetentionPeriod => _softDeleteRetentionPeriod;
+
   /// Tracks the initialization status of the registry.
   bool _isInitialized = false;
 
   /// Flag indicating if the registry is running in Development mode (enables destructive operations like `deleteDatabase` on failure).
-  bool isDevMod = false;
+  bool _isDevMod = false;
 
   /// Private internal constructor for the singleton.
   FluentDb._internal();
@@ -248,12 +258,13 @@ class FluentDb {
   /// ```
   ///
   /// Returns a list of records containing the [parentProvider] and the specific [FluentDbRelation].
+  @internal
   static List<({FluentProvider parentProvider, FluentDbRelation relation})> getIncomingRelationsFor(Type targetModelType) {
     final List<({FluentProvider parentProvider, FluentDbRelation relation})> incoming = [];
 
     for (final FluentProvider<FluentStorable> parentProvider in _instance._providers.values) {
       if (parentProvider is FluentRelationsMixin) {
-        final Map<Type, FluentDbRelation> relationsMap = parentProvider.syncRelations;
+        final Map<Type, FluentDbRelation> relationsMap = parentProvider.resolvedRelations;
 
         if (relationsMap.containsKey(targetModelType)) {
           final FluentDbRelation rel = relationsMap[targetModelType]!;
@@ -306,12 +317,7 @@ class FluentDb {
       stream = stream.where((event) => actions.contains(event.action));
     }
 
-    return stream.map((event) => FluentChangeEvent<T>(
-      modelType: event.modelType,
-      action: event.action,
-      items: event.items.cast<T>(),
-      customTag: event.customTag,
-    ));
+    return stream.map((event) => FluentChangeEvent<T>(modelType: event.modelType, action: event.action, items: event.items.cast<T>(), customTag: event.customTag));
   }
 
   /// These static convenience methods provide a type-safe interface for performing
@@ -327,10 +333,8 @@ class FluentDb {
   /// ```dart
   /// await FluentDb.saveItem(User(id: 1, name: 'John Doe'), updateIfExist: true);
   /// ```
-  static Future<void> saveItem<T extends FluentStorable>(T item, {bool updateIfExist = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) {
-    final ExecutionPolicy effectivePolicy = tag != null ? policy.copyWith(customTag: tag) : policy;
-    return providerByType<T>().saveItem(item, updateIfExist: updateIfExist, policy: effectivePolicy);
-  }
+  static Future<void> saveItem<T extends FluentStorable>(T item, {bool updateIfExist = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().saveItem(item, updateIfExist: updateIfExist, policy: policy.withTag(tag));
 
   /// Saves a list of items of type [T] atomically.
   ///
@@ -338,10 +342,8 @@ class FluentDb {
   /// ```dart
   /// await FluentDb.saveItems([user1, user2, user3]);
   /// ```
-  static Future<void> saveItems<T extends FluentStorable>(List<T> items, {bool updateIfExist = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) {
-    final ExecutionPolicy effectivePolicy = tag != null ? policy.copyWith(customTag: tag) : policy;
-    return providerByType<T>().saveItems(items, updateIfExist: updateIfExist, policy: effectivePolicy);
-  }
+  static Future<void> saveItems<T extends FluentStorable>(List<T> items, {bool updateIfExist = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().saveItems(items, updateIfExist: updateIfExist, policy: policy.withTag(tag));
 
   /// Retrieves a single record of type [T].
   ///
@@ -439,10 +441,40 @@ class FluentDb {
   /// ```dart
   /// await FluentDb.update<User>(updatedUserInstance);
   /// ```
-  static Future<void> update<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) {
-    final ExecutionPolicy effectivePolicy = tag != null ? policy.copyWith(customTag: tag) : policy;
-    return providerByType<T>().update(item, policy: effectivePolicy);
-  }
+  static Future<int> update<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().update(item, policy: policy.withTag(tag));
+
+  /// Updates a record represented by [item] along with its related entities.
+  ///
+  /// Use this method when your model has dependencies (Foreign Keys) that also need
+  /// to be synchronized or updated in a single transaction.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// final updatedProfile = userProfile.copyWith(bio: "New Bio");
+  /// // This will update the Profile table and sync any related Settings or Roles
+  /// await FluentDb.updateWithRelations<UserProfile>(updatedProfile);
+  /// ```
+  static Future<int> updateWithRelations<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().updateWithRelations(item, policy: policy.withTag(tag));
+
+  /// Updates an entity instance and returns its fully synchronized state from the database.
+  ///
+  /// This method performs an atomic update of the provided [item] and immediately
+  /// triggers a follow-up fetch to ensure the object in memory reflects the latest
+  /// state stored in the database. This is critical for entities containing
+  /// database-generated fields, triggers, or updated timestamps.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Update an entity and get the refreshed version with database-managed fields
+  /// final User? refreshedUser = await FluentDb.updateAndFetch(userInstance);
+  ///
+  /// if (refreshedUser != null) {
+  ///   print('Entity updated and synchronized: ${refreshedUser.updatedAt}');
+  /// }
+  /// ```
+  static Future<T?> updateAndFetch<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().updateAndFetch(item, policy: policy.withTag(tag));
 
   /// Performs a targeted, partial update on a single field of a record identified by ID.
   ///
@@ -450,8 +482,8 @@ class FluentDb {
   /// ```dart
   /// await FluentDb.updateByKey<User>(1, 'last_login', DateTime.now().toString());
   /// ```
-  static Future<void> updateByKey<T extends FluentStorable>(dynamic id, String updateKey, dynamic updateValue, {ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().updateByKey(id, updateKey, updateValue, policy: policy);
+  static Future<int> updateByKey<T extends FluentStorable>(dynamic id, String updateKey, dynamic updateValue, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().updateByKey(id, updateKey, updateValue, policy: policy.withTag(tag));
 
   /// Performs a partial update on multiple fields for a specific record.
   ///
@@ -459,8 +491,44 @@ class FluentDb {
   /// ```dart
   /// await FluentDb.updateFieldsMultiple<User>(1, {'status': 'active', 'last_seen': '2026-05-25'});
   /// ```
-  static Future<void> updateFieldsMultiple<T extends FluentStorable>(dynamic id, Map<String, dynamic> fields, {ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().updateFieldsMultiple(id, fields, policy: policy);
+  static Future<int> updateFieldsMultiple<T extends FluentStorable>(dynamic id, Map<String, dynamic> fields, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().updateFieldsMultiple(id, fields, policy: policy.withTag(tag));
+
+  /// Performs a transactional batch update of multiple entity instances.
+  ///
+  /// This method iterates through the provided [items], synchronizes their
+  /// fields with the database schema, and commits the updates as an atomic
+  /// transaction. It is the most efficient way to perform bulk state updates
+  /// across your data layer.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// final List<User> usersToUpdate = [user1, user2, user3];
+  /// // Perform bulk update on all provided instances
+  /// final int affectedRows = await FluentDb.updateAll(usersToUpdate);
+  /// print('Successfully updated $affectedRows records.');
+  /// ```
+  static Future<int> updateAll<T extends FluentStorable>(Iterable<T> items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().updateAll(items, policy: policy.withTag(tag));
+
+  /// Performs a transactional batch update of specific fields for a set of identified entities.
+  ///
+  /// This method is designed for high-performance bulk state changes. It takes a set
+  /// of primary keys and a map of fields, updates all matching records in the
+  /// database to the new values, and ensures schema integrity by filtering
+  /// out non-existent columns.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Mass-update the 'status' and 'updated_at' fields for a set of users
+  /// final int updatedCount = await FluentDb.updateMultipleFieldsByIds<User>(
+  ///   {1, 2, 3, 4, 5},
+  ///   {'status': 'active', 'updated_at': DateTime.now().toIso8601String()},
+  /// );
+  /// print('Successfully updated $updatedCount records.');
+  /// ```
+  static Future<int> updateMultipleFieldsByIds<T extends FluentStorable>(Set<dynamic> ids, Map<String, dynamic> fields, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().updateFieldsMultipleByIds(ids, fields, policy: policy.withTag(tag));
 
   /// Deletes a specific record instance.
   ///
@@ -468,10 +536,7 @@ class FluentDb {
   /// ```dart
   /// await FluentDb.delete<User>(userInstance);
   /// ```
-  static Future<void> delete<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) {
-    final ExecutionPolicy effectivePolicy = tag != null ? policy.copyWith(customTag: tag) : policy;
-    return providerByType<T>().delete(item, policy: effectivePolicy);
-  }
+  static Future<int> delete<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().delete(item, policy: policy.withTag(tag));
 
   /// Deletes records matching a specific field value.
   ///
@@ -479,8 +544,41 @@ class FluentDb {
   /// ```dart
   /// await FluentDb.deleteBy<User>('inactive', key: 'status');
   /// ```
-  static Future<void> deleteBy<T extends FluentStorable>(dynamic value, {String? key, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().deleteBy(value, key: key, policy: policy);
+  static Future<int> deleteBy<T extends FluentStorable>(dynamic value, {Object? tag, String? key, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().deleteBy(value, key: key, policy: policy.withTag(tag));
+
+  /// Performs a transactional batch deletion of multiple entity instances.
+  ///
+  /// This method iterates through the provided collection of [items], extracts
+  /// their primary keys, and executes a bulk removal operation. Depending on
+  /// the model configuration, this will either perform a soft-delete (marking
+  /// the record as inactive) or a hard-delete (permanent erasure).
+  ///
+  /// **Example:**
+  /// ```dart
+  /// final List<User> usersToDelete = [user1, user2, user3];
+  /// // Perform bulk deletion of the provided instances
+  /// final int deletedCount = await FluentDb.deleteAll(usersToDelete);
+  /// print('Successfully processed $deletedCount deletions.');
+  /// ```
+  static Future<int> deleteAll<T extends FluentStorable>(Iterable<T> items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().deleteAll(items, policy: policy.withTag(tag));
+
+  /// Performs a transactional batch hard-delete of multiple entity instances.
+  ///
+  /// Unlike standard deletion methods that may utilize soft-delete markers, this
+  /// routine executes a permanent removal of the specified [items] from the
+  /// database storage.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// final List<User> expiredUsers = [user1, user2, user3];
+  /// // Permanently remove entities from the database
+  /// final int deletedCount = await FluentDb.hardDeleteAll(expiredUsers);
+  /// print('Permanently removed $deletedCount records.');
+  /// ```
+  static Future<int> hardDeleteAll<T extends FluentStorable>(Iterable<T> items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().hardDeleteAll(items, policy: policy.withTag(tag));
 
   /// Deletes a batch of records identified by their primary keys.
   ///
@@ -488,7 +586,8 @@ class FluentDb {
   /// ```dart
   /// await FluentDb.deleteItemsByIds<User>({1, 2, 3});
   /// ```
-  static Future<void> deleteItemsByIds<T extends FluentStorable>(Set<dynamic> ids, {ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().deleteItemsByIds(ids, policy: policy);
+  static Future<int> deleteItemsByIds<T extends FluentStorable>(Set<dynamic> ids, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().deleteItemsByIds(ids, policy: policy.withTag(tag));
 
   /// Clears items that have exceeded their TTL (Time To Live).
   /// Typically used by maintenance routines.
@@ -497,8 +596,8 @@ class FluentDb {
   /// ```dart
   /// await FluentDb.clearExpiredItems<Cache>();
   /// ```
-  static Future<void> clearExpiredItems<T extends FluentStorable>({DatabaseExecutor? executor, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().clearExpiredItems(executor: executor, policy: policy);
+  static Future<int> clearExpiredItems<T extends FluentStorable>({Object? tag, DatabaseExecutor? executor, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().clearExpiredItems(executor: executor, policy: policy.withTag(tag));
 
   /// Removes all records from the table associated with type [T].
   ///
@@ -506,7 +605,7 @@ class FluentDb {
   /// ```dart
   /// await FluentDb.clearTable<Cache>();
   /// ```
-  static Future<void> clearTable<T extends FluentStorable>({ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().clearTable(policy: policy);
+  static Future<int> clearTable<T extends FluentStorable>({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().clearTable(policy: policy.withTag(tag));
 
   /// Checks if a record with the given [id] exists in the table.
   ///
@@ -524,6 +623,181 @@ class FluentDb {
   /// ```
   static Future<int> count<T extends FluentStorable>({String? where, List<Object?>? whereArgs, ExecutionPolicy policy = const ExecutionPolicy()}) =>
       providerByType<T>().count(where: where, whereArgs: whereArgs, policy: policy);
+
+  /// Executes a custom SQL statement against the database for the specified entity type [T].
+  ///
+  /// Use this method for complex database operations that are not covered
+  /// by standard CRUD methods. Returns the number of affected rows.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Update status for all inactive users and get the affected count
+  /// final int updatedCount = await FluentDb.execute<User>(
+  ///   "UPDATE users SET status = ? WHERE last_login < ?",
+  ///   arguments: [1, cutoffDate],
+  /// );
+  /// ```
+  static Future<int> execute<T extends FluentStorable>(String sql, {List<dynamic>? arguments, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().execute(sql, arguments: arguments, policy: policy);
+
+  /// Restores a soft-deleted record by its unique primary key.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// final int count = await FluentDb.restoreById<User>(101);
+  /// ```
+  static Future<int> restoreById<T extends FluentStorable>(dynamic id, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().restoreById(id, policy: policy.withTag(tag));
+
+  /// Restores a soft-deleted record by its unique primary key and immediately
+  /// retrieves the fully refreshed entity.
+  ///
+  /// This method combines [restoreById] and [findById] into a single atomic-like
+  /// operation. It is the preferred way to restore a record when you need to
+  /// reflect the restored state (e.g., reset timestamps or updated metadata)
+  /// directly in the UI without a secondary fetch call.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Restore a user and get the refreshed object instance
+  /// final User? restoredUser = await FluentDb.restoreAndFetchById<User>(101);
+  ///
+  /// if (restoredUser != null) {
+  ///   print('User restored successfully: ${restoredUser.name}');
+  /// }
+  /// ```
+  static Future<T?> restoreAndFetchById<T extends FluentStorable>(dynamic id, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().restoreAndFetchById(id, policy: policy.withTag(tag));
+
+  /// Restores a previously soft-deleted object instance.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// final int restoredCount = await FluentDb.restore<User>(userInstance);
+  /// ```
+  static Future<int> restore<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().restore(item, policy: policy.withTag(tag));
+
+  /// Restores a soft-deleted entity instance and returns its refreshed state from the database.
+  ///
+  /// This method is the instance-based counterpart to [restoreAndFetchById]. It is
+  /// designed for scenarios where you already hold the entity object in memory (e.g.,
+  /// after selecting it from a "trash" list) and need to immediately return it to
+  /// an "active" state with updated database-managed fields.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Restore an entity instance held in memory and get its refreshed state
+  /// final User? activeUser = await FluentDb.restoreAndFetch(deletedUserInstance);
+  ///
+  /// if (activeUser != null) {
+  ///   print('Entity restored and synced: ${activeUser.id}');
+  /// }
+  /// ```
+  static Future<T?> restoreAndFetch<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().restoreAndFetch(item, policy: policy.withTag(tag));
+
+  /// Performs a transactional batch restoration of multiple soft-deleted entity instances.
+  ///
+  /// This method iterates through the provided collection of [items], extracts their
+  /// primary keys, and initiates a bulk restoration sequence. It is the most
+  /// efficient way to restore multiple records while ensuring relational and
+  /// transactional integrity.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// final List<User> deletedUsers = [user1, user2, user3];
+  /// // Restore multiple entities in a single atomic operation
+  /// final int restoredCount = await FluentDb.restoreAll(deletedUsers);
+  /// print('Successfully restored $restoredCount records.');
+  /// ```
+  static Future<int> restoreAll<T extends FluentStorable>(Iterable<T> items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().restoreAll(items, policy: policy.withTag(tag));
+
+  /// Performs a transactional batch restoration of multiple soft-deleted entities
+  /// identified by their primary keys.
+  ///
+  /// This method is the primary entry point for bulk recovery operations. It
+  /// coordinates the restoration process by resetting deletion markers across
+  /// all provided identifiers in a single atomic database transaction.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Restore a specific set of users by their IDs
+  /// final int restoredCount = await FluentDb.restoreItemsByIds<User>({101, 102, 103});
+  /// print('Restored $restoredCount records.');
+  /// ```
+  static Future<int> restoreItemsByIds<T extends FluentStorable>(Set<dynamic> ids, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().restoreItemsByIds(ids, policy: policy.withTag(tag));
+
+  /// Permanently removes an object instance from the database, bypassing any soft-delete mechanisms.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// await FluentDb.hardDelete<User>(userInstance);
+  /// ```
+  static Future<int> hardDelete<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().hardDelete(item, policy: policy.withTag(tag));
+
+  /// Permanently removes a record from the database by its primary key, bypassing any soft-delete mechanisms.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// final int deletedCount = await FluentDb.hardDeleteById<User>(101);
+  /// ```
+  static Future<int> hardDeleteById<T extends FluentStorable>(dynamic id, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().hardDeleteById(id, policy: policy.withTag(tag));
+
+  /// Permanently removes records matching a specific field value, bypassing any soft-delete mechanisms.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Permanently delete all users with a specific status
+  /// await FluentDb.hardDeleteBy<User>( 'inactive', key: 'status');
+  /// ```
+  static Future<int> hardDeleteBy<T extends FluentStorable>(dynamic value, {Object? tag, String? key, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().hardDeleteBy(value, key: key, policy: policy.withTag(tag));
+
+  /// Permanently removes a collection of records from the database by their primary keys.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Permanently delete multiple products by their IDs
+  /// await FluentDb.hardDeleteItemsByIds<Product>({10, 25, 42});
+  /// ```
+  static Future<int> hardDeleteItemsByIds<T extends FluentStorable>(Set<dynamic> ids, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().hardDeleteItemsByIds(ids, policy: policy.withTag(tag));
+
+  /// Retrieves all records of type [T] that have been marked as soft-deleted.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Fetch the last 20 deleted items for potential recovery
+  /// final List<User> deletedUsers = await FluentDb.findDeletedItems<User>(limit: 20);
+  /// ```
+  static Future<List<T>> findDeletedItems<T extends FluentStorable>({int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().findDeletedItems(limit: limit, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy);
+
+  /// Permanently deletes all soft-deleted records of type [T] that have exceeded their retention period.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Run a cleanup task to permanently remove expired deleted records
+  /// await FluentDb.purgeSoftDeleted<User>();
+  /// ```
+  static Future<int> purgeSoftDeleted<T extends FluentStorable>({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().purgeSoftDeleted(policy: policy.withTag(tag));
+
+  /// Permanently and immediately removes all soft-deleted records of type [T].
+  ///
+  /// Unlike [purgeSoftDeleted], which respects the retention period, this method
+  /// acts as an "Empty Trash" function, forcefully deleting all records currently
+  /// marked as soft-deleted regardless of when they were deleted.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Manual "forcePurgeSoftDeleted" functionality initiated by the user
+  /// final int clearedItems = await FluentDb.forcePurgeSoftDeleted<User>();
+  /// ```
+  static Future<int> forcePurgeSoftDeleted<T extends FluentStorable>({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
+      providerByType<T>().forcePurgeSoftDeleted(policy: policy.withTag(tag));
 
   /// Persists a heterogeneous collection of [FluentStorable] items using the background
   /// execution queue.
@@ -545,8 +819,6 @@ class FluentDb {
   static Future<void> saveAll<T extends FluentStorable>(List<T> itemsToSave, {bool updateIfExists = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
     if (itemsToSave.isEmpty) return;
 
-    final ExecutionPolicy effectivePolicy = tag != null ? policy.copyWith(customTag: tag) : policy;
-
     final Map<Type, List<FluentStorable>> groupedItems = {};
     for (final T item in itemsToSave) {
       groupedItems.putIfAbsent(item.runtimeType, () => []).add(item);
@@ -560,24 +832,62 @@ class FluentDb {
 
       final FluentProvider provider = providerForType(targetType);
 
-      batchTasks.add(provider.saveItems(typedItems, updateIfExist: updateIfExists, policy: effectivePolicy));
+      batchTasks.add(provider.saveItems(typedItems, updateIfExist: updateIfExists, policy: policy.withTag(tag)));
     }
 
     await Future.wait(batchTasks);
   }
+
+  /// Orchestrates a data synchronization cycle between the local database and a remote backend.
+  ///
+  /// This method provides a centralized way to execute synchronization strategies,
+  /// handling data discovery, asynchronous network transport, and post-sync database
+  /// cleanup or state updates.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Push pending local tasks to the server and mark them as synced
+  /// final FluentSyncResult<Task> result = await FluentDb.syncWithServer<Task>(
+  ///   strategy: FluentSyncStrategy.pushActive,
+  ///   onPush: (items) async => await myApiClient.uploadTasks(items),
+  ///   additionalWhere: 'is_synced = 0',
+  ///   markAsSyncedFields: {'is_synced': 1},
+  ///   tag: 'TaskSync',
+  /// );
+  /// ```
+  static Future<FluentSyncResult<T>> syncWithServer<T extends FluentStorable>({
+    required FluentSyncStrategy strategy,
+    Future<bool> Function(List<T> items)? onPush,
+    Future<List<T>> Function()? onPull,
+    String? additionalWhere,
+    List<Object?>? additionalWhereArgs,
+    Map<String, dynamic>? markAsSyncedFields,
+    Object? tag,
+    ExecutionPolicy policy = const ExecutionPolicy(),
+  }) => providerByType<T>().syncWithServer(
+    strategy: strategy,
+    onPush: onPush,
+    onPull: onPull,
+    additionalWhere: additionalWhere,
+    additionalWhereArgs: additionalWhereArgs,
+    markAsSyncedFields: markAsSyncedFields,
+    tag: tag,
+    policy: policy,
+  );
 
   /// Dispatches a database task to the background `FluentEngine` for execution.
   ///
   /// This is the core engine of the registry. It handles:
   /// 1. **Context Resolution:** Automatically mapping a [FluentTask] to the correct table/provider.
   /// 2. **Policy Flattening:** Merging operation-specific, provider-level, and global execution policies.
-  /// 3. **Result Hydration:** Converting raw SQL results (from the worker isolate) back into domain models using the appropriate [FluentProviderMapper].
+  /// 3. **Result Hydration:** Converting raw SQL results (from the worker isolate) back into domain models using the appropriate [FluentMapper].
   ///
   /// **Example Usage:**
   /// ```dart
   /// final FluentTask task = FluentTask(action: DbAction.findAll);
   /// final user = await FluentDb.executeTask<User, User?>(task: task);
   /// ```
+  @internal
   static Future<R> executeTask<T, R>({required FluentTask task, FluentProvider? provider}) async {
     FluentTask effectiveData = task;
 
@@ -610,14 +920,14 @@ class FluentDb {
       if (task.action == FluentDbAction.findById || task.action == FluentDbAction.rawGetItem) {
         if (result.isEmpty) return null as R;
 
-        final FluentStorable model = FluentProviderMapper(provider).mapToModelSync(result.first);
+        final FluentStorable model = FluentMapper(provider).mapToModelSync(result.first);
         return model as R;
       }
 
       if (task.action == FluentDbAction.find || task.action == FluentDbAction.findAll || task.action == FluentDbAction.findValidItems || task.action == FluentDbAction.findItemsBy) {
         if (result.isEmpty) return <T>[] as R;
 
-        final List<T> models = result.map<T>((row) => FluentProviderMapper(provider!).mapToModelSync(row) as T).toList(growable: false);
+        final List<T> models = result.map<T>((row) => FluentMapper(provider!).mapToModelSync(row) as T).toList(growable: false);
         return models as R;
       }
     }

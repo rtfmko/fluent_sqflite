@@ -288,6 +288,14 @@ enum FluentDbAction {
   /// Updates a record and its nested relationships (cascading update).
   updateWithRelations,
 
+  /// Updates all records in the table that match the provided field-value constraints
+  /// with the new values defined in the map.
+  updateAll,
+
+  /// Performs a bulk update of multiple records identified by their primary keys
+  /// in a single atomic transaction.
+  updateMultipleFieldsByIds,
+
   /// Removes a single record.
   delete,
 
@@ -320,6 +328,31 @@ enum FluentDbAction {
 
   /// Save system stats
   saveStats,
+
+  /// Restores a soft-deleted record, reverting the deletion flag.
+  restore,
+
+  /// Restores a batch of soft-deleted records by their primary keys,
+  /// reverting the soft-delete flag to active status.
+  restoreItemsByIds,
+
+  /// Permanently removes a record from the database (bypass soft-delete).
+  hardDelete,
+
+  /// Permanently removes records matching a specific field/value constraint.
+  hardDeleteBy,
+
+  /// Mass-deletion of multiple records by their primary keys (bypass soft-delete).
+  hardDeleteItemsByIds,
+
+  /// Fetches all records currently marked as soft-deleted.
+  findDeletedItems,
+
+  /// Permanently purges all soft-deleted records that exceeded the retention period.
+  purgeSoftDeleted,
+
+  /// Permanently and forcefully removes all soft-deleted records from the table, bypassing retention policies.
+  forcePurgeSoftDeleted,
 }
 
 /// Represents the computational or relational complexity of a specific database table.
@@ -415,4 +448,26 @@ enum SortDirection {
 
   /// Sorts results in descending order (largest to smallest).
   desc,
+}
+
+/// Defines the synchronization behaviors for reconciling local data with a remote server.
+///
+/// Use these strategies within [FluentDb.syncWithServer] to orchestrate automated
+/// data exchange and lifecycle management between your local SQLite database
+/// and your backend API.
+enum FluentSyncStrategy {
+  /// **Purge Strategy:** Identifies soft-deleted records, pushes them to the server
+  /// for archival or remote deletion, and performs a permanent batch hard-delete
+  /// from the local database upon successful confirmation.
+  purgeDeleted,
+
+  /// **Push Strategy:** Identifies active (non-deleted) records that require
+  /// synchronization, pushes their state to the server, and optionally updates
+  /// local metadata (e.g., `is_synced` or `updated_at` flags) to avoid redundant uploads.
+  pushActive,
+
+  /// **Pull Strategy:** Fetches data payloads from the server and performs
+  /// a batch upsert (update-or-insert) into the local database, ensuring
+  /// that the local state reflects the authoritative source of truth.
+  pullAndSave,
 }

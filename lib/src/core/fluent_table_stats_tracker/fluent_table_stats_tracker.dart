@@ -40,13 +40,26 @@ class FluentTableStatsTracker {
   /// Helper to generate a key directly from a [FluentTask] for streamlined lookups.
   String _makeKeyFromTask(FluentTask task) => '${task.dbName}:${task.table}';
 
+  /// Forcefully resets the row count for a table to zero.
+  /// Used after truncation (clearTable) to keep memory stats accurate.
+  void resetTableRows(String dbName, String tableName) {
+    final String key = _makeKey(dbName, tableName);
+    final TableStats? existingStats = _statsMap[key];
+
+    if (existingStats != null && existingStats.rowCount != 0) {
+      existingStats.rowCount = 0;
+      markAsDirty();
+      FluentLog.debug('Row count manually reset to 0 after table truncation.', tag: 'FluentTableStats:reset', context: {'table': tableName});
+    }
+  }
+
   /// Records the performance metrics and success state of a database operation,
   /// updating the internal statistics registry and flagging the tracker as 'dirty'.
   ///
   /// This method implements a **moving average** calculation for read and write
   /// performance, ensuring that recent latency trends are prioritized over
   /// historical data without requiring the storage of every single execution time.
-  void registerCascadeSuccess({required String dbName, required String tableName, required int elapsedMs, required bool isWrite, required int affectedRows, bool wasExecuted = false}) {
+  void registerCascadeSuccess({required String dbName, required String tableName, required int elapsedMs, required bool isWrite, required int affectedRows, int? delta, bool wasExecuted = false}) {
     final String key = _makeKey(dbName, tableName);
     final TableStats stats = _statsMap.putIfAbsent(key, () => TableStats(dbName: dbName, tableName: tableName));
 
@@ -55,7 +68,9 @@ class FluentTableStatsTracker {
       if (isWrite) {
         stats.totalWrites++;
         stats.writesSession++;
-        if (affectedRows > 0) {
+        if (delta != null) {
+          stats.rowCount = (stats.rowCount + delta).clamp(0, double.maxFinite.toInt());
+        } else if (affectedRows > 0) {
           stats.rowCount = math.max(stats.rowCount, affectedRows);
         }
       } else {

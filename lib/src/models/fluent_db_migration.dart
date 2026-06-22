@@ -14,7 +14,7 @@ class FluentDbMigration {
 
   /// Optional raw SQL commands to be executed during the migration
   /// (e.g., table renaming, index creation, or data transformation).
-  final List<String>? rawSql;
+  // final List<String>? rawSql;
 
   /// Creates a [FluentDbMigration] instance representing a specific schema evolution step.
   ///
@@ -25,7 +25,7 @@ class FluentDbMigration {
   /// [rawSql] An optional list of custom SQL strings for operations that cannot
   /// be represented by column metadata alone, such as dropping constraints,
   /// creating indexes, or migrating legacy data.
-  const FluentDbMigration({required this.columns, this.rawSql});
+  const FluentDbMigration({required this.columns});
 
   @override
   String toString() {

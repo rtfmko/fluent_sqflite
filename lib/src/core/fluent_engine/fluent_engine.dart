@@ -291,7 +291,7 @@ class FluentEngine {
   /// 4. **Accumulation:** Initializes a resul
   Future<dynamic> _executeTaskInPipeline(FluentTask task) async {
     final int id = _nextId;
-    task.id = id;
+    task = task.copyWith(id: id);
 
     // Calculate weight for priority ordering in the queue
     final int weight = _calculateFinalWeight(task);
@@ -310,25 +310,6 @@ class FluentEngine {
     return completer.future;
   }
 
-  /// Dispatches a database task that returns data via a continuous [Stream]. //todo in next release
-  Stream<List<Map<String, dynamic>>> _dispatchStream(FluentTask task) {
-    final int id = _nextId;
-    task.id = id;
-
-    final StreamController<List<Map<String, dynamic>>> controller = StreamController<List<Map<String, dynamic>>>.broadcast(
-      onCancel: () {
-        FluentLog.debug('Stream cancelled by subscriber', tag: 'FluentEngine:stream', context: {'taskId': id});
-        cancelTask(id);
-        _streamRequests.remove(id);
-      },
-    );
-
-    _streamRequests[id] = controller;
-    _enqueue(task);
-
-    return controller.stream;
-  }
-
   /// Adds a [FluentTask] to the execution queue, using a binary search algorithm
   /// to maintain strict ordering based on priority, 'force' status, and weight.
   ///
@@ -344,7 +325,6 @@ class FluentEngine {
   /// 4. If all parameters are equal, FIFO order is preserved by placing the
   ///    new task after existing ones.
   void _enqueue(FluentTask task) {
-
     // Calculate execution weight if not already assigned
     if (task.executionWeight == 0) {
       task.executionWeight = _calculateFinalWeight(task);
@@ -437,7 +417,7 @@ class FluentEngine {
     // if (_toWorker == null) return;
 
     FluentTask? taskToExecute;
-    bool isWriteAction = false;
+    // bool isWriteAction = false;
     int targetIndex = -1;
 
     SQLitePerformanceConfig? selectedConfig;
@@ -446,16 +426,6 @@ class FluentEngine {
       final FluentTask currentTask = _queue[i];
       final SQLitePerformanceConfig? config = _configs[currentTask.dbName];
       final FluentDbExecutionStrategy strategy = config?.executionStrategy ?? FluentDbExecutionStrategy.concurrentWAL;
-
-      final bool currentIsWrite =
-          currentTask.action == FluentDbAction.save ||
-          currentTask.action == FluentDbAction.update ||
-          currentTask.action == FluentDbAction.updateSingleField ||
-          currentTask.action == FluentDbAction.updateMultipleFields ||
-          currentTask.action == FluentDbAction.updateWithRelations ||
-          currentTask.action == FluentDbAction.delete ||
-          currentTask.action == FluentDbAction.deleteBy ||
-          currentTask.action == FluentDbAction.deleteItemsByIds;
 
       // --- STRATEGY A: strictSequential ---
       // Exclusive lock: ensures zero concurrent I/O. Safe for destructive operations.
@@ -466,7 +436,7 @@ class FluentEngine {
         }
 
         taskToExecute = currentTask;
-        isWriteAction = currentIsWrite;
+        // isWriteAction = currentIsWrite;
         targetIndex = i;
         selectedConfig = config;
         break;
@@ -484,22 +454,22 @@ class FluentEngine {
         targetIndex = i;
         selectedConfig = config;
 
-        if (currentIsWrite) {
-          isWriteAction = true;
-        } else {
-          final bool shouldGoToIsolate = currentTask.policy.useIsolate ?? (currentTask.executionWeight >= 25);
-          isWriteAction = !shouldGoToIsolate;
-        }
+        // if (currentIsWrite) {
+        // isWriteAction = true;
+        // } else {
+        // final bool shouldGoToIsolate = currentTask.policy.useIsolate ?? (currentTask.executionWeight >= 25);
+        // isWriteAction = !shouldGoToIsolate;
+        // }
         break;
       }
 
       // --- STRATEGY C: concurrentWAL ---
       // Maximum throughput mode: allows parallel Reads and Writes.
       if (strategy == FluentDbExecutionStrategy.concurrentWAL) {
-        if (currentIsWrite) {
+        if (currentTask.isWriteOp) {
           if (!_isMainWorkerBusy) {
             taskToExecute = currentTask;
-            isWriteAction = true;
+            // isWriteAction = true;
             targetIndex = i;
             selectedConfig = config;
             break;
@@ -518,7 +488,7 @@ class FluentEngine {
           // } else {
           if (!_isMainWorkerBusy) {
             taskToExecute = currentTask;
-            isWriteAction = true;
+            // isWriteAction = true;
             targetIndex = i;
             selectedConfig = config;
             break;
@@ -635,48 +605,48 @@ class FluentEngine {
   /// 2. **Deserialization:** Converts the map to a typed [IsolateResponse].
   /// 3. **Routing:** Uses a pattern-matched switch to trigger lifecycle events,
   ///    error recovery, or data chunk completion callbacks.
-  void _handleWorkerMessage(dynamic message) {
-    if (message is! Map) return;
-    final Map<String, dynamic> rawMessage = message.cast<String, dynamic>();
-    final IsolateResponse response = IsolateResponse.fromMap(rawMessage);
-
-    // Decoupled log and system event processing
-    unawaited(_interceptLogs(response));
-
-    // Route the response to the corresponding specialized handler
-    switch (response.status) {
-      case IsolateStatus.none:
-        break;
-
-      case IsolateStatus.ok:
-        _handleOkStatus(response);
-        break;
-
-      case IsolateStatus.progress:
-        _handleProgress(response);
-        break;
-
-      case IsolateStatus.warmupDone:
-        _handleWarmupDone();
-        break;
-
-      case IsolateStatus.analyzeDone:
-        _handleAnalyzeDone(response);
-        break;
-
-      case IsolateStatus.error:
-        _handleError(response);
-        break;
-
-      case IsolateStatus.saveDone:
-        _handleSaveDone(response);
-        break;
-
-      case IsolateStatus.terminated:
-        FluentLog.info('Worker confirmed termination.', tag: 'FluentEngine:lifecycle');
-        break;
-    }
-  }
+  // void _handleWorkerMessage(dynamic message) {
+  //   if (message is! Map) return;
+  //   final Map<String, dynamic> rawMessage = message.cast<String, dynamic>();
+  //   final IsolateResponse response = IsolateResponse.fromMap(rawMessage);
+  //
+  //   // Decoupled log and system event processing
+  //   unawaited(_interceptLogs(response));
+  //
+  //   // Route the response to the corresponding specialized handler
+  //   switch (response.status) {
+  //     case IsolateStatus.none:
+  //       break;
+  //
+  //     case IsolateStatus.ok:
+  //       _handleOkStatus(response);
+  //       break;
+  //
+  //     case IsolateStatus.progress:
+  //       _handleProgress(response);
+  //       break;
+  //
+  //     case IsolateStatus.warmupDone:
+  //       _handleWarmupDone();
+  //       break;
+  //
+  //     case IsolateStatus.analyzeDone:
+  //       _handleAnalyzeDone(response);
+  //       break;
+  //
+  //     case IsolateStatus.error:
+  //       _handleError(response);
+  //       break;
+  //
+  //     case IsolateStatus.saveDone:
+  //       _handleSaveDone(response);
+  //       break;
+  //
+  //     case IsolateStatus.terminated:
+  //       FluentLog.info('Worker confirmed termination.', tag: 'FluentEngine:lifecycle');
+  //       break;
+  //   }
+  // }
 
   /// Asynchronously intercepts and processes telemetry data from a background worker isolate.
   ///
@@ -691,30 +661,30 @@ class FluentEngine {
   /// * **Unified Error Handling:** Captures `errorCode` signals to populate
   ///   error reporting tools with necessary context, including stack traces
   ///   and metadata for post-mortem debugging.
-  Future<void> _interceptLogs(IsolateResponse response) async {
-    // 1. Log Aggregation
-    if (response.logs.isNotEmpty) {
-      for (final logEntry in response.logs) {
-        FluentLog.debug(logEntry, tag: 'FluentWorker:${response.task?.table ?? response.taskId}');
-      }
-    }
-
-    // 2. System Monitoring
-    if (response.taskId == _systemId) {
-      FluentLog.info('System Task Processed: ${response.status}', tag: 'FluentWorker:System');
-    }
-
-    // 3. Error Telemetry (Unified)
-    if (response.errorCode != null) {
-      FluentLog.error(
-        'Worker reported error: ${response.errorCode}',
-        FluentEngineException('Worker reported error: ${response.errorCode}', component: 'FluentWorker', task: response.task),
-        StackTrace.current,
-        tag: 'FluentWorker:Error',
-        context: {'taskId': response.taskId, 'data': response.data},
-      );
-    }
-  }
+  // Future<void> _interceptLogs(IsolateResponse response) async {
+  //   // 1. Log Aggregation
+  //   if (response.logs.isNotEmpty) {
+  //     for (final logEntry in response.logs) {
+  //       FluentLog.debug(logEntry, tag: 'FluentWorker:${response.task?.table ?? response.taskId}');
+  //     }
+  //   }
+  //
+  //   // 2. System Monitoring
+  //   if (response.taskId == _systemId) {
+  //     FluentLog.info('System Task Processed: ${response.status}', tag: 'FluentWorker:System');
+  //   }
+  //
+  //   // 3. Error Telemetry (Unified)
+  //   if (response.errorCode != null) {
+  //     FluentLog.error(
+  //       'Worker reported error: ${response.errorCode}',
+  //       FluentEngineException('Worker reported error: ${response.errorCode}', component: 'FluentWorker', task: response.task),
+  //       StackTrace.current,
+  //       tag: 'FluentWorker:Error',
+  //       context: {'taskId': response.taskId, 'data': response.data},
+  //     );
+  //   }
+  // }
 
   /// Handles the successful completion of an Isolate database task.
   ///
@@ -726,73 +696,73 @@ class FluentEngine {
   /// 3. **Telemetry Integration:** Updates [FluentTableStatsTracker] with execution metrics,
   ///    cascading table impacts, and row-count performance data.
   /// 4. **Pipeline Resumption:** Triggers the next task in the queue.
-  void _handleOkStatus(IsolateResponse response) {
-    final int id = response.taskId;
-    // _isIsolateWorkerBusy = false;
-    _checkPauseState();
-
-    final List<Map<String, dynamic>> lastData = _parseData(response.data);
-    final Completer<dynamic>? completer = _pendingRequests.remove(id);
-    final List<Map<String, dynamic>>? accumulatedData = _chunkAccumulators.remove(id);
-
-    // Finalize standard async requests
-    if (completer != null && !completer.isCompleted) {
-      final finalResult = accumulatedData != null ? [...accumulatedData, ...lastData] : lastData;
-      completer.complete(finalResult);
-    }
-
-    // Finalize stream-based requests
-    final StreamController<List<Map<String, dynamic>>>? controller = _streamRequests.remove(id);
-    if (controller != null && !controller.isClosed) {
-      if (lastData.isNotEmpty) controller.add(lastData);
-      controller.close();
-    }
-
-    // Process system tasks without updating performance telemetry
-    if (response.task != null && (response.task?.isSystem ?? false)) {
-      _processNext();
-      return;
-    }
-
-    // Update performance metrics for standard user operations
-    if (response.task != null) {
-      final tracker = FluentTableStatsTracker();
-      final bool isWriteAction = response.task!.action == FluentDbAction.save || response.task!.action == FluentDbAction.update || response.task!.action == FluentDbAction.delete;
-
-      FluentLog.debug('Task executed successfully', tag: 'FluentEngine:okStatus', context: {'taskId': id, 'duration': '${response.executionTime}ms', 'isWrite': isWriteAction});
-
-      if (response.affectedTables.isNotEmpty) {
-        final String rootTable = response.task!.table;
-        bool isRootProcessedInCascade = false;
-
-        response.affectedTables.forEach((tableName, encodedValue) {
-          if (tableName == rootTable) isRootProcessedInCascade = true;
-
-          // Unpack performance metrics from high-order bits
-          final int pureElapsedMs = encodedValue >> 32;
-          final int affectedRows = encodedValue & 0xFFFFFFFF;
-
-          tracker.registerCascadeSuccess(dbName: response.task!.dbName, tableName: tableName, elapsedMs: pureElapsedMs, isWrite: isWriteAction, affectedRows: affectedRows, wasExecuted: true);
-        });
-
-        if (!isRootProcessedInCascade) {
-          final int rootTime = response.affectedTables[rootTable] ?? response.executionTime;
-          tracker.registerCascadeSuccess(
-            dbName: response.task!.dbName,
-            tableName: rootTable,
-            elapsedMs: rootTime <= 0 ? 1 : rootTime,
-            isWrite: isWriteAction,
-            affectedRows: response.totalRows,
-            wasExecuted: true,
-          );
-        }
-      } else {
-        tracker.registerSuccess(task: response.task!, elapsedMs: response.executionTime, isWrite: isWriteAction, rows: response.totalRows);
-      }
-    }
-
-    _processNext();
-  }
+  // void _handleOkStatus(IsolateResponse response) {
+  //   final int id = response.taskId;
+  //   // _isIsolateWorkerBusy = false;
+  //   _checkPauseState();
+  //
+  //   final List<Map<String, dynamic>> lastData = _parseData(response.data);
+  //   final Completer<dynamic>? completer = _pendingRequests.remove(id);
+  //   final List<Map<String, dynamic>>? accumulatedData = _chunkAccumulators.remove(id);
+  //
+  //   // Finalize standard async requests
+  //   if (completer != null && !completer.isCompleted) {
+  //     final finalResult = accumulatedData != null ? [...accumulatedData, ...lastData] : lastData;
+  //     completer.complete(finalResult);
+  //   }
+  //
+  //   // Finalize stream-based requests
+  //   final StreamController<List<Map<String, dynamic>>>? controller = _streamRequests.remove(id);
+  //   if (controller != null && !controller.isClosed) {
+  //     if (lastData.isNotEmpty) controller.add(lastData);
+  //     controller.close();
+  //   }
+  //
+  //   // Process system tasks without updating performance telemetry
+  //   if (response.task != null && (response.task?.isSystem ?? false)) {
+  //     _processNext();
+  //     return;
+  //   }
+  //
+  //   // Update performance metrics for standard user operations
+  //   if (response.task != null) {
+  //     final tracker = FluentTableStatsTracker();
+  //     final bool isWriteAction = response.task!.action == FluentDbAction.save || response.task!.action == FluentDbAction.update || response.task!.action == FluentDbAction.delete;
+  //
+  //     FluentLog.debug('Task executed successfully', tag: 'FluentEngine:okStatus', context: {'taskId': id, 'duration': '${response.executionTime}ms', 'isWrite': isWriteAction});
+  //
+  //     if (response.affectedTables.isNotEmpty) {
+  //       final String rootTable = response.task!.table;
+  //       bool isRootProcessedInCascade = false;
+  //
+  //       response.affectedTables.forEach((tableName, encodedValue) {
+  //         if (tableName == rootTable) isRootProcessedInCascade = true;
+  //
+  //         // Unpack performance metrics from high-order bits
+  //         final int pureElapsedMs = encodedValue >> 32;
+  //         final int affectedRows = encodedValue & 0xFFFFFFFF;
+  //
+  //         tracker.registerCascadeSuccess(dbName: response.task!.dbName, tableName: tableName, elapsedMs: pureElapsedMs, isWrite: isWriteAction, affectedRows: affectedRows, wasExecuted: true);
+  //       });
+  //
+  //       if (!isRootProcessedInCascade) {
+  //         final int rootTime = response.affectedTables[rootTable] ?? response.executionTime;
+  //         tracker.registerCascadeSuccess(
+  //           dbName: response.task!.dbName,
+  //           tableName: rootTable,
+  //           elapsedMs: rootTime <= 0 ? 1 : rootTime,
+  //           isWrite: isWriteAction,
+  //           affectedRows: response.totalRows,
+  //           wasExecuted: true,
+  //         );
+  //       }
+  //     } else {
+  //       tracker.registerSuccess(task: response.task!, elapsedMs: response.executionTime, isWrite: isWriteAction, rows: response.totalRows);
+  //     }
+  //   }
+  //
+  //   _processNext();
+  // }
 
   /// Handles intermediate data chunks streaming from the background isolate.
   ///
@@ -803,24 +773,24 @@ class FluentEngine {
   /// 3. **Memory Accumulation:** Appends the chunk to the internal `_chunkAccumulators`
   ///    buffer, ensuring the full result set is ready once the final `IsolateStatus.ok`
   ///    message arrives.
-  void _handleProgress(IsolateResponse response) {
-    final int id = response.taskId;
-    final List<Map<String, dynamic>> chunk = _parseData(response.data);
-
-    FluentLog.debug('Received data chunk', tag: 'FluentEngine:progress', context: {'taskId': id, 'chunkSize': chunk.length});
-
-    // If the request was opened via dispatchStream(), forward data to the stream
-    final StreamController<List<Map<String, dynamic>>>? controller = _streamRequests[id];
-    if (controller != null && !controller.isClosed) {
-      controller.add(chunk);
-    }
-
-    // Accumulate the chunk in case the task expects the full result at the end
-    final List<Map<String, dynamic>>? accumulator = _chunkAccumulators[id];
-    if (accumulator != null) {
-      accumulator.addAll(chunk);
-    }
-  }
+  // void _handleProgress(IsolateResponse response) {
+  //   final int id = response.taskId;
+  //   final List<Map<String, dynamic>> chunk = _parseData(response.data);
+  //
+  //   FluentLog.debug('Received data chunk', tag: 'FluentEngine:progress', context: {'taskId': id, 'chunkSize': chunk.length});
+  //
+  //   // If the request was opened via dispatchStream(), forward data to the stream
+  //   final StreamController<List<Map<String, dynamic>>>? controller = _streamRequests[id];
+  //   if (controller != null && !controller.isClosed) {
+  //     controller.add(chunk);
+  //   }
+  //
+  //   // Accumulate the chunk in case the task expects the full result at the end
+  //   final List<Map<String, dynamic>>? accumulator = _chunkAccumulators[id];
+  //   if (accumulator != null) {
+  //     accumulator.addAll(chunk);
+  //   }
+  // }
 
   /// Finalizes the database worker initialization sequence.
   ///
@@ -830,15 +800,15 @@ class FluentEngine {
   /// 2. **Analysis Trigger:** Initiates database health/schema analysis
   ///    asynchronously to avoid blocking the main startup sequence.
   /// 3. **Persistence:** Starts the auto-save timer for telemetry and performance stats.
-  void _handleWarmupDone() {
-    FluentLog.info('Warmup & Stats pre-load complete.', tag: 'FluentEngine:warmupDone');
-    // Trigger analysis in the background without waiting for it to finish,
-    // ensuring the application reaches an "interactive" state faster.
-    unawaited(_triggerDatabaseAnalysis());
-
-    // Start the periodic flush cycle for performance metrics
-    _startAutoSaveTimer();
-  }
+  // void _handleWarmupDone() {
+  //   FluentLog.info('Warmup & Stats pre-load complete.', tag: 'FluentEngine:warmupDone');
+  //   // Trigger analysis in the background without waiting for it to finish,
+  //   // ensuring the application reaches an "interactive" state faster.
+  //   unawaited(_triggerDatabaseAnalysis());
+  //
+  //   // Start the periodic flush cycle for performance metrics
+  //   _startAutoSaveTimer();
+  // }
 
   /// Merges analysis results from the background worker into the main thread's
   /// performance tracking registry.
@@ -851,43 +821,43 @@ class FluentEngine {
   ///    same, preventing stale isolate data from overwriting fresher main-thread stats.
   /// 3. **Registry Resolution:** Completes the `_pendingRequests` future associated
   ///    with the analysis task, allowing the system to proceed.
-  void _handleAnalyzeDone(IsolateResponse response) {
-    final int id = response.taskId;
-
-    if (response.data is List) {
-      final List<dynamic> rawList = response.data as List;
-      final FluentTableStatsTracker tracker = FluentTableStatsTracker();
-
-      for (final dynamic item in rawList) {
-        if (item is Map) {
-          final Map<String, dynamic> statRow = item.cast<String, dynamic>();
-          final TableStats incomingStats = TableStats.fromMap(statRow);
-          final String key = '${incomingStats.dbName}:${incomingStats.tableName}';
-
-          // Perform an intelligent merge to maintain the most accurate performance profile
-          final TableStats? existingStats = tracker._statsMap[key];
-          if (existingStats != null) {
-            existingStats.rowCount = math.max(existingStats.rowCount, incomingStats.rowCount);
-
-            if (incomingStats.totalReads > existingStats.totalReads) {
-              existingStats.totalReads = incomingStats.totalReads;
-            }
-            if (incomingStats.totalWrites > existingStats.totalWrites) {
-              existingStats.totalWrites = incomingStats.totalWrites;
-            }
-          } else {
-            tracker._statsMap[key] = incomingStats;
-          }
-        }
-      }
-      FluentLog.info('Table Stats Tracker intelligently patched', tag: 'FluentEngine:analyzeDone', context: {'metricsProcessed': rawList.length});
-    }
-
-    final Completer<dynamic>? completer = _pendingRequests.remove(id);
-    if (completer != null && !completer.isCompleted) {
-      completer.complete(true);
-    }
-  }
+  // void _handleAnalyzeDone(IsolateResponse response) {
+  //   final int id = response.taskId;
+  //
+  //   if (response.data is List) {
+  //     final List<dynamic> rawList = response.data as List;
+  //     final FluentTableStatsTracker tracker = FluentTableStatsTracker();
+  //
+  //     for (final dynamic item in rawList) {
+  //       if (item is Map) {
+  //         final Map<String, dynamic> statRow = item.cast<String, dynamic>();
+  //         final TableStats incomingStats = TableStats.fromMap(statRow);
+  //         final String key = '${incomingStats.dbName}:${incomingStats.tableName}';
+  //
+  //         // Perform an intelligent merge to maintain the most accurate performance profile
+  //         final TableStats? existingStats = tracker._statsMap[key];
+  //         if (existingStats != null) {
+  //           existingStats.rowCount = math.max(existingStats.rowCount, incomingStats.rowCount);
+  //
+  //           if (incomingStats.totalReads > existingStats.totalReads) {
+  //             existingStats.totalReads = incomingStats.totalReads;
+  //           }
+  //           if (incomingStats.totalWrites > existingStats.totalWrites) {
+  //             existingStats.totalWrites = incomingStats.totalWrites;
+  //           }
+  //         } else {
+  //           tracker._statsMap[key] = incomingStats;
+  //         }
+  //       }
+  //     }
+  //     FluentLog.info('Table Stats Tracker intelligently patched', tag: 'FluentEngine:analyzeDone', context: {'metricsProcessed': rawList.length});
+  //   }
+  //
+  //   final Completer<dynamic>? completer = _pendingRequests.remove(id);
+  //   if (completer != null && !completer.isCompleted) {
+  //     completer.complete(true);
+  //   }
+  // }
 
   /// Handles errors reported by the background database isolate.
   ///
@@ -901,35 +871,35 @@ class FluentEngine {
   ///    exception gracefully.
   /// 4. **Cleanup:** Purges internal buffers (accumulators) and moves to the
   ///    next task in the queue to maintain system availability.
-  void _handleError(IsolateResponse response) {
-    final int id = response.taskId;
-
-    // _isIsolateWorkerBusy = false;
-    final String errorMessage = response.data?.toString() ?? 'Unknown Isolate Error';
-    FluentLog.error(
-      'Database worker operation failed',
-      FluentBaseException(errorMessage),
-      StackTrace.current,
-      tag: 'FluentEngine:error',
-      context: {'taskId': id, 'error': errorMessage, 'taskAction': response.task?.action.toString() ?? 'unknown'},
-    );
-
-    if (response.task != null) {
-      FluentTableStatsTracker().registerFailure(response.task!);
-    }
-
-    _pendingRequests.remove(id)?.completeError(errorMessage);
-
-    // Notify stream subscribers of the failure and close the stream
-    final StreamController<List<Map<String, dynamic>>>? failedController = _streamRequests.remove(id);
-    if (failedController != null && !failedController.isClosed) {
-      failedController.addError(errorMessage);
-      failedController.close();
-    }
-
-    _chunkAccumulators.remove(id);
-    _processNext();
-  }
+  // void _handleError(IsolateResponse response) {
+  //   final int id = response.taskId;
+  //
+  //   // _isIsolateWorkerBusy = false;
+  //   final String errorMessage = response.data?.toString() ?? 'Unknown Isolate Error';
+  //   FluentLog.error(
+  //     'Database worker operation failed',
+  //     FluentBaseException(errorMessage),
+  //     StackTrace.current,
+  //     tag: 'FluentEngine:error',
+  //     context: {'taskId': id, 'error': errorMessage, 'taskAction': response.task?.action.toString() ?? 'unknown'},
+  //   );
+  //
+  //   if (response.task != null) {
+  //     FluentTableStatsTracker().registerFailure(response.task!);
+  //   }
+  //
+  //   _pendingRequests.remove(id)?.completeError(errorMessage);
+  //
+  //   // Notify stream subscribers of the failure and close the stream
+  //   final StreamController<List<Map<String, dynamic>>>? failedController = _streamRequests.remove(id);
+  //   if (failedController != null && !failedController.isClosed) {
+  //     failedController.addError(errorMessage);
+  //     failedController.close();
+  //   }
+  //
+  //   _chunkAccumulators.remove(id);
+  //   _processNext();
+  // }
 
   /// Handles the acknowledgment from the background isolate that a persistence
   /// (e.g., stats flush or batch write) operation has completed successfully.
@@ -938,14 +908,14 @@ class FluentEngine {
   /// 1. **Registry Cleanup:** Removes the task from the pending requests registry.
   /// 2. **Completer Resolution:** Resolves the Future, signaling that the
   ///    persistence cascade is finished and data is safely written to disk.
-  void _handleSaveDone(IsolateResponse response) {
-    FluentLog.debug('Persistence cascade confirmed by worker', tag: 'FluentEngine:persistence', context: {'taskId': response.taskId});
-
-    final Completer<dynamic>? completer = _pendingRequests.remove(response.taskId);
-    if (completer != null && !completer.isCompleted) {
-      completer.complete(true);
-    }
-  }
+  // void _handleSaveDone(IsolateResponse response) {
+  //   FluentLog.debug('Persistence cascade confirmed by worker', tag: 'FluentEngine:persistence', context: {'taskId': response.taskId});
+  //
+  //   final Completer<dynamic>? completer = _pendingRequests.remove(response.taskId);
+  //   if (completer != null && !completer.isCompleted) {
+  //     completer.complete(true);
+  //   }
+  // }
 
   /// Initializes or resets the background synchronization timer for telemetry data.
   ///
@@ -1066,12 +1036,12 @@ class FluentEngine {
   ///    collection of maps, which is optimized for performance in Dart's runtime.
   /// 3. **Null/Type Safety:** Returns an empty list if the input is null or incorrectly typed,
   ///    preventing runtime casting exceptions and ensuring downstream logic remains robust.
-  List<Map<String, dynamic>> _parseData(dynamic data) {
-    if (data is List) {
-      return data.cast<Map<String, dynamic>>();
-    }
-    return [];
-  }
+  // List<Map<String, dynamic>> _parseData(dynamic data) {
+  //   if (data is List) {
+  //     return data.cast<Map<String, dynamic>>();
+  //   }
+  //   return [];
+  // }
 
   /// Executes a database operation directly on the Main thread.
   ///
@@ -1124,30 +1094,16 @@ class FluentEngine {
           .internalExecute(task)
           .timeout(
             task.policy.timeout!,
-            onTimeout: () {
-              throw TimeoutException(
-                '🎯 [Main Isolate Timeout] Database operation "${task.action.name}" on table "$tableName" '
-                'exceeded its allowed limit of ${task.policy.timeout!.inSeconds}s!',
-              );
-            },
+            onTimeout: () => throw TimeoutException(
+              '🎯 [Main Isolate Timeout] Database operation "${task.action.name}" on table "$tableName" '
+              'exceeded its allowed limit of ${task.policy.timeout!.inSeconds}s!',
+            ),
           );
 
       sw.stop();
       final int elapsedMs = sw.elapsedMilliseconds;
 
-      final bool isWriteOp =
-          task.action == FluentDbAction.save ||
-          task.action == FluentDbAction.update ||
-          task.action == FluentDbAction.updateSingleField ||
-          task.action == FluentDbAction.updateMultipleFields ||
-          task.action == FluentDbAction.updateWithRelations ||
-          task.action == FluentDbAction.delete ||
-          task.action == FluentDbAction.deleteBy ||
-          task.action == FluentDbAction.deleteItemsByIds;
-
-      final bool isStreamOp = task.action == FluentDbAction.save || task.action == FluentDbAction.update || task.action == FluentDbAction.delete || task.action == FluentDbAction.updateWithRelations;
-
-      if (isStreamOp) {
+      if (task.isStreamOp) {
         try {
           final FluentProvider<FluentStorable> provider = FluentDb.getProviderByTable(tableName);
           List<dynamic> normalizedItems = [];
@@ -1165,22 +1121,40 @@ class FluentEngine {
       }
 
       // Performance Telemetry: Flag heavy operations
-      if (isWriteOp) {
-        if (elapsedMs > 100) {
-          FluentLog.warning(
-            'Heavy mutation detected in Main thread',
-            tag: 'FluentEngine:main_track',
-            hint: 'Consider offloading this write operation to the isolate worker or optimizing the transaction batch size to keep main-thread execution below 100ms.',
-            context: {'tableName': tableName, 'duration': '${elapsedMs}ms'},
-          );
-
-          FluentTableStatsTracker().registerCascadeSuccess(dbName: task.dbName, tableName: tableName, elapsedMs: elapsedMs, isWrite: true, affectedRows: 1);
+      if (task.isWriteOp) {
+        if (task.action == FluentDbAction.clearTable) {
+          FluentTableStatsTracker().resetTableRows(task.dbName, tableName);
         } else {
-          int finalDelta = 0;
-          if (task.action == FluentDbAction.save) finalDelta = 1;
-          if (task.action == FluentDbAction.delete) finalDelta = -1;
+          int rowDelta = 0;
 
-          FluentTableStatsTracker().registerSuccess(task: task, elapsedMs: elapsedMs, isWrite: true, delta: finalDelta);
+          if (task.action == FluentDbAction.save) {
+            rowDelta = (task.data is List) ? (task.data as List).length : 1;
+          } else if (task.action == FluentDbAction.delete) {
+            rowDelta = -1;
+          } else if (task.action == FluentDbAction.deleteBy || task.action == FluentDbAction.deleteItemsByIds || task.action == FluentDbAction.clearExpired) {
+            rowDelta = (result is int) ? -result : 0;
+          }
+
+          if (elapsedMs > 300) {
+            FluentLog.warning(
+              'Heavy mutation detected in Main thread',
+              tag: 'FluentEngine:main_track',
+              hint: 'Consider offloading this write operation to the isolate worker or optimizing the transaction batch size to keep main-thread execution below 300ms.',
+              context: {'tableName': tableName, 'duration': '${elapsedMs}ms'},
+            );
+
+            FluentTableStatsTracker().registerCascadeSuccess(
+              dbName: task.dbName,
+              tableName: tableName,
+              elapsedMs: elapsedMs,
+              isWrite: true,
+              affectedRows: (result is int) ? result : 1,
+              delta: rowDelta,
+              wasExecuted: true,
+            );
+          } else {
+            FluentTableStatsTracker().registerSuccess(task: task, elapsedMs: elapsedMs, isWrite: true, delta: rowDelta);
+          }
         }
       } else {
         int finalRows = 0;
@@ -1188,9 +1162,8 @@ class FluentEngine {
           finalRows = result.length;
         }
 
-        FluentTableStatsTracker().registerCascadeSuccess(dbName: task.dbName, tableName: tableName, elapsedMs: elapsedMs, isWrite: false, affectedRows: finalRows);
+        FluentTableStatsTracker().registerCascadeSuccess(dbName: task.dbName, tableName: tableName, elapsedMs: elapsedMs, isWrite: false, affectedRows: finalRows, wasExecuted: true);
       }
-
       _pendingRequests.remove(task.id)?.complete(result);
 
       return result;
@@ -1254,17 +1227,8 @@ class FluentEngine {
     final double relationsMultiplier = 1.0 + (stats.relationsCount * 0.25);
 
     // Performance degradation factor: Adjusts weight for high-latency operations
-    final bool isWrite =
-        task.action == FluentDbAction.save ||
-        task.action == FluentDbAction.update ||
-        task.action == FluentDbAction.updateSingleField ||
-        task.action == FluentDbAction.updateMultipleFields ||
-        task.action == FluentDbAction.updateWithRelations ||
-        task.action == FluentDbAction.delete ||
-        task.action == FluentDbAction.deleteBy ||
-        task.action == FluentDbAction.deleteItemsByIds;
 
-    final double avgTimeMs = isWrite ? stats.avgWriteTimeMs : stats.avgReadTimeMs;
+    final double avgTimeMs = task.isWriteOp ? stats.avgWriteTimeMs : stats.avgReadTimeMs;
 
     // Gradual weight increase if avg time exceeds 50ms to prevent FluentEngine flooding
     final double timeMultiplier = 1.0 + (avgTimeMs > 50.0 ? (avgTimeMs / 100.0) : 0.0);
@@ -1297,9 +1261,9 @@ class FluentEngine {
   void cancelTask(int id) {
     FluentLog.warning('Requesting cancellation for task', tag: 'FluentEngine:cancel', context: {'taskId': id});
 
-    final int initialQueueLength = _queue.length;
+    // final int initialQueueLength = _queue.length;
     _queue.removeWhere((t) => t.id == id);
-    final bool wasInQueue = _queue.length < initialQueueLength;
+    // final bool wasInQueue = _queue.length < initialQueueLength;
 
     // Resolve pending future if it exists
     _pendingRequests.remove(id)?.completeError('Cancelled by user');
@@ -1379,18 +1343,47 @@ class FluentEngine {
     FluentLog.info('Graceful shutdown completed successfully', tag: 'FluentEngine:lifecycle', context: {'isolateTerminated': true});
   }
 
+  /// Performs a complete destruction of the engine's state and permanently
+  /// deletes the internal system telemetry database.
+  ///
+  /// This method is typically called by [FluentDb.destroyAllDatabases] during
+  /// a catastrophic reset or user logout to ensure no traces of system metrics remain.
+  Future<void> destroy() async {
+    FluentLog.warning('Destroying FluentEngine state and telemetry database...', tag: 'FluentEngine:destroy');
+    await _performCleanup(wasEmergency: false);
+
+    await _systemDb.destroySystemDb();
+
+    FluentLog.info('Engine destruction complete.', tag: 'FluentEngine:destroy');
+  }
+
   /// Centralized cleanup logic ensuring state consistency and log reporting.
   Future<void> _performCleanup({required bool wasEmergency}) async {
     // _toWorker = null;
     // _isIsolateWorkerBusy = false;
     _isMainWorkerBusy = false;
 
+    if (_saveTimer != null && _saveTimer!.isActive) {
+      _saveTimer!.cancel();
+      _saveTimer = null;
+    }
+
+    _isPaused = false;
+    if (_pauseCompleter != null && !_pauseCompleter!.isCompleted) {
+      _pauseCompleter!.completeError(Exception(wasEmergency ? 'Emergency reset aborted pause state.' : 'Engine shutdown aborted pause state.'));
+      _pauseCompleter = null;
+    }
+
+    _activeCollapses.clear();
+
+    _configs.clear();
+
     // Reject pending requests
     if (_pendingRequests.isNotEmpty) {
       final String msg = wasEmergency ? 'Database isolate was forcefully restarted.' : 'Database engine is shutting down.';
       FluentLog.warning('Rejecting pending completers', tag: 'FluentEngine:lifecycle', context: {'count': _pendingRequests.length});
 
-      for (final completer in _pendingRequests.values) {
+      for (final Completer<dynamic> completer in _pendingRequests.values) {
         if (!completer.isCompleted) completer.completeError(Exception(msg));
       }
       _pendingRequests.clear();

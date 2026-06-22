@@ -60,6 +60,12 @@ class TableHelper {
   /// The specific database column name targeted by the operation.
   final String? column;
 
+  /// Indicates whether this operation is a permanent (hard) delete.
+  ///
+  /// Note: This flag only applies to entities that implement the [FluentSoftDeletable].
+  /// If the entity does not support soft-delete, this flag is ignored.
+  final bool isHardDelete;
+
   /// The [TableHelper] constructor initializes query constraints and operational flags.
   ///
   /// Note that `updateIfExist` and `multiple` default to `true` to prioritize
@@ -82,6 +88,7 @@ class TableHelper {
     this.onlyValid = false,
     this.sortDirection,
     this.multiple = true,
+    this.isHardDelete = false,
   });
 
   /// Creates a copy of this [TableHelper] with the specified fields replaced.
@@ -102,6 +109,7 @@ class TableHelper {
     List<Object?>? arguments,
     bool? multiple,
     String? column,
+    bool? isHardDelete,
   }) => TableHelper(
     limit: limit ?? this.limit,
     offset: offset ?? this.offset,
@@ -119,6 +127,7 @@ class TableHelper {
     onlyValid: onlyValid ?? this.onlyValid,
     sortDirection: sortDirection ?? this.sortDirection,
     multiple: multiple ?? this.multiple,
+    isHardDelete: isHardDelete ?? this.isHardDelete,
   );
 
   /// Serializes the [TableHelper] instance into a JSON-compatible map.
@@ -139,6 +148,7 @@ class TableHelper {
     'onlyValid': onlyValid,
     'sortDirection': sortDirection?.index,
     'multiple': multiple,
+    'isHardDelete': isHardDelete,
   };
 
   /// Deserializes a [Map] back into a [TableHelper] instance.
@@ -159,10 +169,11 @@ class TableHelper {
     onlyValid: map['onlyValid'] is bool ? map['onlyValid'] as bool : false,
     sortDirection: map['sortDirection'] is int ? SortDirection.values.elementAt(map['sortDirection'] as int) : null,
     multiple: map['multiple'] is bool ? map['multiple'] as bool : true,
+    isHardDelete: map['isHardDelete'] is bool ? map['isHardDelete'] as bool : false,
   );
 
   @override
   String toString() {
-    return 'TableHelper{limit: $limit, offset: $offset, where: $where, whereArgs: $whereArgs, orderBy: $orderBy, id: $id, key: $key, value: $value, dataMap: $dataMap, updateIfExist: $updateIfExist, onlyValid: $onlyValid, sortDirection: $sortDirection, sql: $sql, arguments: $arguments, multiple: $multiple, column: $column}';
+    return 'TableHelper{limit: $limit, offset: $offset, where: $where, whereArgs: $whereArgs, orderBy: $orderBy, id: $id, key: $key, value: $value, dataMap: $dataMap, updateIfExist: $updateIfExist, onlyValid: $onlyValid, sortDirection: $sortDirection, sql: $sql, arguments: $arguments, multiple: $multiple, column: $column, isHardDelete: $isHardDelete }';
   }
 }
