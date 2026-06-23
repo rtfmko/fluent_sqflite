@@ -394,15 +394,19 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
           FluentStorable effectiveChild = child;
 
           // IDENTITY RESOLUTION: Prevent duplicate persistence of the same object graph instance
-          if (!globalIdentitySet.add(effectiveChild)) {
-            hasIdentityConflict = true;
+          if (rel.relationType != FluentDbRelationType.manyToMany) {
+            if (!globalIdentitySet.add(effectiveChild)) {
+              hasIdentityConflict = true;
 
-            final Map<String, dynamic> childJson = effectiveChild.buildJson();
-            effectiveChild = (childDao).mapToModelSync(childJson);
+              final Map<String, dynamic> childJson = effectiveChild.buildJson();
+              effectiveChild = (childDao).mapToModelSync(childJson);
 
-            if (isChildAutoIncrement) {
-              effectiveChild.injectRelationId(childPkName, null);
+              if (isChildAutoIncrement) {
+                effectiveChild.injectRelationId(childPkName, null);
+              }
             }
+          } else {
+            globalIdentitySet.add(effectiveChild);
           }
 
           sanitizedChildren.add(effectiveChild);
