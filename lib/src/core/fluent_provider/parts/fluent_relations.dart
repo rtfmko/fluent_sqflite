@@ -594,6 +594,8 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     final bool isLocalBatch = batch == null;
     final Batch effectiveBatch = batch ?? txn!.batch();
 
+    final Set<String> uniquePairs = <String>{};
+
     for (final MapEntry<int, List<FluentStorable>> entry in parentIndexToChildren.entries) {
       final int parentIdx = entry.key;
       final List<FluentStorable> children = entry.value;
@@ -603,7 +605,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       if (parentJsons != null && parentIdx < parentJsons.length && parentJsons[parentIdx].isNotEmpty) {
         parentId = parentJsons[parentIdx][parentPkName];
       } else {
-        final parent = parents[parentIdx];
+        final T parent = parents[parentIdx];
         parentId = _prepareSqlJson(parent)[parentPkName];
       }
 
@@ -612,7 +614,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       for (int i = 0; i < currentChildrenLen; i++) {
         final FluentStorable child = children[i];
 
-        final savedChild = uniqueChildren.lookup(child) ?? child;
+        final FluentStorable savedChild = uniqueChildren.lookup(child) ?? child;
 
         final dynamic childId = childDao._prepareSqlJson(savedChild)[childPkName];
         if (childId == null) {
@@ -620,10 +622,14 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
           continue;
         }
 
-        final Map<String, dynamic> pivotRecord = {pivotParentKey: parentId, pivotChildKey: childId};
-        final ConflictAlgorithm conflictAlgorithm = (task.helper?.updateIfExist ?? true) ? ConflictAlgorithm.replace : ConflictAlgorithm.ignore;
+        final String pairKey = '$parentId:$childId';
 
-        effectiveBatch.insert(pivotTable, pivotRecord, conflictAlgorithm: conflictAlgorithm);
+        if (uniquePairs.add(pairKey)) {
+          final Map<String, dynamic> pivotRecord = {pivotParentKey: parentId, pivotChildKey: childId};
+          final ConflictAlgorithm conflictAlgorithm = (task.helper?.updateIfExist ?? true) ? ConflictAlgorithm.replace : ConflictAlgorithm.ignore;
+
+          effectiveBatch.insert(pivotTable, pivotRecord, conflictAlgorithm: conflictAlgorithm);
+        }
       }
     }
 
@@ -631,7 +637,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       await effectiveBatch.commit(noResult: true);
     }
 
-    FluentLog.debug('Many-to-many pivot association records staged successfully', tag: '$tableName:relations', context: {'pivotTable': pivotTable});
+    FluentLog.debug('Many-to-many pivot association records staged successfully', tag: '$tableName:relations', context: {'pivotTable': pivotTable, 'insertedPairs': uniquePairs.length});
   }
 
   /// Explicitly hydrates lazy-loaded relational associations for a specific model instance.
