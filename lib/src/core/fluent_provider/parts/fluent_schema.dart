@@ -79,8 +79,9 @@ extension FluentSchema<T extends FluentStorable> on FluentProvider<T> {
   ///   table identity and foreign key linkage points.
   String generatePivotTableSql(FluentDbRelation rel, FluentProvider childDao) {
     final String pivotName = rel.pivotTable ?? '${tableName}_${childDao.tableName}';
-    final String parentKey = '${tableName}_id';
-    final String childKey = '${childDao.tableName}_id';
+
+    final String parentKey = rel.localKey ?? '${tableName}_id';
+    final String childKey = rel.remoteKey ?? '${childDao.tableName}_id';
 
     FluentLog.debug('Generating many-to-many pivot table DDL', tag: '$tableName:schema', context: {'pivotTable': pivotName, 'parentLink': parentKey, 'childLink': childKey});
 
