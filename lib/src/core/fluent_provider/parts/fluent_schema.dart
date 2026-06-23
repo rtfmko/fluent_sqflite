@@ -610,6 +610,40 @@ CREATE TABLE IF NOT EXISTS $pivotName (
     return _cachedFullSchema!;
   }
 
+  /// Ensures that all required pivot tables for [manyToMany] relationships are
+  /// present in the database schema.
+  ///
+  /// This method performs an introspection of the [FluentRelationsMixin] registered
+  /// within the [dao]. If a [FluentDbRelationType.manyToMany] is detected, it
+  /// invokes the schema generator to produce and execute the necessary DDL
+  /// (Data Definition Language) to initialize the junction table.
+  ///
+  /// [db] The database transaction or instance to execute the schema setup against.
+  /// [dao] The provider instance being synchronized.
+  Future<void> syncPivotTables(Database db, FluentProvider dao) async {
+    if (dao is! FluentRelationsMixin) return;
+
+    final Map<Type, FluentDbRelation<FluentStorable, FluentStorable>> relations = dao.resolvedRelations;
+    FluentLog.debug('Checking M2M pivot table integrity for table: ${dao.tableName}', tag: '$tableName:syncPivotTables', context: {'relationCount': relations.length});
+
+    for (final FluentDbRelation<FluentStorable, FluentStorable> rel in relations.values) {
+      if (rel.relationType == FluentDbRelationType.manyToMany && rel.pivotTable != null) {
+        final FluentProvider<FluentStorable> childDao = FluentDb.providerForType(rel.runtimeType);
+
+        FluentLog.info('Synchronizing pivot table: ${rel.pivotTable}', tag: '$tableName:syncPivotTables', context: {'parent': dao.tableName, 'child': childDao.tableName, 'pivot': rel.pivotTable});
+
+        try {
+          final String sql = dao.generatePivotTableSql(rel, childDao);
+          await db.execute(sql);
+          FluentLog.debug('Pivot table ${rel.pivotTable} verified successfully', tag: '$tableName:syncPivotTables');
+        } catch (e, st) {
+          FluentLog.error('Failed to sync pivot table: ${rel.pivotTable}', e, st, tag: '$tableName:syncPivotTables');
+          rethrow;
+        }
+      }
+    }
+  }
+
   /// Invalidates the schema cache and forces a re-compilation on the next access.
   ///
   /// This utility is critical for maintaining consistency during runtime schema
