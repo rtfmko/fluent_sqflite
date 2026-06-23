@@ -566,48 +566,94 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     }
     if (totalChildrenCount == 0) return;
 
-    // Deduplication Strategy: Identify unique child entities to avoid redundant insertions
-    final List<dynamic> fixedRawList = List<dynamic>.filled(totalChildrenCount, childDao.modelSample, growable: false);
     final Set<FluentStorable> uniqueChildren = <FluentStorable>{};
-    int uniqueCount = 0;
+    final Map<FluentStorable, FluentStorable> childToRepresentative = Map.identity();
 
     for (final List<FluentStorable> children in parentIndexToChildren.values) {
-      final int currentChildrenLen = children.length;
-      for (int i = 0; i < currentChildrenLen; i++) {
-        final child = children[i];
+      for (final child in children) {
         if (uniqueChildren.add(child)) {
-          fixedRawList[uniqueCount++] = child;
+          childToRepresentative[child] = child;
+        } else {
+          childToRepresentative[child] = uniqueChildren.lookup(child) ?? child;
         }
       }
     }
 
-    final Map<FluentStorable, FluentStorable> childToRepresentative = Map<FluentStorable, FluentStorable>.identity();
-    for (final List<FluentStorable> children in parentIndexToChildren.values) {
-      for (final child in children) {
-        final FluentStorable representative = uniqueChildren.lookup(child) ?? child;
-        childToRepresentative[child] = representative;
+    final List<FluentStorable> flatChildrenList = uniqueChildren.toList(growable: false);
+
+    final List<FluentStorable> newChildrenToSave = [];
+    final List<Map<String, dynamic>> newChildrenJsons = [];
+
+    final List<FluentStorable> existingChildrenToUpdate = [];
+    final Map<FluentStorable, Map<String, dynamic>> childToSqlJson = Map.identity();
+
+    for (final FluentStorable child in flatChildrenList) {
+      final json = childDao._prepareSqlJson(child);
+      childToSqlJson[child] = json;
+
+      if (json[childPkName] == null) {
+        newChildrenToSave.add(child);
+        newChildrenJsons.add(json);
+      } else {
+        existingChildrenToUpdate.add(child);
       }
     }
 
-    final List<dynamic> finalUniqueRawList = uniqueCount == totalChildrenCount ? fixedRawList : fixedRawList.sublist(0, uniqueCount);
-
-    final List<FluentStorable> flatChildrenList = childDao._createTypedList(finalUniqueRawList);
-
-    if (flatChildrenList.isNotEmpty) {
-      FluentLog.debug('Hydrating unique child entities for many-to-many relationship', tag: '$tableName:relations', context: {'pivotTable': pivotTable, 'uniqueCount': flatChildrenList.length});
-      await childDao._executeAdd(txn, flatChildrenList, task, sharedBatch: batch, currentDepth: currentDepth, visitedTables: visitedTables);
-    }
-
-    // Association Mapping: Link parents to children via the intermediate pivot table
     final bool isLocalBatch = batch == null;
     final Batch effectiveBatch = batch ?? txn!.batch();
 
+    if (newChildrenToSave.isNotEmpty) {
+      FluentLog.debug('Hydrating NEW unique child entities for M2M', tag: '$tableName:relations', context: {'count': newChildrenToSave.length});
+      await childDao._executeAdd(
+        txn,
+        childDao._createTypedList(newChildrenToSave),
+        task,
+        sharedBatch: effectiveBatch,
+        currentDepth: currentDepth,
+        visitedTables: visitedTables,
+        parentJsons: newChildrenJsons,
+      );
+    }
+
+    if (existingChildrenToUpdate.isNotEmpty && task.helper?.updateIfExist == true) {
+      FluentLog.debug('Updating EXISTING child entities for M2M safely', tag: '$tableName:relations', context: {'count': existingChildrenToUpdate.length});
+
+      final List<Map<String, dynamic>> existingJsons = [];
+      for (final FluentStorable child in existingChildrenToUpdate) {
+        final Map<String, dynamic> json = childToSqlJson[child]!;
+        existingJsons.add(json);
+        final id = json[childPkName];
+
+        final Map<String, dynamic> updateData = <String, dynamic>{};
+        final Set<String> relKeys = childDao.relationKeys;
+        for (final entry in json.entries) {
+          if (!relKeys.contains(entry.key)) {
+            updateData[entry.key] = entry.value;
+          }
+        }
+
+        effectiveBatch.update(childDao.tableName, updateData, where: '$childPkName = ?', whereArgs: [id]);
+      }
+
+      if (childDao._hasRelations && childDao._relationsMixin != null) {
+        await childDao._relationsMixin!._processBatchRelations(
+          txn,
+          childDao._createTypedList(existingChildrenToUpdate),
+          task,
+          batch: effectiveBatch,
+          parentJsons: existingJsons,
+          currentDepth: currentDepth + 1,
+          visitedTables: visitedTables,
+        );
+      }
+    }
+
+    // 5. Association Mapping
     final Set<String> uniquePairs = <String>{};
 
     for (final MapEntry<int, List<FluentStorable>> entry in parentIndexToChildren.entries) {
       final int parentIdx = entry.key;
       final List<FluentStorable> children = entry.value;
-      final int currentChildrenLen = children.length;
 
       dynamic parentId;
       if (parentJsons != null && parentIdx < parentJsons.length && parentJsons[parentIdx].isNotEmpty) {
@@ -619,12 +665,12 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
 
       if (parentId == null) continue;
 
-      for (int i = 0; i < currentChildrenLen; i++) {
+      for (int i = 0; i < children.length; i++) {
         final FluentStorable child = children[i];
+        final FluentStorable representative = childToRepresentative[child] ?? child;
 
-        final FluentStorable savedChild = childToRepresentative[child] ?? child;
+        final dynamic childId = childToSqlJson[representative]?[childPkName];
 
-        final dynamic childId = childDao._prepareSqlJson(savedChild)[childPkName];
         if (childId == null) {
           FluentLog.warning('Pivot association skipped: Child record ID unresolved', tag: '$tableName:relations');
           continue;
@@ -633,9 +679,8 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
         final String pairKey = '$parentId:$childId';
         if (uniquePairs.add(pairKey)) {
           final Map<String, dynamic> pivotRecord = {pivotParentKey: parentId, pivotChildKey: childId};
-          final ConflictAlgorithm conflictAlgorithm = (task.helper?.updateIfExist ?? true) ? ConflictAlgorithm.replace : ConflictAlgorithm.ignore;
 
-          effectiveBatch.insert(pivotTable, pivotRecord, conflictAlgorithm: conflictAlgorithm);
+          effectiveBatch.insert(pivotTable, pivotRecord, conflictAlgorithm: ConflictAlgorithm.replace);
         }
       }
     }
