@@ -570,7 +570,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     final Map<FluentStorable, FluentStorable> childToRepresentative = Map.identity();
 
     for (final List<FluentStorable> children in parentIndexToChildren.values) {
-      for (final child in children) {
+      for (final FluentStorable child in children) {
         if (uniqueChildren.add(child)) {
           childToRepresentative[child] = child;
         } else {
@@ -584,7 +584,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     final List<FluentStorable> newChildrenToSave = [];
     final List<Map<String, dynamic>> newChildrenJsons = [];
 
-    final List<FluentStorable> existingChildrenToUpdate = [];
+    final List<FluentStorable> existingChildrenToUpsert = [];
     final Map<FluentStorable, Map<String, dynamic>> childToSqlJson = Map.identity();
 
     for (final FluentStorable child in flatChildrenList) {
@@ -595,7 +595,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
         newChildrenToSave.add(child);
         newChildrenJsons.add(json);
       } else {
-        existingChildrenToUpdate.add(child);
+        existingChildrenToUpsert.add(child);
       }
     }
 
@@ -615,30 +615,34 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       );
     }
 
-    if (existingChildrenToUpdate.isNotEmpty && task.helper?.updateIfExist == true) {
-      FluentLog.debug('Updating EXISTING child entities for M2M safely', tag: '$tableName:relations', context: {'count': existingChildrenToUpdate.length});
+    if (existingChildrenToUpsert.isNotEmpty) {
+      FluentLog.debug('Upserting EXISTING child entities for M2M safely', tag: '$tableName:relations', context: {'count': existingChildrenToUpsert.length});
 
       final List<Map<String, dynamic>> existingJsons = [];
-      for (final FluentStorable child in existingChildrenToUpdate) {
+
+      for (final FluentStorable child in existingChildrenToUpsert) {
         final Map<String, dynamic> json = childToSqlJson[child]!;
         existingJsons.add(json);
-        final id = json[childPkName];
+        final dynamic id = json[childPkName];
 
-        final Map<String, dynamic> updateData = <String, dynamic>{};
-        final Set<String> relKeys = childDao.relationKeys;
-        for (final entry in json.entries) {
-          if (!relKeys.contains(entry.key)) {
-            updateData[entry.key] = entry.value;
+        effectiveBatch.insert(childDao.tableName, json, conflictAlgorithm: ConflictAlgorithm.ignore);
+
+        if (task.helper?.updateIfExist == true) {
+          final Map<String, dynamic> updateData = <String, dynamic>{};
+          final Set<String> relKeys = childDao.relationKeys;
+          for (final MapEntry<String, dynamic> entry in json.entries) {
+            if (!relKeys.contains(entry.key)) {
+              updateData[entry.key] = entry.value;
+            }
           }
+          effectiveBatch.update(childDao.tableName, updateData, where: '$childPkName = ?', whereArgs: [id]);
         }
-
-        effectiveBatch.update(childDao.tableName, updateData, where: '$childPkName = ?', whereArgs: [id]);
       }
 
       if (childDao._hasRelations && childDao._relationsMixin != null) {
         await childDao._relationsMixin!._processBatchRelations(
           txn,
-          childDao._createTypedList(existingChildrenToUpdate),
+          childDao._createTypedList(existingChildrenToUpsert),
           task,
           batch: effectiveBatch,
           parentJsons: existingJsons,
@@ -648,7 +652,6 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       }
     }
 
-    // 5. Association Mapping
     final Set<String> uniquePairs = <String>{};
 
     for (final MapEntry<int, List<FluentStorable>> entry in parentIndexToChildren.entries) {
