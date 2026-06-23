@@ -553,8 +553,8 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     final String childPkName = childDao._cachedPrimaryKey?.name ?? 'id';
 
     final String pivotTable = rel.pivotTable ?? '${tableName}_${childDao.tableName}';
-    final String pivotParentKey = '${tableName}_id';
-    final String pivotChildKey = '${childDao.tableName}_id';
+    final String pivotParentKey = rel.localKey ?? '${tableName}_id';
+    final String pivotChildKey = rel.remoteKey ?? '${childDao.tableName}_id';
 
     int totalChildrenCount = 0;
     for (final List<FluentStorable> children in parentIndexToChildren.values) {
