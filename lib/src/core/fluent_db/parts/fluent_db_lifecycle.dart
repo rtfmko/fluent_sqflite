@@ -68,7 +68,6 @@ extension FluentDbLifecycle on FluentDb {
       FluentDb._softDeleteRetentionPeriod = purgeDuration;
     }
 
-    final Map<String, String> dbPaths = {};
     final Map<String, SQLitePerformanceConfig> performanceConfigs = {};
     final Map<String, List<String>> dbTables = {};
     final Map<String, Database> dbNameWithDb = {};
@@ -121,7 +120,6 @@ extension FluentDbLifecycle on FluentDb {
         FluentLog.debug('Group "${group.dbName}": Relations established and sorted.', tag: 'FluentDb:init');
 
         final String path = '$databasesPath/${group.dbName}';
-        dbPaths[group.dbName] = path;
         performanceConfigs[group.dbName] = group.performanceConfig;
         dbTables[group.dbName] = tableNames;
         dbRelationsCount[group.dbName] = relationsManifest;
@@ -175,8 +173,6 @@ extension FluentDbLifecycle on FluentDb {
       }
     }
 
-    final Map<String, List<Map<String, dynamic>>> globalRelationMap = {};
-
     for (final FluentRelationsMixin relDao in _providers.values.whereType<FluentRelationsMixin>()) {
       final Map<Type, FluentDbRelation> syncRels = relDao.resolvedRelations;
       if (syncRels.isEmpty) continue;
@@ -195,22 +191,11 @@ extension FluentDbLifecycle on FluentDb {
           'isList': entry.value.castType.isList,
         });
       }
-
-      if (tableRelationsList.isNotEmpty) {
-        globalRelationMap[relDao.tableName] = tableRelationsList;
-      }
     }
 
     FluentLog.info('Registry: Spawning FluentDb...', tag: 'FluentDb:init');
 
-    await FluentEngine().initMultiple(
-      dbPaths: dbPaths,
-      relationMap: globalRelationMap,
-      configs: performanceConfigs,
-      dbTables: dbTables,
-      dbRelationsCount: dbRelationsCount,
-      dbNameWithDb: dbNameWithDb,
-    );
+    await FluentEngine().initMultiple(configs: performanceConfigs, dbTables: dbTables, dbRelationsCount: dbRelationsCount, dbNameWithDb: dbNameWithDb);
 
     _isInitialized = true;
     FluentLog.info('Registry: Initialization complete.', tag: 'FluentDb:init');

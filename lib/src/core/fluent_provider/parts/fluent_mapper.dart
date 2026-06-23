@@ -439,9 +439,30 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
         for (int i = 0; i < parentIds.length; i += chunkSize) {
           final int end = (i + chunkSize > parentIds.length) ? parentIds.length : i + chunkSize;
           final List<dynamic> chunk = parentIds.sublist(i, end);
-
           final String placeholders = List.filled(chunk.length, '?').join(',');
-          final List<Map<String, dynamic>> results = await childDao.db.query(childDao.tableName, where: '$remoteKey IN ($placeholders)', whereArgs: chunk);
+
+          List<Map<String, dynamic>> results;
+
+          if (rel.relationType == FluentDbRelationType.manyToMany) {
+            final String pivot = rel.pivotTable!;
+            final String localKey = rel.localKey ?? defaultForeignKey;
+            final String childTable = childDao.tableName;
+            final String childPk = childDao.primaryKeyColumn.name;
+
+            final String sql =
+                '''
+              SELECT t.*, p.$localKey AS _fluent_pivot_parent_id
+              FROM $childTable t
+              INNER JOIN $pivot p ON t.$childPk = p.$remoteKey
+              WHERE p.$localKey IN ($placeholders)
+            ''';
+
+            FluentLog.sql(sql, arguments: chunk, tag: '$tableName:hydration:m2m');
+            results = await childDao.db.rawQuery(sql, chunk);
+          } else {
+            results = await childDao.db.query(childDao.tableName, where: '$remoteKey IN ($placeholders)', whereArgs: chunk);
+          }
+
           allRawChildren.addAll(results);
         }
 
@@ -457,7 +478,7 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
         // Memory Join: Группируем детей по ключу родителя
         final Map<dynamic, List<Map<String, dynamic>>> groupedChildren = {};
         for (var child in enrichedChildren) {
-          final pId = child[remoteKey];
+          final pId = child['_fluent_pivot_parent_id'] ?? child[remoteKey];
           groupedChildren.putIfAbsent(pId, () => []).add(child);
         }
 

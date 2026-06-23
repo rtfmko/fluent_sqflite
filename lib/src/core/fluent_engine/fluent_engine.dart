@@ -181,8 +181,8 @@ class FluentEngine {
   /// 4. **Registration:** Sends the complete configuration package to the isolate
   ///    to enable localized I/O processing.
   Future<void> initMultiple({
-    required Map<String, String> dbPaths,
-    required Map<String, List<Map<String, dynamic>>> relationMap,
+    // required Map<String, String> dbPaths,
+    // required Map<String, List<Map<String, dynamic>>> relationMap,
     required Map<String, SQLitePerformanceConfig> configs,
     required Map<String, List<String>> dbTables,
     required Map<String, Map<String, int>> dbRelationsCount,
@@ -232,7 +232,7 @@ class FluentEngine {
 
     await _systemDb.init(dbConfigs: isolateDbConfigs, databases: dbNameWithDb);
 
-    FluentLog.info('FluentEngine: Isolate spawned with full APM and performance manifest', tag: 'FluentEngine:initMultiple', context: {'totalDatabases': dbPaths.length});
+    FluentLog.info('FluentEngine: Isolate spawned with full APM and performance manifest', tag: 'FluentEngine:initMultiple');
 
     unawaited(_triggerDatabaseAnalysis());
     _startAutoSaveTimer();

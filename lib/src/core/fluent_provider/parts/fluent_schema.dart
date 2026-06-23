@@ -620,7 +620,7 @@ CREATE TABLE IF NOT EXISTS $pivotName (
   ///
   /// [executor] The database transaction or instance to execute the schema setup against.
   /// [dao] The provider instance being synchronized.
-  Future<void> syncPivotTables(DatabaseExecutor executor, FluentProvider dao) async {
+  Future<void> syncPivotTables(DatabaseExecutor executor, FluentProvider dao, Set<String> existingTables) async {
     final bool hasRelations = dao is FluentRelationsMixin;
     FluentLog.debug(
       'Syncing indexes for table',
@@ -636,23 +636,22 @@ CREATE TABLE IF NOT EXISTS $pivotName (
 
     for (final FluentDbRelation<FluentStorable, FluentStorable> rel in relations.values) {
       if (rel.relationType == FluentDbRelationType.manyToMany && rel.pivotTable != null) {
+        final String pivotName = rel.pivotTable!;
+
+        if (existingTables.contains(pivotName)) {
+          FluentLog.debug('Pivot table $pivotName already exists, skipping creation', tag: '$tableName:syncPivotTables');
+          continue;
+        }
+
         final FluentProvider<FluentStorable> childDao = FluentDb.providerForType(rel.modelType);
 
-        FluentLog.info(
-          'Synchronizing pivot table: ${rel.pivotTable}',
-          tag: '$tableName:syncPivotTables',
-          context: {
-            'parent': dao.tableName,
-            'child': childDao.tableName,
-            'pivot': rel.pivotTable,
-            'localKey': rel.localKey ?? '${dao.tableName}_id',
-            'remoteKey': rel.remoteKey ?? '${childDao.tableName}_id',
-          },
-        );
+        FluentLog.info('Creating missing pivot table: $pivotName', tag: '$tableName:syncPivotTables', context: {'parent': dao.tableName, 'child': childDao.tableName});
 
         try {
           final String sql = dao.generatePivotTableSql(rel, childDao);
           await executor.execute(sql);
+
+          existingTables.add(pivotName);
           FluentLog.debug('Pivot table ${rel.pivotTable} verified successfully', tag: '$tableName:syncPivotTables');
         } catch (e, st) {
           FluentLog.error('Failed to sync pivot table: ${rel.pivotTable}', e, st, tag: '$tableName:syncPivotTables');
