@@ -56,7 +56,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     if (!_hasRelations || _relationsMixin == null) return;
 
     final FluentRelationsMixin<T> mixin = _relationsMixin!;
-    final Map<Type, FluentDbRelation<FluentStorable>> syncRels = mixin.resolvedRelations;
+    final Map<Type, FluentDbRelation<FluentStorable, FluentStorable>> syncRels = mixin.resolvedRelations;
     if (syncRels.isEmpty) return;
 
     final String parentPk = _cachedPrimaryKey?.name ?? 'id';
@@ -65,7 +65,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     final Set<String> localColumns = tableColumns;
 
     // Iterate over active relations to perform reference integrity audits
-    for (final MapEntry<Type, FluentDbRelation<FluentStorable>> entry in syncRels.entries) {
+    for (final MapEntry<Type, FluentDbRelation<FluentStorable, FluentStorable>> entry in syncRels.entries) {
       final FluentDbRelation rel = entry.value;
 
       // Filter: Skip relations without cascade requirements or unsupported complex associations
@@ -342,7 +342,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
   }) async {
     if (!_hasRelations || _relationsMixin == null) return;
 
-    final Map<Type, FluentDbRelation<FluentStorable>> relations = _relationsMixin!.resolvedRelations;
+    final Map<Type, FluentDbRelation<FluentStorable, FluentStorable>> relations = _relationsMixin!.resolvedRelations;
     if (relations.isEmpty) return;
 
     final int nextDepth = currentDepth;
@@ -351,9 +351,9 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     }
 
     final int itemsLength = items.length;
-    List<Map<String, dynamic>>? localParentJsons = parentJsons;
+    final List<Map<String, dynamic>>? localParentJsons = parentJsons;
 
-    for (final MapEntry<Type, FluentDbRelation<FluentStorable>> entry in relations.entries) {
+    for (final MapEntry<Type, FluentDbRelation<FluentStorable, FluentStorable>> entry in relations.entries) {
       final Type childType = entry.key;
       final FluentDbRelation rel = entry.value;
 
@@ -365,9 +365,6 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       final Map<int, List<FluentStorable>> parentIndexToChildren = {};
       final List<FluentStorable> allChildren = [];
 
-      final selector = rel.entitySelector;
-      final String mapKey = rel.mapToKey;
-
       final Set<FluentStorable> globalIdentitySet = {};
       bool hasIdentityConflict = false;
 
@@ -377,19 +374,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
 
       for (int i = 0; i < itemsLength; i++) {
         final T parent = items[i];
-        dynamic childrenData;
-
-        if (selector != null) {
-          childrenData = selector(parent);
-        } else {
-          localParentJsons ??= List<Map<String, dynamic>>.filled(itemsLength, const {}, growable: false);
-          Map<String, dynamic> parentJson = localParentJsons[i];
-          if (parentJson.isEmpty) {
-            parentJson = _prepareSqlJson(parent);
-            localParentJsons[i] = parentJson;
-          }
-          childrenData = parentJson[mapKey];
-        }
+        final dynamic childrenData = rel.select(parent);
 
         if (childrenData == null) continue;
 
@@ -677,7 +662,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     final bool loadAllUnloaded = R == FluentStorable;
     final Set<String> unloadedRels = model.unloadedRelations;
 
-    for (final MapEntry<Type, FluentDbRelation<FluentStorable>> entry in relations.entries) {
+    for (final MapEntry<Type, FluentDbRelation<FluentStorable, FluentStorable>> entry in relations.entries) {
       final Type childType = entry.key;
       final FluentDbRelation rel = entry.value;
       final String mapKey = rel.mapToKey;

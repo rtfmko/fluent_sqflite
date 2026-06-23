@@ -54,11 +54,11 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
     }
 
     final T model = _assembleModel(enrichedRow);
-    final Map<Type, FluentDbRelation<FluentStorable>> syncRels = _relationsMixin!.resolvedRelations;
+    final Map<Type, FluentDbRelation<FluentStorable, FluentStorable>> syncRels = _relationsMixin!.resolvedRelations;
 
     FluentLog.debug('Hydrating relational graph for model', tag: '$tableName:hydration', context: {'modelId': model.getPrimaryKeyName(), 'relationalKeys': syncRels.keys.toString()});
 
-    for (final FluentDbRelation<FluentStorable> rel in syncRels.values) {
+    for (final FluentDbRelation<FluentStorable, FluentStorable> rel in syncRels.values) {
       final String key = rel.mapToKey;
       final dynamic data = enrichedRow[key];
 
@@ -166,7 +166,7 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
 
       final T model = _assembleModel(enrichedRow);
 
-      for (final FluentDbRelation<FluentStorable> rel in syncRels.values) {
+      for (final FluentDbRelation<FluentStorable, FluentStorable> rel in syncRels.values) {
         final String key = rel.mapToKey;
         final dynamic data = enrichedRow[key];
 
@@ -410,7 +410,7 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
     final bool ignoreLazy = task.ignoreLazy;
     final int chunkSize = task.policy.chunkSize ?? 950;
 
-    for (final MapEntry<Type, FluentDbRelation<FluentStorable>> entry in relations.entries) {
+    for (final MapEntry<Type, FluentDbRelation<FluentStorable, FluentStorable>> entry in relations.entries) {
       final FluentDbRelation rel = entry.value;
       final String key = rel.mapToKey;
       final FluentProvider childDao = FluentDb.providerForType(entry.key);
@@ -533,12 +533,12 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
   Map<String, dynamic> _castReadyRelations(Map<String, dynamic> processedRow) {
     if (!_hasRelations || _relationsMixin == null) return processedRow;
 
-    final Map<Type, FluentDbRelation<FluentStorable>> relations = _relationsMixin!.resolvedRelations;
+    final Map<Type, FluentDbRelation<FluentStorable, FluentStorable>> relations = _relationsMixin!.resolvedRelations;
     if (relations.isEmpty) return processedRow;
 
     Map<String, dynamic> result = processedRow;
 
-    for (final MapEntry<Type, FluentDbRelation<FluentStorable>> entry in relations.entries) {
+    for (final MapEntry<Type, FluentDbRelation<FluentStorable, FluentStorable>> entry in relations.entries) {
       final FluentDbRelation rel = entry.value;
       final String key = rel.mapToKey;
 

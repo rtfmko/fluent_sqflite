@@ -52,7 +52,7 @@ extension FluentRelationsLoader<T extends FluentStorable> on FluentRelationsMixi
     final List<Future<void>> futures = [];
 
     // Iterate through registered relational properties to identify autoload targets
-    for (final MapEntry<Type, FluentDbRelation<FluentStorable>> entry in relations.entries) {
+    for (final MapEntry<Type, FluentDbRelation<FluentStorable, FluentStorable>> entry in relations.entries) {
       final FluentDbRelation relation = entry.value;
 
       if (!relation.autoLoad) continue;

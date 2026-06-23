@@ -8,10 +8,17 @@ import '../utils/utils.dart';
 
 /// Represents a relationship definition between database models.
 ///
-/// [FluentDbRelation] acts as a bridge for complex schema operations like joins,
-/// cross-table lookups, and cascading deletes. It supports both standard
-/// relational mappings (1:1, 1:N, M:N) and polymorphic associations.
-class FluentDbRelation<T extends FluentStorable> {
+/// [FluentDbRelation] acts as a bridge for complex schema operations such as
+/// cascading persistence, cross-table lookups, and relational integrity.
+///
+/// Type parameters:
+/// * [P] - The parent model type (the owner of the relationship).
+/// * [C] - The child/target model type (the related entity).
+///
+/// This bridge supports standard relational mappings (1:1, 1:N, M:N) and
+/// polymorphic associations, ensuring type-safe access to child entities
+/// through the [entitySelector].
+class FluentDbRelation<P extends FluentStorable, C extends FluentStorable> {
   Type _runtimeType;
 
   /// The runtime type of the target model for this relationship.
@@ -20,8 +27,12 @@ class FluentDbRelation<T extends FluentStorable> {
   /// The key in the parent object where the related data will be mapped.
   final String mapToKey;
 
-  /// Custom selector to resolve the related entity from a parent context.
-  final dynamic Function(FluentStorable parent)? entitySelector;
+  /// Custom selector function used to resolve related entities from a parent instance.
+  ///
+  /// The selector is internally wrapped to ensure type safety while allowing
+  /// the [FluentDbRelation] to be stored in non-generic collections.
+  /// It maps the parent instance [P] to the corresponding related child entity or list of entities.
+  final Object? Function(P parent) _internalSelector;
 
   /// The deserialization strategy used to map raw database rows into
   /// typed model instances or raw data collections.
@@ -71,21 +82,24 @@ class FluentDbRelation<T extends FluentStorable> {
   /// Whether this relation is permitted to be null.
   final bool nullable;
 
-  /// Creates a [FluentDbRelation] configuration defining how a model interacts with
-  /// its related entities.
+  /// Creates a [FluentDbRelation] configuration defining how a model [P] interacts with
+  /// its related child entity [C].
   ///
-  /// This constructor maps an object property to a database schema relationship,
-  /// providing the metadata required for JOIN operations, cascading deletions,
-  /// and polymorphic data resolution.
+  /// This constructor establishes a bridge between an object property and the database
+  /// schema. It provides the metadata required for JOIN operations, cascading persistence,
+  /// and relational integrity.
   ///
-  /// [mapToKey] The field name on the parent class used to store/access the relation.
-  /// [entitySelector] A callback for custom logic to resolve the relationship from the parent instance.
-  /// [castType] The strategy used to convert query results into types (e.g., [FluentModelCast.modelList]).
-  /// [remoteKey] The foreign/primary key column name on the target table.
-  /// [localKey] The column name on the current table acting as the foreign key.
+  /// [mapToKey] The field name in the parent JSON/Map used to store or access the relation.
+  /// [entitySelector] A selector function that extracts the related entity (or list of entities)
+  /// from a parent instance. This function is internally wrapped to ensure type safety
+  /// while maintaining compatibility with the engine's non-generic storage.
+  /// [castType] The strategy used to convert query results into the target type
+  /// (e.g., [FluentModelCast.modelList]).
+  /// [remoteKey] The foreign or primary key column name on the target table [C].
+  /// [localKey] The column name on the current table [P] acting as the foreign key.
   /// [targetTable] The name of the table to join or query.
   /// [relationType] Defines the cardinality (e.g., [FluentDbRelationType.manyToMany]).
-  /// [isPolymorphic] Enables association with multiple potential model types using a discriminator column.
+  /// [isPolymorphic] Enables association with multiple potential model types using a discriminator.
   /// [polyTypeColumn] The column name holding the type discriminator for polymorphic relations.
   /// [pivotTable] Required for [FluentDbRelationType.manyToMany] to define the association table.
   /// [autoLoad] Whether to eagerly resolve the relationship during the initial query.
@@ -94,7 +108,7 @@ class FluentDbRelation<T extends FluentStorable> {
   /// [nullable] Whether the relationship can legitimately return null results.
   FluentDbRelation({
     required this.mapToKey,
-    this.entitySelector,
+    required Object? Function(P parent) entitySelector,
     required this.castType,
     this.remoteKey,
     this.localKey,
@@ -107,7 +121,18 @@ class FluentDbRelation<T extends FluentStorable> {
     this.onDeleteCascade = true,
     this.isLazy = true,
     this.nullable = false,
-  }) : _runtimeType = T;
+  }) : _runtimeType = C,
+       _internalSelector = ((parent) => entitySelector(parent));
+
+  /// Resolves the related entity from the given [parent] instance.
+  ///
+  /// This method acts as a type-safe bridge for the database engine. It takes a
+  /// generic [parent] instance (typically a [FluentStorable]), safely casts it to
+  /// the expected parent type [P], and executes the [entitySelector] to retrieve
+  /// the associated child entity or collection.
+  ///
+  /// Throws a [TypeError] if the provided [parent] is not an instance of [P].
+  Object? select(Object parent) => _internalSelector(parent as P);
 
   /// Returns `true` if the relationship configuration is valid and operational.
   ///

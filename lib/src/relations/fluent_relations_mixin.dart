@@ -52,21 +52,23 @@ mixin FluentRelationsMixin<T extends FluentStorable> on FluentProvider<T> {
   /// ### Usage Example:
   /// ```dart
   /// @override
-  /// Map<Type, FluentDbRelation<FluentStorable>> get relations => {
+  /// Map<Type, FluentDbRelation<FluentStorable, FluentStorable>> get relations => {
   ///   // 1:N relationship: One user has many posts
-  ///   Post: FluentDbRelation<Post>(
+  ///   Post: FluentDbRelation<UserModel, Post>(
   ///     mapToKey: 'posts',
+  ///     entitySelector: (parent) => parent.posts,
   ///     castType: FluentModelCast.modelList,
   ///   ),
   ///   // 1:1 relationship: One user has one profile
-  ///   Profile: FluentDbRelation<Profile>(
+  ///   Profile: FluentDbRelation<UserModel, Profile>(
   ///     mapToKey: 'profile',
+  ///     entitySelector: (parent) => parent.profile,
   ///     castType: FluentModelCast.model,
   ///     isLazy: false,
   ///   ),
   /// };
   /// ```
-  Map<Type, FluentDbRelation> get relations => {};
+  Map<Type, FluentDbRelation<FluentStorable, FluentStorable>> get relations => {};
 
   /// Returns a synchronized, cached map of all relationships associated with this model.
   ///
@@ -135,7 +137,7 @@ mixin FluentRelationsMixin<T extends FluentStorable> on FluentProvider<T> {
 
         if (targetProvider is FluentRelationsMixin && (remoteFk == null || localFk == null)) {
           final FluentRelationsMixin<FluentStorable> neighborMixin = targetProvider;
-          final FluentDbRelation<FluentStorable>? neighborRel = neighborMixin.resolvedRelations[modelType];
+          final FluentDbRelation<FluentStorable, FluentStorable>? neighborRel = neighborMixin.resolvedRelations[modelType];
 
           if (neighborRel != null) {
             remoteFk ??= neighborRel.localKey;
@@ -230,6 +232,7 @@ mixin FluentRelationsMixin<T extends FluentStorable> on FluentProvider<T> {
           remoteKey: currentLocalKey,
           onDeleteCascade: relation.onDeleteCascade,
           castType: backlinkCast,
+          entitySelector: (parent) => null,
         );
         backRel.targetTable = tableName;
         backRel.bindType(modelType);

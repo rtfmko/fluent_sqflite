@@ -569,10 +569,10 @@ CREATE TABLE IF NOT EXISTS $pivotName (
         }
       }
 
-      for (final FluentDbRelation<FluentStorable> rel in mixin.resolvedRelations.values) {
+      for (final FluentDbRelation<FluentStorable, FluentStorable> rel in mixin.resolvedRelations.values) {
         processRelation(rel, 'SYNC');
       }
-      for (final FluentDbRelation<FluentStorable> rel in mixin.incomingRelations.values) {
+      for (final FluentDbRelation<FluentStorable, FluentStorable> rel in mixin.incomingRelations.values) {
         processRelation(rel, 'INCOMING');
       }
     }

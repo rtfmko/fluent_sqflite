@@ -218,7 +218,7 @@ abstract class FluentProvider<T extends FluentStorable> {
     }
 
     if (_hasRelations && _relationsMixin != null) {
-      final FluentDbRelation<FluentStorable>? rel = _relationsMixin!.resolvedRelations[childProvider.modelType];
+      final FluentDbRelation<FluentStorable, FluentStorable>? rel = _relationsMixin!.resolvedRelations[childProvider.modelType];
       if (rel?.remoteKey != null) {
         final String explicitKey = (rel as FluentDbRelation).remoteKey!;
         _remoteKeyCache[childType] = explicitKey;
