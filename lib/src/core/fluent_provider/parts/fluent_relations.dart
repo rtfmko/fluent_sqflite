@@ -581,6 +581,14 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       }
     }
 
+    final Map<FluentStorable, FluentStorable> childToRepresentative = Map<FluentStorable, FluentStorable>.identity();
+    for (final List<FluentStorable> children in parentIndexToChildren.values) {
+      for (final child in children) {
+        final FluentStorable representative = uniqueChildren.lookup(child) ?? child;
+        childToRepresentative[child] = representative;
+      }
+    }
+
     final List<dynamic> finalUniqueRawList = uniqueCount == totalChildrenCount ? fixedRawList : fixedRawList.sublist(0, uniqueCount);
 
     final List<FluentStorable> flatChildrenList = childDao._createTypedList(finalUniqueRawList);
@@ -614,7 +622,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       for (int i = 0; i < currentChildrenLen; i++) {
         final FluentStorable child = children[i];
 
-        final FluentStorable savedChild = uniqueChildren.lookup(child) ?? child;
+        final FluentStorable savedChild = childToRepresentative[child] ?? child;
 
         final dynamic childId = childDao._prepareSqlJson(savedChild)[childPkName];
         if (childId == null) {
@@ -623,7 +631,6 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
         }
 
         final String pairKey = '$parentId:$childId';
-
         if (uniquePairs.add(pairKey)) {
           final Map<String, dynamic> pivotRecord = {pivotParentKey: parentId, pivotChildKey: childId};
           final ConflictAlgorithm conflictAlgorithm = (task.helper?.updateIfExist ?? true) ? ConflictAlgorithm.replace : ConflictAlgorithm.ignore;
@@ -637,7 +644,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       await effectiveBatch.commit(noResult: true);
     }
 
-    FluentLog.debug('Many-to-many pivot association records staged successfully', tag: '$tableName:relations', context: {'pivotTable': pivotTable, 'insertedPairs': uniquePairs.length});
+    FluentLog.debug('Many-to-many pivot association records staged successfully', tag: '$tableName:relations', context: {'pivotTable': pivotTable});
   }
 
   /// Explicitly hydrates lazy-loaded relational associations for a specific model instance.
