@@ -621,16 +621,34 @@ CREATE TABLE IF NOT EXISTS $pivotName (
   /// [db] The database transaction or instance to execute the schema setup against.
   /// [dao] The provider instance being synchronized.
   Future<void> syncPivotTables(Database db, FluentProvider dao) async {
-    if (dao is! FluentRelationsMixin) return;
+    final bool hasRelations = dao is FluentRelationsMixin;
+    FluentLog.debug(
+      'Syncing indexes for table',
+      tag: 'FluentDb:syncSchema',
+      context: {'table': dao.tableName, 'hasRelations': hasRelations, 'totalRelations': hasRelations ? dao.resolvedRelations.length : 0},
+    );
+
+    if (!hasRelations) return;
 
     final Map<Type, FluentDbRelation<FluentStorable, FluentStorable>> relations = dao.resolvedRelations;
-    FluentLog.debug('Checking M2M pivot table integrity for table: ${dao.tableName}', tag: '$tableName:syncPivotTables', context: {'relationCount': relations.length});
+    final List<String> relationDetails = relations.entries.map((e) => '${e.key}(${e.value.relationType.name})').toList();
+    FluentLog.debug('Checking M2M pivot table integrity', tag: '$tableName:syncPivotTables', context: {'totalRelations': relations.length, 'relationsList': relationDetails.join(', ')});
 
     for (final FluentDbRelation<FluentStorable, FluentStorable> rel in relations.values) {
       if (rel.relationType == FluentDbRelationType.manyToMany && rel.pivotTable != null) {
         final FluentProvider<FluentStorable> childDao = FluentDb.providerForType(rel.runtimeType);
 
-        FluentLog.info('Synchronizing pivot table: ${rel.pivotTable}', tag: '$tableName:syncPivotTables', context: {'parent': dao.tableName, 'child': childDao.tableName, 'pivot': rel.pivotTable});
+        FluentLog.info(
+          'Synchronizing pivot table: ${rel.pivotTable}',
+          tag: '$tableName:syncPivotTables',
+          context: {
+            'parent': dao.tableName,
+            'child': childDao.tableName,
+            'pivot': rel.pivotTable,
+            'localKey': rel.localKey ?? '${dao.tableName}_id',
+            'remoteKey': rel.remoteKey ?? '${childDao.tableName}_id',
+          },
+        );
 
         try {
           final String sql = dao.generatePivotTableSql(rel, childDao);
