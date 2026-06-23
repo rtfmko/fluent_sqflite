@@ -636,7 +636,7 @@ CREATE TABLE IF NOT EXISTS $pivotName (
 
     for (final FluentDbRelation<FluentStorable, FluentStorable> rel in relations.values) {
       if (rel.relationType == FluentDbRelationType.manyToMany && rel.pivotTable != null) {
-        final FluentProvider<FluentStorable> childDao = FluentDb.providerForType(rel.runtimeType);
+        final FluentProvider<FluentStorable> childDao = FluentDb.providerForType(rel.modelType);
 
         FluentLog.info(
           'Synchronizing pivot table: ${rel.pivotTable}',
