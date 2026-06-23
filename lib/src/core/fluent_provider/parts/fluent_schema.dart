@@ -618,9 +618,9 @@ CREATE TABLE IF NOT EXISTS $pivotName (
   /// invokes the schema generator to produce and execute the necessary DDL
   /// (Data Definition Language) to initialize the junction table.
   ///
-  /// [db] The database transaction or instance to execute the schema setup against.
+  /// [executor] The database transaction or instance to execute the schema setup against.
   /// [dao] The provider instance being synchronized.
-  Future<void> syncPivotTables(Database db, FluentProvider dao) async {
+  Future<void> syncPivotTables(DatabaseExecutor executor, FluentProvider dao) async {
     final bool hasRelations = dao is FluentRelationsMixin;
     FluentLog.debug(
       'Syncing indexes for table',
@@ -652,7 +652,7 @@ CREATE TABLE IF NOT EXISTS $pivotName (
 
         try {
           final String sql = dao.generatePivotTableSql(rel, childDao);
-          await db.execute(sql);
+          await executor.execute(sql);
           FluentLog.debug('Pivot table ${rel.pivotTable} verified successfully', tag: '$tableName:syncPivotTables');
         } catch (e, st) {
           FluentLog.error('Failed to sync pivot table: ${rel.pivotTable}', e, st, tag: '$tableName:syncPivotTables');

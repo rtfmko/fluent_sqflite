@@ -58,7 +58,7 @@ extension FluentDbSchema on FluentDb {
       for (final FluentProvider dao in providersToSync) {
         FluentLog.debug('Syncing indexes for table', tag: 'FluentDb:syncSchema', context: {'table': dao.tableName});
         await dao.syncIndexes(txn);
-        await dao.syncPivotTables(db, dao);
+        await dao.syncPivotTables(txn, dao);
       }
     });
 
