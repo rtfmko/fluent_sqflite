@@ -44,24 +44,25 @@ class ExecutionPolicy {
   /// The [ExecutionPolicy] constructor initializes.
   const ExecutionPolicy({this.useIsolate = false, this.priority, this.chunkSize, this.timeout, this.cancelIfDuplicate, this.customTag});
 
-  /// Calculates the optimized batch size for task execution based on the
-  /// defined [chunkSize] policy.
+  /// Calculates the optimized batch size for database operations based on the
+  /// configured [chunkSize].
   ///
-  /// **Logic:**
-  /// * **Defaulting:** Uses a sensible default of 200 records if no policy size is specified.
-  /// * **Sanitization:** Imposes an upper bound of 950 records per chunk. This limit
-  ///   is critical for SQLite operations to avoid hitting the maximum variable count
-  ///   (SQLITE_LIMIT_VARIABLE_NUMBER) allowed in a single prepared statement.
-  /// * **Heuristic Adjustment:** If a [chunkSize] of 100 or less is requested, the
-  ///   logic automatically scales up to 950. This assumes that if a user wants
-  ///   small chunks, they are likely performing complex operations, so we maximize
-  ///   throughput within the safe SQL limits.
+  /// **Resolution Logic:**
+  /// * **Defaults:** If [chunkSize] is null or non-positive, returns `900`.
+  ///   This is chosen as a safe default below the SQLite limit (999),
+  ///   providing a buffer for additional query parameters.
+  /// * **Bounds Enforcement:** The returned value is clamped between `10` and `950`.
+  ///   This guarantees that no batch exceeds the SQLite variable limit, preventing
+  ///   "too many SQL variables" exceptions, while ensuring meaningful batching.
+  /// * **User Intent:** Any explicitly defined value within the valid range is
+  ///   respected, allowing fine-grained control over memory usage and transaction
+  ///   latency.
   int get effectiveChunkSize {
-    final int rawSize = chunkSize ?? 200;
+    if (chunkSize == null || (chunkSize ?? 0) <= 0) {
+      return 900;
+    }
 
-    // If the requested size is very small (<= 100), treat as a hint to maximize
-    // performance up to the safe SQLite variable limit.
-    return rawSize <= 100 ? 950 : rawSize.clamp(1, 950);
+    return chunkSize!.clamp(10, 950);
   }
 
   /// Serializes the [ExecutionPolicy] instance into a JSON-compatible map.

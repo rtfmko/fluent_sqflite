@@ -2,6 +2,8 @@
 // Use of this source code is governed by an Apache-2.0 license that can be
 // found in the LICENSE file.
 
+import '../core/core.dart';
+import '../interfaces/interfaces.dart';
 import '../models/models.dart';
 import 'utils.dart';
 
@@ -155,4 +157,36 @@ extension FluentDbActionX on FluentDbAction {
   /// Returns `true` if the current operation necessitates an update to reactive
   /// stream controllers.
   bool get isStreamOp => _streamActions.contains(this);
+}
+
+/// Adds ergonomic hydration methods to [FluentStorable] to simplify
+/// on-demand relational data loading.
+extension FluentStorableLoadExtension on FluentStorable {
+  /// Hydrates lazy-loaded relational associations directly on the model instance.
+  ///
+  /// This method bridges the gap between sparse model instances and fully
+  /// populated entity graphs by fetching associated data only when required.
+  ///
+  /// **Usage Example:**
+  /// ```dart
+  /// // 1. Load user posts (first level of nesting)
+  /// await user.ensureLoaded<Post>();
+  /// print(user.posts.length); // Data is now in memory
+  ///
+  /// // 2. Load comments within posts (deep nesting)
+  /// // If you need to fetch data deeper in the graph, use maxDepth:
+  /// await user.ensureLoaded<Comment>(maxDepth: 2);
+  ///
+  /// // Example chain access:
+  /// final Post firstPost = user.posts.first;
+  /// print(firstPost.comments.first.text);
+  /// ```
+  ///
+  /// [maxDepth] defines how deep into the relationship graph the hydration
+  /// process should traverse to load dependent entities.
+  Future<void> ensureLoaded<R extends FluentStorable>({int maxDepth = 1}) async {
+    final FluentProvider<FluentStorable> provider = FluentDb.providerForType(runtimeType);
+
+    await provider.ensureLoaded(this, maxDepth: maxDepth);
+  }
 }

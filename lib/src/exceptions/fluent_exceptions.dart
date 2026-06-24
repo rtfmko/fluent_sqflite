@@ -244,3 +244,30 @@ class FluentSyncException extends FluentException {
   /// * [stackTrace]: The execution path leading to the failure.
   FluentSyncException(String message, {StackTrace? stackTrace}) : super(message, stackTrace);
 }
+
+/// Exception thrown when a low-level SQLite operation or relational
+/// constraint violation occurs.
+///
+/// This exception is used to signal critical database-layer failures,
+/// such as schema inconsistencies, failed batch executions, or unresolved
+/// entity relationships. It facilitates centralized error tracking and
+/// debugging of complex transactional workflows.
+class FluentSQFLiteException extends FluentException {
+  /// Creates a [FluentSQFLiteException].
+  ///
+  /// * [message]: A descriptive explanation of the database failure.
+  /// * [stackTrace]: The execution path leading to the failure.
+  FluentSQFLiteException(String message, {StackTrace? stackTrace}) : super(message, stackTrace);
+}
+
+/// Exception thrown when a relational mapping or evaluation fails.
+///
+/// Use this to signal errors related to type mismatches during relation
+/// resolution, invalid foreign key configurations, or missing entity selectors.
+class FluentRelationException extends FluentException {
+  /// Creates a [FluentRelationException].
+  ///
+  /// * [message]: A descriptive explanation of the relational mapping failure.
+  /// * [stackTrace]: The execution path leading to the failure.
+  FluentRelationException(String message, {StackTrace? stackTrace}) : super(message, stackTrace);
+}

@@ -5,6 +5,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../../fluent_sqflite.dart';
+import '../core/fluent_sqlite_internal.dart';
 
 /// The base abstract class for all database-persistable entities.
 ///
@@ -29,25 +30,43 @@ abstract class FluentStorable {
   /// Internal cache mapping model [Type]s to their resolved [FluentDbColumn] schema.
   static final Map<Type, List<FluentDbColumn>> _schemaCache = {};
 
-  /// Returns the name of the primary key field. Defaults to 'id'.
+  /// Defines the primary key column configuration for the model.
   ///
-  /// Override this method in your [FluentStorable] model if your database table
-  /// uses a non-standard primary key column name.
+  /// This method allows full control over the primary key's identity, including
+  /// its name, data type, and auto-increment behavior.
   ///
-  /// ### Usage Example:
+  /// Defaults to an integer 'id' column with [isAutoIncrement] enabled.
+  /// Override this in your [FluentStorable] model to customize the primary key
+  /// (e.g., for tables with external IDs or non-integer keys).
+  ///
+  /// ### Usage Examples:
+  ///
+  /// **Using a custom ID name:**
   /// ```dart
-  /// class User extends FluentStorable {
-  ///   // If your table uses 'user_uuid' instead of 'id'
-  ///   @override
-  ///   String getPrimaryKeyName() => 'user_uuid';
-  /// }
+  /// @override
+  /// FluentDbColumn get primaryKey => FluentDbColumn(
+  ///   name: 'user_uuid',
+  ///   type: FluentDbDataType.text,
+  ///   isPrimaryKey: true,
+  /// );
   /// ```
-  String getPrimaryKeyName() => 'id';
+  ///
+  /// **Disabling Auto-Increment (for backend-generated IDs):**
+  /// ```dart
+  /// @override
+  /// FluentDbColumn get primaryKey => FluentDbColumn(
+  ///   name: 'id',
+  ///   type: FluentDbDataType.integer,
+  ///   isPrimaryKey: true,
+  ///   isAutoIncrement: false,
+  /// );
+  /// ```
+  FluentDbColumn get primaryKey => FluentDbColumn(name: 'id', type: FluentDbDataType.integer, isPrimaryKey: true, isAutoIncrement: true);
 
   /// Retrieves the physical value of the primary key for this instance.
   ///
   /// **Automatic Fallback:** By default, this dynamically extracts the value
-  /// using `buildJson()[getPrimaryKeyName()]`. This provides maximum convenience
+  /// using `buildJson()[primaryKey.name]`. This provides maximum convenience
   /// without requiring manual boilerplate in every model.
   ///
   /// **Performance Tip:** For high-frequency operations (like bulk deletes or
@@ -55,7 +74,7 @@ abstract class FluentStorable {
   /// (e.g., `=> id;`). This bypasses JSON serialization and achieves O(1) zero-allocation performance.
   dynamic get primaryKeyValue {
     final Map<String, dynamic> json = buildJson();
-    return json[getPrimaryKeyName()];
+    return json[primaryKey.name];
   }
 
   /// Provides a mapping for Enum fields to ensure proper database serialization.
@@ -232,14 +251,17 @@ abstract class FluentStorable {
     }
 
     final Map<String, dynamic> json = buildJson();
-    final String pkName = getPrimaryKeyName();
-    final List<FluentDbColumn> detected = [];
+    final FluentDbColumn pkColumn = primaryKey;
+    final String pkName = pkColumn.name;
+    final List<FluentDbColumn> detected = [pkColumn];
     final List<Map<String, String>> unknownFields = [];
 
     // Infer column types based on the structure returned by buildJson()
     json.forEach((key, value) {
+      if (key == pkName) return;
+
       try {
-        detected.add(_inferColumnType(key, value, pkName));
+        detected.add(_inferColumnType(key, value));
       } catch (e) {
         unknownFields.add({'field': key, 'type': value.runtimeType.toString()});
       }
@@ -311,15 +333,7 @@ abstract class FluentStorable {
   ///
   /// @throws [FluentSchemaException] if the type is unrecognized, prompting the
   /// user to define it explicitly in `missingColumns`.
-  FluentDbColumn _inferColumnType(String key, dynamic value, String pkName) {
-    final bool isPk = key == pkName;
-
-    // Handle Primary Key inference with auto-increment potential
-    if (isPk) {
-      final FluentDbDataType type = (value is int?) ? FluentDbDataType.integer : FluentDbDataType.text;
-      return FluentDbColumn(name: key, type: type, isPrimaryKey: isPk, isAutoIncrement: isPk && type == FluentDbDataType.integer);
-    }
-
+  FluentDbColumn _inferColumnType(String key, dynamic value) {
     // Direct type-to-SQL mapping
     if (value is int) return FluentDbColumn.integer(key);
     if (value is double) return FluentDbColumn.real(key);
@@ -335,7 +349,7 @@ abstract class FluentStorable {
       columnName: key,
       details:
           'Unknown SQL type for field "$key" (${value.runtimeType}). '
-          'Please define this column explicitly in tableSchema.',
+          'Please define this column explicitly in missingColumns.',
       stackTrace: StackTrace.current,
     );
   }

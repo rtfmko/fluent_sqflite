@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 import '../core/core.dart';
+import '../core/fluent_sqlite_internal.dart';
+import '../exceptions/exceptions.dart';
 import '../interfaces/interfaces.dart';
 import '../utils/utils.dart';
 
@@ -82,6 +84,10 @@ class FluentDbRelation<P extends FluentStorable, C extends FluentStorable> {
   /// Whether this relation is permitted to be null.
   final bool nullable;
 
+  /// Defines the synchronization strategy for relational associations when
+  /// persisting the parent entity.
+  final FluentRelationUpdateMode updateMode;
+
   /// Creates a [FluentDbRelation] configuration defining how a model [P] interacts with
   /// its related child entity [C].
   ///
@@ -106,6 +112,9 @@ class FluentDbRelation<P extends FluentStorable, C extends FluentStorable> {
   /// [onDeleteCascade] Whether to automatically remove related records when the parent is deleted.
   /// [isLazy] Determines if the relationship should be loaded only upon first access.
   /// [nullable] Whether the relationship can legitimately return null results.
+  /// [updateMode] Defines the synchronization strategy for relational associations
+  /// when persisting the parent entity, determining how the engine handles empty
+  /// or null states.
   FluentDbRelation({
     required this.mapToKey,
     required Object? Function(P parent) entitySelector,
@@ -121,6 +130,7 @@ class FluentDbRelation<P extends FluentStorable, C extends FluentStorable> {
     this.onDeleteCascade = true,
     this.isLazy = true,
     this.nullable = false,
+    this.updateMode = FluentRelationUpdateMode.skipOnNull,
   }) : _runtimeType = C,
        _internalSelector = ((parent) => entitySelector(parent));
 
@@ -131,8 +141,33 @@ class FluentDbRelation<P extends FluentStorable, C extends FluentStorable> {
   /// the expected parent type [P], and executes the [entitySelector] to retrieve
   /// the associated child entity or collection.
   ///
-  /// Throws a [TypeError] if the provided [parent] is not an instance of [P].
-  Object? select(Object parent) => _internalSelector(parent as P);
+  /// Throws a [FluentRelationException] if the provided [parent] is not an
+  /// instance of [P], providing clear diagnostic context.
+  Object? select(Object parent) {
+    if (parent is! P) {
+      final FluentRelationException exception = FluentRelationException(
+        'Type mismatch during relational resolution. '
+        'The relation expected a parent entity of type "$P", '
+        'but received an instance of "${parent.runtimeType}". '
+        'Ensure the relation is registered to the correct model.',
+        stackTrace: StackTrace.current,
+      );
+      FluentLog.error(
+        exception.message,
+        exception,
+        exception.stackTrace,
+        tag: 'FluentDbRelation:select',
+        hint:
+            'Verify that the model registered in your FluentDbRelation matches the '
+            'actual instance being passed to the query. This usually happens when '
+            'an entity is incorrectly mapped to a relation config of a different model.',
+        context: {'expectedType': '$P', 'receivedType': '${parent.runtimeType}'},
+      );
+      throw exception;
+    }
+
+    return _internalSelector(parent);
+  }
 
   /// Returns `true` if the relationship configuration is valid and operational.
   ///
@@ -160,7 +195,7 @@ class FluentDbRelation<P extends FluentStorable, C extends FluentStorable> {
     _isValid = false;
     _validationError = validError;
 
-    FluentLog.warning('Relation disabled: $validError', tag: 'FluentDbRelation', context: {'error': validError});
+    FluentLog.warning('Relation disabled: $validError', tag: 'FluentDbRelation:disable', context: {'error': validError});
   }
 
   /// Binds a concrete type to anonymous or generic relations at runtime.

@@ -5,6 +5,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../core/core.dart';
+import '../core/fluent_sqlite_internal.dart';
 import '../core/utils/utils.dart';
 import '../interfaces/interfaces.dart';
 import '../models/models.dart';
@@ -167,32 +168,32 @@ mixin FluentRelationsMixin<T extends FluentStorable> on FluentProvider<T> {
         if (remoteFk == null && localFk == null) {
           if (childRawColumns.contains(inferredChildFk)) {
             remoteFk = inferredChildFk;
-            localFk = modelSample.getPrimaryKeyName();
+            localFk = modelSample.primaryKey.name;
           } else if (myRawColumns.contains(inferredMyFk)) {
             localFk = inferredMyFk;
-            remoteFk = targetProvider.modelSample.getPrimaryKeyName();
+            remoteFk = targetProvider.modelSample.primaryKey.name;
           } else if (childRawColumns.contains('parent_id')) {
             remoteFk = 'parent_id';
-            localFk = modelSample.getPrimaryKeyName();
+            localFk = modelSample.primaryKey.name;
           }
         }
 
         if (remoteFk != null && localFk != null) {
-          if (childRawColumns.contains(remoteFk) && localFk == modelSample.getPrimaryKeyName()) {
+          if (childRawColumns.contains(remoteFk) && localFk == modelSample.primaryKey.name) {
             currentType = FluentDbRelationType.oneToMany;
           } else {
             currentType = FluentDbRelationType.manyToOne;
           }
         } else if (remoteFk != null) {
           currentType = FluentDbRelationType.oneToMany;
-          localFk ??= modelSample.getPrimaryKeyName();
+          localFk ??= modelSample.primaryKey.name;
         } else if (localFk != null) {
           currentType = FluentDbRelationType.manyToOne;
-          remoteFk ??= targetProvider.modelSample.getPrimaryKeyName();
+          remoteFk ??= targetProvider.modelSample.primaryKey.name;
         } else {
           currentType = FluentDbRelationType.oneToMany;
           remoteFk = inferredChildFk;
-          localFk = modelSample.getPrimaryKeyName();
+          localFk = modelSample.primaryKey.name;
         }
         FluentLog.info('Auto-inference result', tag: 'FluentRelationMixin', context: {'type': currentType.name, 'localKey': localFk, 'remoteKey': remoteFk});
 
@@ -203,11 +204,11 @@ mixin FluentRelationsMixin<T extends FluentStorable> on FluentProvider<T> {
 
       if (currentType != FluentDbRelationType.manyToMany) {
         if (currentType == FluentDbRelationType.oneToMany) {
-          currentLocalKey ??= modelSample.getPrimaryKeyName();
+          currentLocalKey ??= modelSample.primaryKey.name;
           currentRemoteKey ??= "${FluentUtils.toSnakeCase(cleanName(modelType))}_id";
         } else {
           currentLocalKey ??= "${FluentUtils.toSnakeCase(cleanName(targetProvider.modelType))}_id";
-          currentRemoteKey ??= targetProvider.modelSample.getPrimaryKeyName();
+          currentRemoteKey ??= targetProvider.modelSample.primaryKey.name;
         }
 
         relation.localKey = currentLocalKey;

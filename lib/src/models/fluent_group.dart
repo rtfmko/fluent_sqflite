@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 import '../core/core.dart';
+import '../core/fluent_sqlite_internal.dart';
 import '../exceptions/exceptions.dart';
 import 'sqlite_config/sqlite_performance_config.dart';
 

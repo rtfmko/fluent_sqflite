@@ -362,8 +362,11 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       if (task.action != FluentDbAction.save && rel.isLazy && !task.ignoreLazy) continue;
       if (visitedTables != null && visitedTables.contains(childDao.tableName)) continue;
 
+      if (rel.updateMode == FluentRelationUpdateMode.readOnly) continue;
+
       final Map<int, List<FluentStorable>> parentIndexToChildren = {};
       final List<FluentStorable> allChildren = [];
+      final List<T> parentsToClear = [];
 
       final Set<FluentStorable> globalIdentitySet = {};
       bool hasIdentityConflict = false;
@@ -376,11 +379,36 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
         final T parent = items[i];
         final dynamic childrenData = rel.select(parent);
 
-        if (childrenData == null) continue;
+        final bool isNull = childrenData == null;
+        final bool isEmpty = childrenData is List ? childrenData.isEmpty : false;
+
+        bool shouldSkip = false;
+
+        switch (rel.updateMode) {
+          case FluentRelationUpdateMode.skipOnNull:
+            if (isNull) shouldSkip = true;
+            break;
+          case FluentRelationUpdateMode.skipOnEmpty:
+            if (isEmpty) shouldSkip = true;
+            break;
+          case FluentRelationUpdateMode.skipOnNullOrEmpty:
+            if (isNull || isEmpty) shouldSkip = true;
+            break;
+          case FluentRelationUpdateMode.forceOverwrite:
+          case FluentRelationUpdateMode.readOnly:
+            break;
+        }
+
+        if (shouldSkip) continue;
+
+        parentsToClear.add(parent);
+
+        if (isNull || isEmpty) {
+          continue;
+        }
 
         final List<FluentStorable> childrenList;
         if (childrenData is List) {
-          if (childrenData.isEmpty) continue;
           childrenList = childrenData.cast<FluentStorable>();
         } else if (childrenData is FluentStorable) {
           childrenList = List<FluentStorable>.filled(1, childrenData, growable: false);
@@ -418,13 +446,15 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
         }
       }
 
-      if (allChildren.isEmpty) continue;
+      if (allChildren.isEmpty && parentsToClear.isEmpty) continue;
 
-      FluentLog.debug(
-        'Processing nested relational graph associations',
-        tag: '$tableName:relations',
-        context: {'childType': childType.toString(), 'relationType': rel.relationType.toString(), 'totalChildrenInBatch': allChildren.length},
-      );
+      if (allChildren.isNotEmpty) {
+        FluentLog.debug(
+          'Processing nested relational graph associations',
+          tag: '$tableName:relations',
+          context: {'childType': childType.toString(), 'relationType': rel.relationType.toString(), 'totalChildrenInBatch': allChildren.length},
+        );
+      }
 
       FluentTask taskToUse = task;
       if (hasIdentityConflict && !isChildAutoIncrement) {
@@ -432,9 +462,33 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       }
 
       if (rel.relationType == FluentDbRelationType.manyToMany) {
-        await _processManyToMany(txn, items, parentIndexToChildren, childDao, rel, taskToUse, batch: batch, parentJsons: localParentJsons, currentDepth: nextDepth, visitedTables: visitedTables);
+        await _processManyToMany(
+          txn,
+          items,
+          parentIndexToChildren,
+          childDao,
+          rel,
+          taskToUse,
+          parentsToClear,
+          batch: batch,
+          parentJsons: localParentJsons,
+          currentDepth: nextDepth,
+          visitedTables: visitedTables,
+        );
       } else {
-        await _processOneOrMany(txn, items, parentIndexToChildren, childDao, rel, taskToUse, batch: batch, parentJsons: localParentJsons, currentDepth: nextDepth, visitedTables: visitedTables);
+        await _processOneOrMany(
+          txn,
+          items,
+          parentIndexToChildren,
+          childDao,
+          rel,
+          taskToUse,
+          parentsToClear,
+          batch: batch,
+          parentJsons: localParentJsons,
+          currentDepth: nextDepth,
+          visitedTables: visitedTables,
+        );
       }
     }
   }
@@ -457,7 +511,8 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     Map<int, List<FluentStorable>> parentIndexToChildren,
     FluentProvider childDao,
     FluentDbRelation rel,
-    FluentTask task, {
+    FluentTask task,
+    List<T> parentsToClear, {
     Batch? batch,
     List<Map<String, dynamic>>? parentJsons,
     int currentDepth = 0,
@@ -471,6 +526,51 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       return;
     }
 
+    final bool isPolymorphic = rel.isPolymorphic;
+    final String polyTypeCol = isPolymorphic ? (rel.polyTypeColumn ?? 'parent_type') : '';
+    final String currentTableName = tableName;
+
+    if (parentsToClear.isNotEmpty) {
+      final List<dynamic> parentIds = [];
+      for (final T p in parentsToClear) {
+        final dynamic id = _prepareSqlJson(p)[parentPkName];
+        if (id != null) parentIds.add(id);
+      }
+
+      if (parentIds.isNotEmpty) {
+        if (!rel.onDeleteCascade) {
+          bool isNotNullCol = false;
+          for (final col in childDao.modelSample.tableSchema) {
+            if (col.name == effectiveRemoteKey && col.isNotNull) {
+              isNotNullCol = true;
+              break;
+            }
+          }
+
+          if (isNotNullCol) {
+            throw FluentConstraintException(
+              'Cannot update relation for table "${childDao.tableName}": '
+              'Column "$effectiveRemoteKey" has a NOT NULL constraint. '
+              'You cannot use "onDeleteCascade: false" here. '
+              'Change to cascading delete or make the column nullable in the schema.',
+            );
+          }
+        }
+
+        await _executeChunkedWhereIn(
+          isDelete: rel.onDeleteCascade,
+          table: childDao.tableName,
+          column: effectiveRemoteKey,
+          ids: parentIds,
+          batch: batch,
+          txn: txn,
+          polymorphicColumn: isPolymorphic ? polyTypeCol : null,
+          polymorphicValue: isPolymorphic ? currentTableName : null,
+          chunkSize: task.policy.effectiveChunkSize,
+        );
+      }
+    }
+
     int totalChildrenCount = 0;
     for (final List<FluentStorable> children in parentIndexToChildren.values) {
       totalChildrenCount += children.length;
@@ -478,14 +578,8 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     if (totalChildrenCount == 0) return;
 
     final List<dynamic> fixedRawList = List<dynamic>.filled(totalChildrenCount, childDao.modelSample, growable: false);
-
-    final bool isPolymorphic = rel.isPolymorphic;
-    final String polyTypeCol = isPolymorphic ? (rel.polyTypeColumn ?? 'parent_type') : '';
-    final String currentTableName = tableName;
-
     int globalChildIdx = 0;
 
-    // Relational Binding: Inject parent primary keys into child models before persistence
     for (final MapEntry<int, List<FluentStorable>> entry in parentIndexToChildren.entries) {
       final int parentIdx = entry.key;
       final List<FluentStorable> children = entry.value;
@@ -500,14 +594,35 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
         parentId = _prepareSqlJson(parent)[parentPkName];
       }
 
-      if (parentId == null) continue;
+      if (parentId == null) {
+        if (batch != null) {
+          final FluentSQFLiteException exception = FluentSQFLiteException(
+            'Critical relation error: Unresolved parent ID for table "${childDao.tableName}". '
+            'New entities with auto-increment IDs cannot be saved alongside their children '
+            'inside a deferred batch. SQLite cannot return generated IDs during a batch execution. '
+            'Solution: Save parent objects physically first, then save their child relations.',
+            stackTrace: StackTrace.current,
+          );
+          FluentLog.error(
+            exception.message,
+            exception,
+            exception.stackTrace,
+            tag: '$tableName:relations',
+            hint:
+                'Save parent objects physically first to commit their IDs to the database, '
+                'then proceed with saving child relations. SQLite does not return generated '
+                'IDs during a batch execution.',
+            context: {'childTable': childDao.tableName},
+          );
+          throw exception;
+        }
+        continue;
+      }
 
       for (int i = 0; i < currentChildrenLen; i++) {
         final FluentStorable child = children[i];
-        // Link child to parent via foreign key
         child.injectRelationId(effectiveRemoteKey, parentId);
 
-        // Inject polymorphic metadata if the relation architecture demands type-discrimination
         if (isPolymorphic) {
           child.injectRelationId(polyTypeCol, currentTableName);
         }
@@ -516,7 +631,6 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       }
     }
 
-    // Hydration Pipeline: Finalize typed entity list and delegate to child provider for batch persistence
     final List<FluentStorable> flatChildrenList = childDao._createTypedList(fixedRawList);
 
     if (flatChildrenList.isNotEmpty) {
@@ -547,7 +661,8 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     Map<int, List<FluentStorable>> parentIndexToChildren,
     FluentProvider childDao,
     FluentDbRelation rel,
-    FluentTask task, {
+    FluentTask task,
+    List<T> parentsToClear, {
     Batch? batch,
     List<Map<String, dynamic>>? parentJsons,
     int currentDepth = 0,
@@ -560,11 +675,38 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     final String pivotParentKey = rel.localKey ?? '${tableName}_id';
     final String pivotChildKey = rel.remoteKey ?? '${childDao.tableName}_id';
 
+    final bool isLocalBatch = batch == null;
+    final Batch effectiveBatch = batch ?? txn!.batch();
+
+    if (parentsToClear.isNotEmpty) {
+      final List<dynamic> parentIds = [];
+      for (final T p in parentsToClear) {
+        final dynamic id = _prepareSqlJson(p)[parentPkName];
+        if (id != null) parentIds.add(id);
+      }
+
+      if (parentIds.isNotEmpty) {
+        await _executeChunkedWhereIn(
+          isDelete: true,
+          table: pivotTable,
+          column: pivotParentKey,
+          ids: parentIds,
+          batch: isLocalBatch ? null : effectiveBatch,
+          txn: txn,
+          chunkSize: task.policy.effectiveChunkSize,
+        );
+      }
+    }
+
     int totalChildrenCount = 0;
     for (final List<FluentStorable> children in parentIndexToChildren.values) {
       totalChildrenCount += children.length;
     }
-    if (totalChildrenCount == 0) return;
+
+    if (totalChildrenCount == 0) {
+      if (isLocalBatch) await effectiveBatch.commit(noResult: true);
+      return;
+    }
 
     final Set<FluentStorable> uniqueChildren = <FluentStorable>{};
     final Map<FluentStorable, FluentStorable> childToRepresentative = Map.identity();
@@ -580,10 +722,8 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     }
 
     final List<FluentStorable> flatChildrenList = uniqueChildren.toList(growable: false);
-
     final List<FluentStorable> newChildrenToSave = [];
     final List<Map<String, dynamic>> newChildrenJsons = [];
-
     final List<FluentStorable> existingChildrenToUpsert = [];
     final Map<FluentStorable, Map<String, dynamic>> childToSqlJson = Map.identity();
 
@@ -598,9 +738,6 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
         existingChildrenToUpsert.add(child);
       }
     }
-
-    final bool isLocalBatch = batch == null;
-    final Batch effectiveBatch = batch ?? txn!.batch();
 
     if (newChildrenToSave.isNotEmpty) {
       FluentLog.debug('Hydrating NEW unique child entities for M2M', tag: '$tableName:relations', context: {'count': newChildrenToSave.length});
@@ -666,12 +803,34 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
         parentId = _prepareSqlJson(parent)[parentPkName];
       }
 
-      if (parentId == null) continue;
+      if (parentId == null) {
+        if (batch != null) {
+          final FluentSQFLiteException exception = FluentSQFLiteException(
+            'Critical relation error: Unresolved parent ID for M2M pivot table "$pivotTable". '
+            'New entities with auto-increment IDs cannot be saved alongside their children '
+            'inside a deferred batch. SQLite cannot return generated IDs during a batch execution. '
+            'Solution: Save parent objects physically first, then save their child relations.',
+            stackTrace: StackTrace.current,
+          );
+          FluentLog.error(
+            exception.message,
+            exception,
+            exception.stackTrace,
+            tag: '$tableName:relations',
+            hint:
+                'Save parent objects physically first to commit their IDs to the database, '
+                'then proceed with saving child relations. SQLite does not return generated '
+                'IDs during a batch execution.',
+            context: {'pivotTable': pivotTable},
+          );
+          throw exception;
+        }
+        continue;
+      }
 
       for (int i = 0; i < children.length; i++) {
         final FluentStorable child = children[i];
         final FluentStorable representative = childToRepresentative[child] ?? child;
-
         final dynamic childId = childToSqlJson[representative]?[childPkName];
 
         if (childId == null) {
@@ -682,7 +841,6 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
         final String pairKey = '$parentId:$childId';
         if (uniquePairs.add(pairKey)) {
           final Map<String, dynamic> pivotRecord = {pivotParentKey: parentId, pivotChildKey: childId};
-
           effectiveBatch.insert(pivotTable, pivotRecord, conflictAlgorithm: ConflictAlgorithm.replace);
         }
       }
@@ -758,6 +916,50 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       unloadedRels.remove(mapKey);
 
       FluentLog.info('Relational association successfully hydrated', tag: '$tableName:relations', context: {'mapKey': mapKey, 'injectedType': finalResult.runtimeType.toString()});
+    }
+  }
+
+  /// Executes a chunked `WHERE IN` SQL operation to bypass SQLite's maximum host parameter limit.
+  ///
+  /// SQLite restricts the number of variables in a single query (typically 999).
+  /// This utility automatically splits large batches of IDs into chunks of 900
+  /// and executes them sequentially.
+  Future<void> _executeChunkedWhereIn({
+    required bool isDelete,
+    required String table,
+    required String column,
+    required List<dynamic> ids,
+    required int chunkSize,
+    Batch? batch,
+    Transaction? txn,
+    String? polymorphicColumn,
+    String? polymorphicValue,
+  }) async {
+    for (int i = 0; i < ids.length; i += chunkSize) {
+      final int end = (i + chunkSize > ids.length) ? ids.length : i + chunkSize;
+      final List<dynamic> chunk = ids.sublist(i, end);
+      final String placeholders = List.filled(chunk.length, '?').join(', ');
+
+      String sql;
+      final List<dynamic> args = List.from(chunk);
+
+      String polyClause = '';
+      if (polymorphicColumn != null && polymorphicValue != null && polymorphicColumn.isNotEmpty) {
+        polyClause = ' AND $polymorphicColumn = ?';
+        args.add(polymorphicValue);
+      }
+
+      if (isDelete) {
+        sql = 'DELETE FROM $table WHERE $column IN ($placeholders)$polyClause';
+      } else {
+        sql = 'UPDATE $table SET $column = NULL WHERE $column IN ($placeholders)$polyClause';
+      }
+
+      if (batch != null) {
+        isDelete ? batch.rawDelete(sql, args) : batch.rawUpdate(sql, args);
+      } else {
+        isDelete ? await txn!.rawDelete(sql, args) : await txn!.rawUpdate(sql, args);
+      }
     }
   }
 }

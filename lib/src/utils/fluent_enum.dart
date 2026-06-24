@@ -475,3 +475,21 @@ enum FluentSyncStrategy {
   /// that the local state reflects the authoritative source of truth.
   pullAndSave,
 }
+
+/// Defines the behavior for updating relational associations during a parent entity's save operation.
+enum FluentRelationUpdateMode {
+  /// Skip update if the field is `null`. If empty `[]`, clear existing database relations. (Default for most cases)
+  skipOnNull,
+
+  /// Skip update if the field is empty `[]`. If `null`, clear existing database relations.
+  skipOnEmpty,
+
+  /// Skip update if the field is `null` OR empty `[]`. Only process if valid data exists.
+  skipOnNullOrEmpty,
+
+  /// Always enforce the state. `null` or empty `[]` will aggressively wipe existing database relations.
+  forceOverwrite,
+
+  /// Never update this relation automatically through the parent's lifecycle.
+  readOnly,
+}

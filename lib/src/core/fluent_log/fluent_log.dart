@@ -1,7 +1,6 @@
 // ignore_for_file: avoid_redundant_argument_values
 
-import '../../interfaces/interfaces.dart';
-import '../../utils/utils.dart';
+part of '../fluent_sqlite_internal.dart';
 
 /// A centralized logging utility for the database layer.
 ///

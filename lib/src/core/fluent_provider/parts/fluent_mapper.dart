@@ -56,7 +56,7 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
     final T model = _assembleModel(enrichedRow);
     final Map<Type, FluentDbRelation<FluentStorable, FluentStorable>> syncRels = _relationsMixin!.resolvedRelations;
 
-    FluentLog.debug('Hydrating relational graph for model', tag: '$tableName:hydration', context: {'modelId': model.getPrimaryKeyName(), 'relationalKeys': syncRels.keys.toString()});
+    FluentLog.debug('Hydrating relational graph for model', tag: '$tableName:hydration', context: {'modelId': model.primaryKey.name, 'relationalKeys': syncRels.keys.toString()});
 
     for (final FluentDbRelation<FluentStorable, FluentStorable> rel in syncRels.values) {
       final String key = rel.mapToKey;
@@ -198,7 +198,7 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
             }
           }
         } catch (e, s) {
-          FluentLog.error('Failed to hydrate relation in batch index $index', e, s, tag: '$tableName:hydration', context: {'key': key, 'modelId': model.getPrimaryKeyName()});
+          FluentLog.error('Failed to hydrate relation in batch index $index', e, s, tag: '$tableName:hydration', context: {'key': key, 'modelId': model.primaryKey.name});
           rethrow;
         }
       }
@@ -309,7 +309,7 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
     final Map<String, dynamic> finalSqlJson = {};
     Map<String, String>? typeMetadata;
 
-    FluentLog.debug('Serializing model for SQL persistence', tag: '$tableName:serialization', context: {'modelId': item.getPrimaryKeyName(), 'columnCount': rawJson.length});
+    FluentLog.debug('Serializing model for SQL persistence', tag: '$tableName:serialization', context: {'modelId': item.primaryKey.name, 'columnCount': rawJson.length});
 
     for (final MapEntry<String, dynamic> entry in rawJson.entries) {
       final String key = entry.key;

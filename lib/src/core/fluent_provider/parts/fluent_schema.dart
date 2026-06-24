@@ -490,18 +490,9 @@ CREATE TABLE IF NOT EXISTS $pivotName (
 
     final Map<String, FluentDbColumn> finalMap = <String, FluentDbColumn>{};
     final List<FluentDbColumn> systemColumns = FluentDbColumn.systemColumns(modelSample.expiryColumn);
-    final Set<String> duplicatesChecker = <String>{};
 
     // Stage 1: Base Model Processing
     for (final FluentDbColumn col in modelSample.tableSchema) {
-      final bool isSystem = systemColumns.any((sys) => sys.name == col.name);
-      if (isSystem) {
-        FluentLog.warning('Ignoring system-reserved column in model definition', tag: '$tableName:schema', context: {'col': col.name});
-        continue;
-      }
-      if (!duplicatesChecker.add(col.name)) {
-        FluentLog.warning('Duplicate column detected in tableSchema', tag: '$tableName:schema', context: {'col': col.name});
-      }
       finalMap[col.name] = col;
     }
 
@@ -536,7 +527,7 @@ CREATE TABLE IF NOT EXISTS $pivotName (
           final targetProvider = FluentDb.providerForType(rel.modelType);
           if (targetTable == null || targetPk == null) {
             targetTable ??= targetProvider.tableName;
-            targetPk ??= targetProvider.modelSample.getPrimaryKeyName();
+            targetPk ??= targetProvider.modelSample.primaryKey.name;
           }
 
           final String? keyName = (rel.relationType == FluentDbRelationType.manyToOne) ? rel.localKey : (rel.relationType == FluentDbRelationType.oneToMany ? null : rel.localKey);
@@ -582,10 +573,7 @@ CREATE TABLE IF NOT EXISTS $pivotName (
 
     _cachedTableColumns = finalMap.keys.toSet();
 
-    _cachedPrimaryKey = finalizedSchema.firstWhere(
-      (col) => col.isPrimaryKey,
-      orElse: () => FluentDbColumn(name: 'id', type: FluentDbDataType.integer, isPrimaryKey: true),
-    );
+    _cachedPrimaryKey = modelSample.primaryKey;
 
     final bool isRelationsProvider = this is FluentRelationsMixin<T>;
     _hasRelations = isRelationsProvider;
