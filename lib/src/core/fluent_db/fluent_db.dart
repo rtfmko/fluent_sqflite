@@ -951,4 +951,67 @@ class FluentDb {
   /// * [dbName]: The target database name.
   /// * [tableName]: The specific table to generate the dump for.
   static Future<String> dumpReport(String dbName, String tableName) async => FluentTableStatsTracker().dumpReport(dbName, tableName);
+
+  /// Returns `true` if the database logging system is currently active.
+  ///
+  /// This property provides a read-only view into the global logging state.
+  /// It is useful for conditional logic in performance-critical code paths
+  /// where you may want to skip expensive string building or diagnostic
+  /// processing if logging is currently disabled.
+  static bool get isLoggingEnable => FluentLog.isEnabled;
+
+  /// Configures the global database telemetry and logging system.
+  ///
+  /// This method acts as a public facade for the internal [FluentLog] system,
+  /// allowing configuration of both application-level and engine-level telemetry.
+  ///
+  /// * [userLogger]: Handles surface-level application events, SQL execution
+  ///   reports, and developer-defined logging.
+  /// * [internalLogger]: Handles low-level framework telemetry, performance
+  ///   profiling, and deep diagnostic traces.
+  /// * [enable]: A global toggle for the logging system. If false, short-circuits
+  ///   all logging operations.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// FluentDb.setupLogging(
+  ///   userLogger: FluentLogger(
+  ///     isDebug: true,
+  ///     useColors: true,
+  ///     onError: (message, e, s) {
+  ///       // Send to Crashlytics or Sentry
+  ///     },
+  ///   ),
+  ///   internalLogger: MyCustomCrashlyticsLogger(),
+  /// );
+  /// ```
+  static void setupLogging({FluentTelemetry? userLogger, FluentTelemetry? internalLogger, bool? enable}) => FluentLog.setup(userLogger: userLogger, internalLogger: internalLogger, enable: enable);
+
+  /// Initializes the database logging system with a default configuration.
+  ///
+  /// This is a convenience method designed for development environments. It
+  /// automatically configures user loggers to output
+  /// diagnostic information directly to the console with formatting.
+  static void setupDefault({bool useColors = true}) => FluentLog.initDefault(useColors: useColors);
+
+  /// Initializes the database logging system with a default debug configuration.
+  ///
+  /// This is a convenience method designed for development environments. It
+  /// automatically configures user loggers to output
+  /// diagnostic information (including SQL traces and performance metrics)
+  /// directly to the console with formatting.
+  static void setupDefaultDebug({bool useColors = true}) => FluentLog.initDefaultDebug(useColors: useColors);
+
+  /// Dynamically toggles the global database logging state at runtime.
+  ///
+  /// Useful for silencing logs during heavy, non-critical background tasks,
+  /// and resuming them afterward.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// FluentDb.toggleLogging(false); // Silence logs
+  /// await performMassiveDataMigration();
+  /// FluentDb.toggleLogging(true); // Resume logs
+  /// ```
+  static void toggleLogging(bool enable) => FluentLog.isGloballyEnabled(enable);
 }

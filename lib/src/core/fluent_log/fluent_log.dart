@@ -1,3 +1,7 @@
+// Copyright 2026 RTFM. All rights reserved.
+// Use of this source code is governed by an Apache-2.0 license that can be
+// found in the LICENSE file.
+
 // ignore_for_file: avoid_redundant_argument_values
 
 part of '../fluent_sqlite_internal.dart';
@@ -58,17 +62,13 @@ class FluentLog {
   ///
   /// This is the recommended entry point for standard applications,
   /// providing color-coded terminal output for easier local debugging.
-  static void initDefault() {
-    _userLogger ??= FluentLogger(isLogOn: true, isDebug: false, useColors: true, tag: 'FluentSQFLite');
-  }
+  static void initDefault({bool useColors = true}) => _userLogger ??= FluentLogger(isLogOn: true, isDebug: false, useColors: useColors, tag: 'FluentSQFLite');
 
   /// Initializes the logging system with a default [FluentLogger] with debug mode.
   ///
   /// This is the recommended entry point for standard applications debugging,
   /// providing color-coded terminal output for easier local debugging.
-  static void initDefaultDebug() {
-    _userLogger ??= FluentLogger(isLogOn: true, isDebug: true, useColors: true, tag: 'FluentSQFLite');
-  }
+  static void initDefaultDebug({bool useColors = true}) => _userLogger ??= FluentLogger(isLogOn: true, isDebug: true, useColors: useColors, tag: 'FluentSQFLite');
 
   /// Configures the logging infrastructure with custom logger instances.
   ///

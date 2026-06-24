@@ -51,7 +51,7 @@ class FluentLogger extends FluentTelemetry {
   /// [tag]: The default identifier attached to log entries for filtering.
   /// [onAll]: A global interception hook for every log entry.
   /// [onInfo], [onDebug], [onWarning], [onError], [onSql]: Specific handlers
-  ///           for different severity levels and diagnostic contexts.
+  /// for different severity levels and diagnostic contexts.
   FluentLogger({this.isLogOn = true, this.isDebug = false, this.useColors = true, this.tag = 'FluentSQFLite', this.onAll, this.onInfo, this.onDebug, this.onWarning, this.onError, this.onSql});
 
   @override
