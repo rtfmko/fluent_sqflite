@@ -7,3 +7,6 @@ export 'fluent_sync_result.dart';
 export 'isolate/execution_policy.dart';
 export 'sqlite_config/sqlite_cache_size.dart';
 export 'sqlite_config/sqlite_performance_config.dart';
+export 'stream_pipeline/fluent_api_response.dart';
+export 'stream_pipeline/fluent_data_event.dart';
+export 'stream_pipeline/fluent_sync_options.dart';

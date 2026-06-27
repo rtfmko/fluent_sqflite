@@ -159,9 +159,40 @@ extension FluentDbActionX on FluentDbAction {
   bool get isStreamOp => _streamActions.contains(this);
 }
 
-/// Adds ergonomic hydration methods to [FluentStorable] to simplify
-/// on-demand relational data loading.
-extension FluentStorableLoadExtension on FluentStorable {
+/// Adds Active Record capabilities to [FluentStorable] models,
+/// allowing them to self-manage their persistence lifecycle and relational graph.
+///
+/// This extension enables a fluent API for database operations directly on model instances,
+/// reducing boilerplate code and improving readability in business logic.
+extension FluentActiveRecords<T extends FluentStorable> on T {
+  /// Saves a single [item].
+  Future<void> save({bool updateIfExist = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async =>
+      await FluentDb.saveItem<T>(this, updateIfExist: updateIfExist, tag: tag, policy: policy);
+
+  /// Updates an entire record represented by [item].
+  Future<int> update({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async => await FluentDb.update<T>(this, tag: tag, policy: policy);
+
+  /// Updates a record represented by [item] along with its related entities.
+  Future<int> updateWithRelations({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async => await FluentDb.updateWithRelations<T>(this, tag: tag, policy: policy);
+
+  /// Updates an entity instance and returns its fully synchronized state from the database.
+  Future<T?> updateAndFetch({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async => await FluentDb.updateAndFetch<T>(this, tag: tag, policy: policy);
+
+  /// Checks if a record exists in the table.
+  Future<bool> exists({ExecutionPolicy policy = const ExecutionPolicy()}) async => await FluentDb.exists<T>(primaryKeyValue, policy: policy);
+
+  /// Deletes a specific record instance.
+  Future<int> delete({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async => await FluentDb.delete<T>(this, tag: tag, policy: policy);
+
+  /// Restores a previously soft-deleted object instance.
+  Future<int> restore({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async => await FluentDb.restore<T>(this, tag: tag, policy: policy);
+
+  /// Restores a soft-deleted entity instance and returns its refreshed state from the database.
+  Future<T?> restoreAndFetch({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async => await FluentDb.restoreAndFetch<T>(this, tag: tag, policy: policy);
+
+  /// Permanently removes an object instance from the database, bypassing any soft-delete mechanisms.
+  Future<int> hardDelete({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async => await FluentDb.hardDelete<T>(this, tag: tag, policy: policy);
+
   /// Hydrates lazy-loaded relational associations directly on the model instance.
   ///
   /// This method bridges the gap between sparse model instances and fully
@@ -188,5 +219,74 @@ extension FluentStorableLoadExtension on FluentStorable {
     final FluentProvider<FluentStorable> provider = FluentDb.providerForType(runtimeType);
 
     await provider.ensureLoaded(this, maxDepth: maxDepth);
+  }
+
+  /// Fetches the latest state of this instance from the database and returns a
+  /// refreshed copy of the object.
+  ///
+  /// This method is useful when you suspect the underlying database record has
+  /// been modified by other processes or background tasks.
+  ///
+  /// **Usage Example:**
+  /// ```dart
+  /// // Keep your model instance up-to-date:
+  /// user = await user.refresh() ?? user;
+  ///
+  /// // Or use it in a state management context:
+  /// setState(() async {
+  ///   user = await user.refresh();
+  /// });
+  /// ```
+  /// Returns the refreshed instance [T] if found, otherwise `null`.
+  Future<T?> refresh() async {
+    final T? refreshed = await FluentDb.findById<T>(primaryKeyValue);
+    return refreshed;
+  }
+}
+
+/// Adds Active Record style batch operations to collections of [FluentStorable] models.
+///
+/// This extension allows you to perform database actions directly on a list
+/// or set of models, bypassing the need to call [FluentDb] manually.
+extension FluentStorableCollectionX<T extends FluentStorable> on Iterable<T> {
+  /// Persists all items in the collection to the database.
+  ///
+  /// Safely handles mixed-type collections (e.g., saving Users and Posts together)
+  /// by automatically grouping them by their runtime types and routing them
+  /// to the appropriate providers.
+  Future<void> saveItems({bool updateIfExists = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
+    if (isEmpty) return;
+    return FluentDb.saveItems<T>(toList(growable: false), updateIfExists: updateIfExists, tag: tag, policy: policy);
+  }
+
+  /// Updates all items in the collection in a single batch transaction.
+  Future<int> updateAll({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
+    if (isEmpty) return 0;
+    return FluentDb.updateAll<T>(this, tag: tag, policy: policy);
+  }
+
+  /// Performs a transactional batch update of multiple entities along with their
+  /// full relational graphs.
+  Future<int> updateAllWithRelations({FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
+    if (isEmpty) return 0;
+    return FluentDb.updateAllWithRelations<T>(this, syncMode: syncMode, tag: tag, policy: policy);
+  }
+
+  /// Soft-deletes all items in the collection in a single batch transaction.
+  Future<int> deleteAll({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
+    if (isEmpty) return 0;
+    return FluentDb.deleteAll<T>(this, tag: tag, policy: policy);
+  }
+
+  /// Permanently deletes all items in the collection, bypassing soft-delete markers.
+  Future<int> hardDeleteAll({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
+    if (isEmpty) return 0;
+    return FluentDb.hardDeleteAll<T>(this, tag: tag, policy: policy);
+  }
+
+  /// Restores all soft-deleted items in the collection.
+  Future<int> restoreAll({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
+    if (isEmpty) return 0;
+    return FluentDb.restoreAll<T>(this, tag: tag, policy: policy);
   }
 }

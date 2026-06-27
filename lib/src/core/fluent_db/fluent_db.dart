@@ -336,15 +336,6 @@ class FluentDb {
   static Future<void> saveItem<T extends FluentStorable>(T item, {bool updateIfExist = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
       providerByType<T>().saveItem(item, updateIfExist: updateIfExist, policy: policy.withTag(tag));
 
-  /// Saves a list of items of type [T] atomically.
-  ///
-  /// **Example:**
-  /// ```dart
-  /// await FluentDb.saveItems([user1, user2, user3]);
-  /// ```
-  static Future<void> saveItems<T extends FluentStorable>(List<T> items, {bool updateIfExist = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().saveItems(items, updateIfExist: updateIfExist, policy: policy.withTag(tag));
-
   /// Retrieves a single record of type [T].
   ///
   /// **Example:**
@@ -450,12 +441,51 @@ class FluentDb {
   ///
   /// **Example:**
   /// ```dart
-  /// final updatedProfile = userProfile.copyWith(bio: "New Bio");
+  /// final UserProfile updatedProfile = userProfile.copyWith(bio: "New Bio");
   /// // This will update the Profile table and sync any related Settings or Roles
   /// await FluentDb.updateWithRelations<UserProfile>(updatedProfile);
   /// ```
-  static Future<int> updateWithRelations<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().updateWithRelations(item, policy: policy.withTag(tag));
+  static Future<int> updateWithRelations<T extends FluentStorable>(
+    T item, {
+    FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal,
+    Object? tag,
+    ExecutionPolicy policy = const ExecutionPolicy(),
+  }) => providerByType<T>().updateWithRelations(item, syncMode: syncMode, policy: policy.withTag(tag));
+
+  /// Performs a transactional batch update of multiple entities along with their
+  /// full relational graphs.
+  ///
+  /// This method is the high-performance counterpart to [updateWithRelations]. It
+  /// processes the entire collection of [items] in a single atomic database
+  /// transaction, making it the preferred choice for bulk state reconciliation
+  /// and syncing large datasets from remote APIs.
+  ///
+  /// ### Relational Integrity
+  /// The [syncMode] parameter governs how the relational graph is merged:
+  /// * [FluentRelationSyncMode.preserveLocal]: Retains existing child records that
+  ///   are not present in the update payload.
+  /// * [FluentRelationSyncMode.replace]: Clears orphaned relations and fully
+  ///   replaces the child associations with the incoming data.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// final List<User> updatedUsers = [user1, user2];
+  /// // Updates the User table and cascades changes to linked Posts,
+  /// // Comments, or Profiles in a single transactional batch.
+  /// await FluentDb.updateAllWithRelations<User>(
+  ///   updatedUsers,
+  ///   syncMode: FluentRelationSyncMode.replace,
+  /// );
+  /// ```
+  ///
+  /// Returns a [Future<int>] representing the total number of root entities
+  /// successfully updated.
+  static Future<int> updateAllWithRelations<T extends FluentStorable>(
+    Iterable<T> items, {
+    FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal,
+    Object? tag,
+    ExecutionPolicy policy = const ExecutionPolicy(),
+  }) => _executeMixedBatch(items, (provider, typedItems) => provider.updateAllWithRelations(typedItems, syncMode: syncMode, policy: policy.withTag(tag)));
 
   /// Updates an entity instance and returns its fully synchronized state from the database.
   ///
@@ -494,7 +524,7 @@ class FluentDb {
   static Future<int> updateFieldsMultiple<T extends FluentStorable>(dynamic id, Map<String, dynamic> fields, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
       providerByType<T>().updateFieldsMultiple(id, fields, policy: policy.withTag(tag));
 
-  /// Performs a transactional batch update of multiple entity instances.
+  /// Performs a transactional batch restoration, safely handling mixed-type collections.
   ///
   /// This method iterates through the provided [items], synchronizes their
   /// fields with the database schema, and commits the updates as an atomic
@@ -509,7 +539,7 @@ class FluentDb {
   /// print('Successfully updated $affectedRows records.');
   /// ```
   static Future<int> updateAll<T extends FluentStorable>(Iterable<T> items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().updateAll(items, policy: policy.withTag(tag));
+      _executeMixedBatch<T>(items, (provider, typedItems) => provider.updateAll(typedItems, policy: policy.withTag(tag)));
 
   /// Performs a transactional batch update of specific fields for a set of identified entities.
   ///
@@ -547,7 +577,7 @@ class FluentDb {
   static Future<int> deleteBy<T extends FluentStorable>(dynamic value, {Object? tag, String? key, ExecutionPolicy policy = const ExecutionPolicy()}) =>
       providerByType<T>().deleteBy(value, key: key, policy: policy.withTag(tag));
 
-  /// Performs a transactional batch deletion of multiple entity instances.
+  /// Performs a transactional batch restoration, safely handling mixed-type collections.
   ///
   /// This method iterates through the provided collection of [items], extracts
   /// their primary keys, and executes a bulk removal operation. Depending on
@@ -562,9 +592,9 @@ class FluentDb {
   /// print('Successfully processed $deletedCount deletions.');
   /// ```
   static Future<int> deleteAll<T extends FluentStorable>(Iterable<T> items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().deleteAll(items, policy: policy.withTag(tag));
+      _executeMixedBatch<T>(items, (provider, typedItems) => provider.deleteAll(typedItems, policy: policy.withTag(tag)));
 
-  /// Performs a transactional batch hard-delete of multiple entity instances.
+  /// Performs a transactional batch restoration, safely handling mixed-type collections.
   ///
   /// Unlike standard deletion methods that may utilize soft-delete markers, this
   /// routine executes a permanent removal of the specified [items] from the
@@ -578,7 +608,7 @@ class FluentDb {
   /// print('Permanently removed $deletedCount records.');
   /// ```
   static Future<int> hardDeleteAll<T extends FluentStorable>(Iterable<T> items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().hardDeleteAll(items, policy: policy.withTag(tag));
+      _executeMixedBatch<T>(items, (provider, typedItems) => provider.hardDeleteAll(typedItems, policy: policy.withTag(tag)));
 
   /// Deletes a batch of records identified by their primary keys.
   ///
@@ -696,7 +726,7 @@ class FluentDb {
   static Future<T?> restoreAndFetch<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
       providerByType<T>().restoreAndFetch(item, policy: policy.withTag(tag));
 
-  /// Performs a transactional batch restoration of multiple soft-deleted entity instances.
+  /// Performs a transactional batch restoration, safely handling mixed-type collections.
   ///
   /// This method iterates through the provided collection of [items], extracts their
   /// primary keys, and initiates a bulk restoration sequence. It is the most
@@ -711,7 +741,7 @@ class FluentDb {
   /// print('Successfully restored $restoredCount records.');
   /// ```
   static Future<int> restoreAll<T extends FluentStorable>(Iterable<T> items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().restoreAll(items, policy: policy.withTag(tag));
+      _executeMixedBatch<T>(items, (provider, typedItems) => provider.restoreAll(typedItems, policy: policy.withTag(tag)));
 
   /// Performs a transactional batch restoration of multiple soft-deleted entities
   /// identified by their primary keys.
@@ -799,44 +829,20 @@ class FluentDb {
   static Future<int> forcePurgeSoftDeleted<T extends FluentStorable>({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
       providerByType<T>().forcePurgeSoftDeleted(policy: policy.withTag(tag));
 
-  /// Persists a heterogeneous collection of [FluentStorable] items using the background
-  /// execution queue.
+  /// Performs a transactional batch restoration, safely handling mixed-type collections.
   ///
-  /// Unlike the type-specific `saveAll<T>`, this method accepts a list of various
-  /// models, allowing for a bulk "sync" operation where different entities (e.g.,
-  /// User, Product, Order) are persisted in a single batch process.
+  /// Saves a list of items of type [T] atomically.
   ///
   /// **Example Usage:**
   /// ```dart
-  /// final List<FluentStorable> mixedItems = [
-  ///   User(id: 1, name: 'Alice'),
-  ///   Product(id: 50, title: 'Laptop')
-  /// ];
-  ///
-  /// await FluentDb.saveAllMixed(mixedItems, updateIfExists: true);
+  /// await FluentDb.saveItems([user1, user2, user3]);
   /// ```
   /// Persists a heterogeneous collection of [FluentStorable] items.
-  static Future<void> saveAll<T extends FluentStorable>(List<T> itemsToSave, {bool updateIfExists = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
-    if (itemsToSave.isEmpty) return;
-
-    final Map<Type, List<FluentStorable>> groupedItems = {};
-    for (final T item in itemsToSave) {
-      groupedItems.putIfAbsent(item.runtimeType, () => []).add(item);
-    }
-
-    final List<Future<void>> batchTasks = [];
-
-    for (final MapEntry<Type, List<FluentStorable>> entry in groupedItems.entries) {
-      final Type targetType = entry.key;
-      final List<FluentStorable> typedItems = entry.value;
-
-      final FluentProvider provider = providerForType(targetType);
-
-      batchTasks.add(provider.saveItems(typedItems, updateIfExist: updateIfExists, policy: policy.withTag(tag)));
-    }
-
-    await Future.wait(batchTasks);
-  }
+  static Future<void> saveItems<T extends FluentStorable>(List<T> itemsToSave, {bool updateIfExists = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async =>
+      await _executeMixedBatch<T>(itemsToSave, (provider, typedItems) async {
+        await provider.saveItems(typedItems, updateIfExist: updateIfExists, policy: policy.withTag(tag));
+        return 0;
+      });
 
   /// Orchestrates a data synchronization cycle between the local database and a remote backend.
   ///
@@ -874,6 +880,50 @@ class FluentDb {
     tag: tag,
     policy: policy,
   );
+
+  /// Initiates a reactive synchronization pipeline for the entity type [T].
+  ///
+  /// This method orchestrates the full lifecycle: fetching data from the API,
+  /// managing retries, reconciling with local storage, and streaming state
+  /// updates (loading, saving, completed) to the UI.
+  ///
+  /// ### Examples
+  ///
+  /// **1. Basic usage:**
+  /// ```dart
+  /// FluentDb.reactiveSync<User>(fetchFromApi: () => api.getUsers())
+  ///   .listen((event) => print('Phase: ${event.phase}'));
+  /// ```
+  ///
+  /// **2. Advanced usage with filters and custom behaviors:**
+  /// ```dart
+  /// await FluentDb.reactiveSync<User>(
+  ///   fetchFromApi: () => api.fetchUserPosts(userId: 123),
+  ///   localWhere: 'user_id = ?',
+  ///   localWhereArgs: [123],
+  ///   options: FluentSyncOptions<User>(
+  ///     executionStrategy: FluentExecutionStrategy.cacheThenApiYieldThenSave,
+  ///     mergeStrategy: FluentMergeStrategy.syncDeletions,
+  ///     retryCount: 3,
+  ///     statusBehaviors: {
+  ///       401: FluentApiErrorBehavior.clearCacheAndYieldError,
+  ///     },
+  ///   ),
+  /// ).listen((event) {
+  ///   if (event.phase == FluentPipelinePhase.completed) {
+  ///     updateUI(event.data);
+  ///   }
+  /// });
+  /// ```
+  ///
+  /// *Note: This method is non-blocking and provides a [Stream] of [FluentDataEvent].*
+  static Stream<FluentDataEvent<T>> reactiveSync<T extends FluentStorable>({
+    required Future<FluentApiResponse<T>> Function() fetchFromApi,
+    FluentSyncOptions<T> options = const FluentSyncOptions(),
+    String? localWhere,
+    List<Object?>? localWhereArgs,
+    ExecutionPolicy policy = const ExecutionPolicy(),
+  }) => providerByType<T>().reactiveSync(fetchFromApi: fetchFromApi, options: options, localWhere: localWhere, localWhereArgs: localWhereArgs, policy: policy);
 
   /// Dispatches a database task to the background `FluentEngine` for execution.
   ///
@@ -933,6 +983,46 @@ class FluentDb {
     }
 
     return result as R;
+  }
+
+  /// An internal batch orchestrator that executes database operations across
+  /// heterogeneous collections.
+  ///
+  /// This method is the engine behind all batch operations (saveAll, deleteAll, etc.).
+  /// It performs the following steps:
+  /// 1. **Classification:** Groups items by their exact [runtimeType] to ensure
+  ///    each entity is routed to the correct [FluentProvider].
+  /// 2. **Parallel Dispatch:** Executes the provided [action] for each group
+  ///    concurrently across available providers.
+  /// 3. **Aggregation:** Waits for all batch operations to complete and aggregates
+  ///    the total number of affected rows.
+  ///
+  /// Using this orchestrator allows the library to handle mixed-type lists
+  /// (e.g., [User, Post, Comment]) within a single transaction-like flow while
+  /// maintaining strict provider-level isolation.
+  ///
+  /// [items] The collection of models to process.
+  /// [action] The operation to perform (e.g., provider.deleteAll).
+  /// Returns the sum of affected rows across all executed batches.
+  static Future<int> _executeMixedBatch<T extends FluentStorable>(Iterable<T> items, Future<int> Function(FluentProvider provider, List<FluentStorable> typedItems) action) async {
+    if (items.isEmpty) return 0;
+
+    final Map<Type, List<FluentStorable>> groupedItems = {};
+    for (final T item in items) {
+      groupedItems.putIfAbsent(item.runtimeType, () => []).add(item);
+    }
+
+    final List<Future<int>> tasks = groupedItems.entries.map((entry) {
+      final Type targetType = entry.key;
+      final List<FluentStorable> typedItems = entry.value;
+
+      final FluentProvider provider = providerForType(targetType);
+
+      return action(provider, typedItems);
+    }).toList();
+
+    final List<int> results = await Future.wait(tasks);
+    return results.fold<int>(0, (sum, rowsAffected) => sum + rowsAffected);
   }
 
   /// Prints a formatted summary table of all tracked database table statistics

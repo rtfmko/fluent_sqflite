@@ -238,7 +238,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
   ///
   /// Returns a [Future<int>] representing the number of rows affected by the update.
   /// Throws a [FluentSchemaException] if the entity lacks a valid primary key.
-  Future<int> updateWithRelations(T item, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> updateWithRelations(T item, {FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal, ExecutionPolicy policy = const ExecutionPolicy()}) {
     // Transform model entity into a flattened SQL-compatible map structure
     final Map<String, dynamic> preparedData = _prepareSqlJson(item);
 
@@ -269,7 +269,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
       dbName: dbName,
       data: item,
       relations: [preparedData],
-      helper: TableHelper(id: id, dataMap: preparedData),
+      helper: TableHelper(id: id, dataMap: preparedData, syncMode: syncMode),
       policy: policy,
     );
 
@@ -277,6 +277,42 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
       'Initiating deep model update synchronization sequence with relational dependency resolution',
       tag: '$tableName:updateWithRelations',
       context: {'tableName': tableName, 'targetRecordId': id.toString(), 'hasCustomPolicy': policy != const ExecutionPolicy()},
+    );
+
+    return FluentDb.executeTask<T, int>(provider: this, task: task);
+  }
+
+  /// Performs a transactional batch update of multiple entities along with their relational graphs.
+  ///
+  /// This method is highly optimized for bulk state reconciliation of complex domain models.
+  /// It segregates core table fields from relational dependencies, updating the root entities
+  /// via a fast SQL [Batch], and subsequently passes the entire collection to the relational
+  /// engine for batched graph synchronization.
+  ///
+  /// [items] The collection of entities to update.
+  /// [syncMode] Determines how nested relations are merged (e.g., preserving local children or replacing them).
+  /// [policy] The [ExecutionPolicy] defining task priority and concurrency constraints.
+  @internal
+  Future<int> updateAllWithRelations(Iterable<T> items, {FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal, ExecutionPolicy policy = const ExecutionPolicy()}) {
+    if (items.isEmpty) {
+      FluentLog.warning('Batch relational update aborted: input collection is empty', tag: '$tableName:updateAllWithRelations', context: {'tableName': tableName});
+      return Future.value(0);
+    }
+
+    final List<T> itemList = items.toList(growable: false);
+
+    final List<Map<String, dynamic>> preparedJsons = List.generate(itemList.length, (i) => _prepareSqlJson(itemList[i]), growable: false);
+
+    FluentLog.debug('Initiating batch deep-model update synchronization sequence', tag: '$tableName:updateAllWithRelations', context: {'tableName': tableName, 'itemsCount': itemList.length});
+
+    final FluentTask task = FluentTask(
+      action: FluentDbAction.updateAllWithRelations,
+      table: tableName,
+      dbName: dbName,
+      data: itemList,
+      relations: preparedJsons,
+      helper: TableHelper(multiple: true, syncMode: syncMode),
+      policy: policy,
     );
 
     return FluentDb.executeTask<T, int>(provider: this, task: task);

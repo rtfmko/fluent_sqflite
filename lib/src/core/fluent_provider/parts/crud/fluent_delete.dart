@@ -235,6 +235,51 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
     return FluentDb.executeTask<T, int>(provider: this, task: task);
   }
 
+  /// Deletes records from [$tableName] matching a custom SQL [where] clause.
+  ///
+  /// This method provides maximum flexibility for multi-condition pruning.
+  /// Unlike [deleteBy], which filters by a single column, this allows complex
+  /// logic (e.g., 'status = ? AND created_at < ?').
+  ///
+  /// [where] The SQL WHERE clause (excluding the 'WHERE' keyword).
+  /// [whereArgs] The arguments to bind to the placeholders in the [where] clause.
+  /// [isHardDelete] If true, bypasses soft-delete mechanics and physically removes rows.
+  @internal
+  Future<int> deleteWhere({required String where, List<Object?>? whereArgs, bool isHardDelete = false, Batch? batch, ExecutionPolicy policy = const ExecutionPolicy()}) {
+    if (where.trim().isEmpty) {
+      FluentLog.warning('Aborted deleteWhere: empty condition', tag: '$tableName:deleteWhere');
+      return Future.value(0);
+    }
+
+    // SCENARIO A: BATCH
+    if (batch != null) {
+      if (!isHardDelete && modelSample is FluentSoftDeletable) {
+        final FluentSoftDeletable sample = modelSample as FluentSoftDeletable;
+        final Object formattedDate = tableConfig.dateTimeFormat == FluentDateTimeFormat.timestamp ? DateTime.now().millisecondsSinceEpoch : DateTime.now().toIso8601String();
+        batch.update(tableName, {sample.softDeleteColumn: formattedDate}, where: where, whereArgs: whereArgs);
+      } else {
+        batch.delete(tableName, where: where, whereArgs: whereArgs);
+      }
+      return Future<int>.value(1);
+    }
+
+    // SCENARIO B: TRANSACTION
+    if (_transactionExecutor != null) {
+      return _rawDeleteWhereExecution(where, whereArgs, _transactionExecutor!, isHardDelete: isHardDelete);
+    }
+
+    // SCENARIO C: TASK QUEUE
+    final FluentTask task = FluentTask(
+      action: FluentDbAction.deleteWhere,
+      table: tableName,
+      dbName: dbName,
+      helper: TableHelper(where: where, arguments: whereArgs, multiple: true, isHardDelete: isHardDelete),
+      policy: policy,
+    );
+
+    return FluentDb.executeTask<T, int>(provider: this, task: task);
+  }
+
   /// Permanently removes all records from [$tableName] that have been marked as soft-deleted.
   ///
   /// This maintenance utility executes a destructive cleanup operation to reclaim storage space
@@ -562,6 +607,45 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
       table: tableName,
       dbName: dbName,
       helper: TableHelper(id: id, multiple: false, isHardDelete: true),
+      policy: policy,
+    );
+
+    return FluentDb.executeTask<T, int>(provider: this, task: task);
+  }
+
+  /// Permanently removes records from [$tableName] matching a custom SQL [where] clause.
+  ///
+  /// This method provides maximum flexibility for multi-condition pruning, bypassing
+  /// any soft-delete mechanics to physically remove the rows from the storage engine.
+  ///
+  /// [where] The SQL WHERE clause (excluding the 'WHERE' keyword).
+  /// [whereArgs] The arguments to bind to the placeholders in the [where] clause.
+  /// [batch] Optional transaction batch to defer execution.
+  /// [policy] Defines prioritization, concurrency, and task management configurations.
+  @internal
+  Future<int> hardDeleteWhere({required String where, List<Object?>? whereArgs, Batch? batch, ExecutionPolicy policy = const ExecutionPolicy()}) {
+    if (where.trim().isEmpty) {
+      FluentLog.warning('Aborted hardDeleteWhere: empty condition', tag: '$tableName:hardDeleteWhere');
+      return Future.value(0);
+    }
+
+    // SCENARIO A: BATCH
+    if (batch != null) {
+      batch.delete(tableName, where: where, whereArgs: whereArgs);
+      return Future<int>.value(1);
+    }
+
+    // SCENARIO B: TRANSACTION
+    if (_transactionExecutor != null) {
+      return _rawDeleteWhereExecution(where, whereArgs, _transactionExecutor!, isHardDelete: true);
+    }
+
+    // SCENARIO C: TASK QUEUE
+    final FluentTask task = FluentTask(
+      action: FluentDbAction.hardDeleteWhere,
+      table: tableName,
+      dbName: dbName,
+      helper: TableHelper(where: where, arguments: whereArgs, multiple: true, isHardDelete: true),
       policy: policy,
     );
 

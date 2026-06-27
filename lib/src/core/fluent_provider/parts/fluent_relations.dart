@@ -257,9 +257,19 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
 
     // Recursive Relational Hydration: Cascade process to child providers
     if (hasRels && modelItems != null) {
-      await _relationsMixin!._processBatchRelations(txn, modelItems, task, batch: isRootBatch ? null : batch, parentJsons: sqlJsonCache, currentDepth: nextDepth, visitedTables: currentVisited);
-    }
+      final FluentRelationSyncMode mode = task.helper?.syncMode ?? FluentRelationSyncMode.preserveLocal;
 
+      await _relationsMixin!._processBatchRelations(
+        txn,
+        modelItems,
+        task,
+        batch: isRootBatch ? null : batch,
+        parentJsons: sqlJsonCache,
+        currentDepth: nextDepth,
+        visitedTables: currentVisited,
+        syncMode: mode,
+      );
+    }
     currentVisited.remove(tableName);
   }
 
@@ -339,6 +349,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     List<Map<String, dynamic>>? parentJsons,
     int currentDepth = 0,
     Set<String>? visitedTables,
+    FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal,
   }) async {
     if (!_hasRelations || _relationsMixin == null) return;
 
@@ -404,6 +415,10 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
         parentsToClear.add(parent);
 
         if (isNull || isEmpty) {
+          if (syncMode == FluentRelationSyncMode.replace && rel.updateMode != FluentRelationUpdateMode.readOnly) {
+          } else {
+            parentsToClear.remove(parent);
+          }
           continue;
         }
 
@@ -458,7 +473,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
 
       FluentTask taskToUse = task;
       if (hasIdentityConflict && !isChildAutoIncrement) {
-        taskToUse = task.copyWith(helper: TableHelper(updateIfExist: true));
+        taskToUse = task.copyWith(helper: TableHelper(updateIfExist: true, syncMode: syncMode));
       }
 
       if (rel.relationType == FluentDbRelationType.manyToMany) {
@@ -474,6 +489,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
           parentJsons: localParentJsons,
           currentDepth: nextDepth,
           visitedTables: visitedTables,
+          syncMode: syncMode,
         );
       } else {
         await _processOneOrMany(
@@ -667,6 +683,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     List<Map<String, dynamic>>? parentJsons,
     int currentDepth = 0,
     Set<String>? visitedTables,
+    FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal,
   }) async {
     final String parentPkName = _cachedPrimaryKey?.name ?? 'id';
     final String childPkName = childDao._cachedPrimaryKey?.name ?? 'id';
@@ -785,6 +802,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
           parentJsons: existingJsons,
           currentDepth: currentDepth + 1,
           visitedTables: visitedTables,
+          syncMode: syncMode,
         );
       }
     }

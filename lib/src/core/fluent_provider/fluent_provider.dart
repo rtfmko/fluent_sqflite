@@ -19,26 +19,47 @@ import '../fluent_sqlite_internal.dart';
 import '../utils/utils.dart';
 
 part 'parts/crud/executors/fluent_execute_delete.dart';
+
 part 'parts/crud/executors/fluent_execute_find.dart';
+
 part 'parts/crud/executors/fluent_execute_maintenance.dart';
+
 part 'parts/crud/executors/fluent_execute_query.dart';
+
 part 'parts/crud/executors/fluent_execute_raw.dart';
+
 part 'parts/crud/executors/fluent_execute_restore.dart';
+
 part 'parts/crud/executors/fluent_execute_save.dart';
+
 part 'parts/crud/executors/fluent_execute_update.dart';
+
 part 'parts/crud/fluent_delete.dart';
+
 part 'parts/crud/fluent_find.dart';
+
 part 'parts/crud/fluent_maintenance.dart';
+
 part 'parts/crud/fluent_query.dart';
+
 part 'parts/crud/fluent_raw.dart';
+
 part 'parts/crud/fluent_restore.dart';
+
 part 'parts/crud/fluent_save.dart';
+
 part 'parts/crud/fluent_update.dart';
+
 part 'parts/fluent_crud_helper.dart';
+
 part 'parts/fluent_mapper.dart';
+
 part 'parts/fluent_provider_sync.dart';
+
 part 'parts/fluent_relation_loader.dart';
+
 part 'parts/fluent_relations.dart';
+
 part 'parts/fluent_schema.dart';
 
 /// The foundational abstract base class for all database provider implementations.
@@ -403,6 +424,7 @@ abstract class FluentProvider<T extends FluentStorable> {
       FluentDbAction.updateSingleField => _executeUpdateByKeyTaskOnMain(task),
       FluentDbAction.updateMultipleFields => _executeUpdateFieldsMultipleTaskOnMain(task),
       FluentDbAction.updateWithRelations => _executeUpdateWithRelationsTaskOnMain(task),
+      FluentDbAction.updateAllWithRelations => _executeUpdateAllWithRelationsTaskOnMain(task),
       FluentDbAction.updateAll => _executeUpdateAllTaskOnMain(task),
       FluentDbAction.updateMultipleFieldsByIds => _executeUpdateMultipleFieldsByIdsTaskOnMain(task),
       FluentDbAction.clearExpired => _executeClearExpiredItemsTaskOnMain(task),
@@ -410,6 +432,8 @@ abstract class FluentProvider<T extends FluentStorable> {
       FluentDbAction.delete => _executeDeleteTaskOnMain(task),
       FluentDbAction.deleteBy => _executeDeleteByTaskOnMain(task),
       FluentDbAction.deleteItemsByIds => _executeDeleteItemsByIdsTaskOnMain(task),
+      FluentDbAction.deleteWhere => _executeDeleteWhereTaskOnMain(task),
+      FluentDbAction.hardDeleteWhere => _executeDeleteWhereTaskOnMain(task),
       FluentDbAction.exists => _executeExistsTaskOnMain(task),
       FluentDbAction.count => _executeCountTaskOnMain(task),
       FluentDbAction.rawGetItem => _executeRawGetItemByTaskOnMain(task),

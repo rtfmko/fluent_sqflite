@@ -288,6 +288,9 @@ enum FluentDbAction {
   /// Updates a record and its nested relationships (cascading update).
   updateWithRelations,
 
+  /// Performs a transactional batch update of multiple entities along with their relational graphs.
+  updateAllWithRelations,
+
   /// Updates all records in the table that match the provided field-value constraints
   /// with the new values defined in the map.
   updateAll,
@@ -301,6 +304,12 @@ enum FluentDbAction {
 
   /// Removes records matching specific criteria.
   deleteBy,
+
+  /// Removes records based on a condition, applying soft-delete if supported by the model.
+  deleteWhere,
+
+  /// Permanently removes records from the database, bypassing soft-delete mechanisms.
+  hardDeleteWhere,
 
   /// Mass-deletion of multiple records by their primary keys.
   deleteItemsByIds,
@@ -492,4 +501,172 @@ enum FluentRelationUpdateMode {
 
   /// Never update this relation automatically through the parent's lifecycle.
   readOnly,
+}
+
+/// Represents the distinct lifecycle phases of a [reactiveSync] data pipeline.
+///
+/// This state machine tracks the progression of an asynchronous synchronization
+/// process, allowing UI layers to reactively update (e.g., showing loading
+/// indicators, progress bars, or error states) based on the current phase.
+enum FluentPipelinePhase {
+  /// The pipeline is currently inactive or awaiting a trigger.
+  idle,
+
+  /// Initializing data retrieval from the local SQLite storage.
+  loadingCache,
+
+  /// Local cached data has been successfully hydrated and is ready for use.
+  cacheReady,
+
+  /// Initiating a network request to the remote API.
+  loadingApi,
+
+  /// Remote data has been successfully fetched and is ready for reconciliation.
+  apiReady,
+
+  /// Data is being committed to the database (merging, upserting, or deleting).
+  savingToDb,
+
+  /// The entire synchronization process finished successfully.
+  completed,
+
+  /// An unrecoverable error occurred during one of the pipeline stages.
+  error,
+}
+
+/// Defines the reconciliation strategy for merging remote API data into the
+/// local SQLite storage.
+///
+/// These strategies dictate how the persistence layer handles identity conflicts,
+/// orphaned records, and local state preservation during synchronization.
+enum FluentMergeStrategy {
+  /// Performs a smart merge between remote and local datasets.
+  ///
+  /// New records are inserted, and existing records (matched by Primary Key)
+  /// are updated. This is the standard strategy for preserving local state
+  /// while incorporating server-side changes.
+  upsert,
+
+  /// Performs a total reset of the targeted local dataset.
+  ///
+  /// This strategy clears existing records (constrained by [localWhere]) before
+  /// inserting the fresh dataset from the API. Use this when the server
+  /// provides the definitive state and no local-only mutations should persist.
+  replace,
+
+  /// Performs an [upsert] followed by an automated deletion of obsolete records.
+  ///
+  /// Any records existing locally (matching [localWhere]) that are absent from
+  /// the API response are identified as stale and purged. This is ideal for
+  /// achieving exact state synchronization with server-side collections.
+  syncDeletions,
+}
+
+/// Defines the synchronization orchestration flow between local cache and
+/// remote API data sources.
+///
+/// Strategies dictate the sequence of data delivery to the UI layer and the
+/// timing of persistence operations, allowing developers to optimize for
+/// perceived performance versus strict data consistency.
+enum FluentExecutionStrategy {
+  /// Ensures strict data consistency by awaiting full synchronization.
+  ///
+  /// The pipeline delivers cached data first, fetches the API response,
+  /// commits it to the database, and only then emits the final dataset to the UI.
+  /// Use this when preventing \"flickering\" or partial state updates is critical.
+  cacheThenApiThenSave,
+
+  /// Optimizes for perceived performance (the recommended default).
+  ///
+  /// Delivers cached data immediately, then emits the fresh API response to the
+  /// UI as soon as it arrives. Persistence to the database happens in the
+  /// background, ensuring the UI remains highly responsive without waiting for
+  /// disk I/O to complete.
+  cacheThenApiYieldThenSave,
+
+  /// Bypasses local storage entirely.
+  ///
+  /// Forces a fresh network request, commits the result to the database, and
+  /// delivers the new data only after the transaction is finalized. This is
+  /// ideal for critical, real-time data where stale cached information
+  /// is unacceptable.
+  apiOnly,
+}
+
+/// Defines how the synchronization pipeline handles cases where the API
+/// returns an empty collection for a given request.
+///
+/// This behavior is critical when the server-side state is considered the
+/// primary source of truth, as it allows the local database to automatically
+/// prune stale data when it no longer exists on the backend.
+enum FluentEmptyApiBehavior {
+  /// Preserves the existing local cache when the API response is empty.
+  ///
+  /// Use this strategy when the local database should retain previously
+  /// fetched data even if the server returns no results (e.g., due to
+  /// filtering, temporary connectivity issues, or paginated endpoints
+  /// that only return partial data).
+  preserveCache,
+
+  /// Clears the local storage when the API response is empty.
+  ///
+  /// Use this strategy when an empty API response signifies that the
+  /// corresponding dataset has been removed from the server. This ensures
+  /// the local database stays perfectly synchronized with the server's state
+  /// by automatically purging obsolete records.
+  clearCache,
+}
+
+/// Defines the reconciliation strategy for nested relational associations during
+/// synchronization.
+///
+/// This strategy dictates how the engine should handle differences between
+/// the existing local relational graph and incoming entity payloads.
+enum FluentRelationSyncMode {
+  /// Preserves existing local associations when the incoming payload provides
+  /// incomplete or partial relational data.
+  ///
+  /// Use this strategy when the local database should retain previously
+  /// associated records even if they are missing from the current update.
+  /// This is ideal for partial state updates or additive synchronization.
+  preserveLocal,
+
+  /// Performs a full reconciliation of the relational graph.
+  ///
+  /// The engine treats the incoming payload as the authoritative state for all
+  /// child associations. Any existing local associations not present in the
+  /// new dataset are identified as stale and removed (or unlinked) to ensure
+  /// strict alignment with the provided entity structure.
+  replace,
+}
+
+/// Defines the behavior of the synchronization pipeline when a request
+/// encounters a terminal failure or exceeds its retry quota.
+///
+/// This strategy allows for fine-grained control over local data persistence
+/// versus state invalidation during network or server-side errors, enabling
+/// robust error recovery patterns.
+enum FluentApiErrorBehavior {
+  /// Terminates the pipeline and emits an [FluentPipelinePhase.error] event.
+  ///
+  /// The local cache remains untouched. Use this strategy for transient server
+  /// errors (e.g., 500-level codes) where the data may be available again
+  /// during subsequent attempts.
+  yieldError,
+
+  /// Invalidates the local cache before emitting an [FluentPipelinePhase.error] event.
+  ///
+  /// This strategy clears records matching [localWhere] (or the entire table).
+  /// Use this for critical auth/access errors (e.g., 401 Unauthorized,
+  /// 403 Forbidden, 404 Not Found) where the current local dataset is
+  /// considered compromised or no longer authorized.
+  clearCacheAndYieldError,
+
+  /// Suppresses the error and concludes the pipeline with [FluentPipelinePhase.completed].
+  ///
+  /// The local cache is preserved, and the UI receives the successful state,
+  /// allowing users to continue working with cached data. Any error details
+  /// are still propagated via the [FluentDataEvent.error] field for telemetry
+  /// and user-facing notifications.
+  preserveCacheAndComplete,
 }

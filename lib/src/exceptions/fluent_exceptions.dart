@@ -224,11 +224,10 @@ class FluentEngineException extends FluentException {
   FluentEngineException(String message, {required this.component, this.engineState, this.task, StackTrace? stackTrace}) : super(message, stackTrace);
 
   @override
-  String toString() {
-    return 'FluentEngineException: [$component] $message'
-        '${engineState != null ? '\nEngine State: $engineState' : ''}'
-        '${task != null ? '\nTask: $task' : ''}';
-  }
+  String toString() =>
+      'FluentEngineException: [$component] $message'
+      '${engineState != null ? '\nEngine State: $engineState' : ''}'
+      '${task != null ? '\nTask: $task' : ''}';
 }
 
 /// Exception thrown when a synchronization operation between the local
@@ -270,4 +269,25 @@ class FluentRelationException extends FluentException {
   /// * [message]: A descriptive explanation of the relational mapping failure.
   /// * [stackTrace]: The execution path leading to the failure.
   FluentRelationException(String message, {StackTrace? stackTrace}) : super(message, stackTrace);
+}
+
+/// Exception thrown when a network request returns an unexpected or error
+/// HTTP status code.
+///
+/// Use this to signal synchronization failures where the server response
+/// falls outside the [FluentSyncOptions.validStatusCodes] range.
+class FluentApiException extends FluentException {
+  /// The HTTP status code returned by the server.
+  final int statusCode;
+
+  /// Creates a [FluentApiException].
+  ///
+  /// * [statusCode]: The HTTP status code received from the API.
+  /// * [message]: A brief explanation of the API error.
+  /// * [originalError]: The underlying error (e.g., [DioException] or [SocketException]).
+  /// * [stackTrace]: The execution path leading to the failure.
+  FluentApiException(this.statusCode, {String message = 'Invalid API status code', Object? originalError, StackTrace? stackTrace}) : super(message, stackTrace, originalError);
+
+  @override
+  String toString() => 'FluentApiException: [StatusCode: $statusCode] $message';
 }

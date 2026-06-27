@@ -237,6 +237,8 @@ class FluentTask {
         w += 80; // Potential Full Table Scan or cascaded graph updates
         break;
 
+      case FluentDbAction.deleteWhere:
+      case FluentDbAction.hardDeleteWhere:
       case FluentDbAction.deleteItemsByIds:
       case FluentDbAction.clearTable:
       case FluentDbAction.clearExpired:
@@ -245,6 +247,7 @@ class FluentTask {
       case FluentDbAction.forcePurgeSoftDeleted:
       case FluentDbAction.restoreItemsByIds:
       case FluentDbAction.updateAll:
+      case FluentDbAction.updateAllWithRelations:
       case FluentDbAction.updateMultipleFieldsByIds:
         w += 100; // Bulk modifications and mass table sweeps
         break;

@@ -322,6 +322,7 @@ extension FluentExecuteUpdate<T extends FluentStorable> on FluentProvider<T> {
     final Map<String, dynamic> preparedData = task.relations!.first;
     final String pkName = _cachedPrimaryKey?.name ?? 'id';
     final dynamic id = task.helper?.id;
+    final FluentRelationSyncMode syncMode = task.helper?.syncMode ?? FluentRelationSyncMode.preserveLocal;
 
     FluentLog.debug(
       'Executing Main-thread transactional deep-model update sequence',
@@ -359,7 +360,7 @@ extension FluentExecuteUpdate<T extends FluentStorable> on FluentProvider<T> {
 
           final List<T> batchList = List<T>.filled(1, item, growable: false);
 
-          await _relationsMixin!._processBatchRelations(txn, batchList, task, parentJsons: task.relations, currentDepth: 0, visitedTables: <String>{tableName});
+          await _relationsMixin!._processBatchRelations(txn, batchList, task, parentJsons: task.relations, currentDepth: 0, visitedTables: <String>{tableName}, syncMode: syncMode);
         }
 
         FluentLog.debug('Deep transactional model update successfully persisted', tag: '$tableName:updateWithRelationsExecutor', context: {'tableName': tableName, 'targetRecordId': id.toString()});
@@ -373,6 +374,75 @@ extension FluentExecuteUpdate<T extends FluentStorable> on FluentProvider<T> {
         tag: '$tableName:exception:updateWithRelationsExecutor',
         hint: 'Examine primary key constraints, foreign key referential integrity, or transient connection deadlocks.',
         context: {'tableName': tableName, 'targetRecordId': id.toString()},
+      );
+      rethrow;
+    } finally {
+      restoreOriginalExecutor();
+    }
+  }
+
+  /// Executes a transactional batch update of multiple entity instances and their relations.
+  Future<int> _executeUpdateAllWithRelationsTaskOnMain(FluentTask task) async {
+    final List<T> items = (task.data as List).cast<T>();
+    final List<Map<String, dynamic>>? preparedJsons = task.relations;
+
+    if (items.isEmpty || preparedJsons == null || preparedJsons.isEmpty) return 0;
+
+    final String pkName = _cachedPrimaryKey?.name ?? 'id';
+    final FluentRelationSyncMode syncMode = task.helper?.syncMode ?? FluentRelationSyncMode.preserveLocal;
+
+    final Set<String> allowedKeys = tableColumns;
+    final Set<String> relKeys = relationKeys;
+
+    FluentLog.debug(
+      'Executing Main-thread transactional batch deep-model update sequence',
+      tag: '$tableName:updateAllWithRelationsExecutor',
+      context: {'tableName': tableName, 'batchSize': items.length, 'taskId': task.id},
+    );
+
+    try {
+      return await db.transaction((txn) async {
+        setTransactionExecutor(txn);
+        int validItemsCount = 0;
+
+        final Batch batch = txn.batch();
+
+        for (int i = 0; i < items.length; i++) {
+          final dynamic id = items[i].primaryKeyValue;
+          if (id == null) continue;
+
+          final Map<String, dynamic> rawJson = preparedJsons[i];
+          final Map<String, dynamic> sqlFields = {};
+
+          for (final MapEntry<String, dynamic> entry in rawJson.entries) {
+            if (entry.key != pkName && allowedKeys.contains(entry.key) && !relKeys.contains(entry.key)) {
+              sqlFields[entry.key] = entry.value;
+            }
+          }
+
+          if (sqlFields.isNotEmpty) {
+            batch.update(tableName, sqlFields, where: '$pkName = ?', whereArgs: [id]);
+            validItemsCount++;
+          }
+        }
+
+        await batch.commit(noResult: true);
+
+        if (_hasRelations && _relationsMixin != null) {
+          FluentLog.debug('Processing deep-linked relational batch associations', tag: '$tableName:updateAllWithRelationsExecutor');
+
+          await _relationsMixin!._processBatchRelations(txn, items, task, parentJsons: preparedJsons, currentDepth: 0, visitedTables: <String>{tableName}, syncMode: syncMode);
+        }
+
+        return validItemsCount;
+      });
+    } catch (e, stackTrace) {
+      FluentLog.error(
+        'Batch deep model transactional update aborted due to execution driver failure',
+        e,
+        stackTrace,
+        tag: '$tableName:exception:updateAllWithRelationsExecutor',
+        context: {'tableName': tableName, 'taskId': task.id},
       );
       rethrow;
     } finally {

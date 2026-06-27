@@ -215,6 +215,86 @@ extension FluentExecuteDelete<T extends FluentStorable> on FluentProvider<T> {
     return count;
   }
 
+  /// Low-level atomic driver execution routine for custom WHERE clauses.
+  Future<int> _rawDeleteWhereExecution(String whereClause, List<Object?>? whereArgs, DatabaseExecutor activeExecutor, {bool isHardDelete = false}) async {
+    int count = 0;
+
+    if (!isHardDelete && modelSample is FluentSoftDeletable) {
+      final FluentSoftDeletable sample = modelSample as FluentSoftDeletable;
+      final DateTime now = DateTime.now();
+      final dynamic formattedDate = tableConfig.dateTimeFormat == FluentDateTimeFormat.timestamp ? now.millisecondsSinceEpoch : now.toIso8601String();
+
+      count = await activeExecutor.update(tableName, {sample.softDeleteColumn: formattedDate}, where: whereClause, whereArgs: whereArgs);
+      FluentLog.debug('Records softly deleted via custom condition', tag: '$tableName:rawDeleteWhere');
+    } else {
+      count = await activeExecutor.delete(tableName, where: whereClause, whereArgs: whereArgs);
+      FluentLog.debug('Records permanently purged via custom condition', tag: '$tableName:rawDeleteWhere');
+    }
+
+    if (count > 0 && _hasRelations && _relationsMixin != null) {
+      await _relationsMixin!.cleanupOrphans(activeExecutor);
+    }
+
+    return count;
+  }
+
+  /// Direct data layer coordinator that runs transactional multi-row custom WHERE purges on the Main thread.
+  ///
+  /// Handles both soft and hard deletions based on the [isHardDelete] flag injected into the task helper.
+  Future<int> _executeDeleteWhereTaskOnMain(FluentTask task) async {
+    final String? whereClause = task.helper?.where;
+    final List<Object?>? whereArgs = task.helper?.arguments;
+    final bool isHardDelete = task.helper?.isHardDelete ?? false;
+
+    if (whereClause == null || whereClause.isEmpty) {
+      FluentLog.warning(
+        'Database custom purge sequence aborted on Main due to empty WHERE clause',
+        tag: '$tableName:deleteWhereExecutor',
+        hint: 'Verify that the task wrapper passes a valid SQL condition.',
+        context: {'tableName': tableName, 'taskId': task.id},
+      );
+      return 0;
+    }
+
+    FluentLog.debug(
+      'Executing Main-thread transactional custom WHERE record destruction sequence',
+      tag: '$tableName:deleteWhereExecutor',
+      context: {'tableName': tableName, 'taskId': task.id, 'isHardDelete': isHardDelete},
+    );
+
+    try {
+      // Wrap the multi-row deletion routine inside a localized database transaction scope
+      return await db.transaction((txn) async {
+        // Divert the provider driver context to use the active transaction runner
+        setTransactionExecutor(txn);
+
+        try {
+          final int count = await _rawDeleteWhereExecution(whereClause, whereArgs, txn, isHardDelete: isHardDelete);
+
+          FluentLog.debug(
+            'Custom condition purge successfully finalized inside storage layer',
+            tag: '$tableName:deleteWhereExecutor',
+            context: {'tableName': tableName, 'taskId': task.id, 'affectedRows': count},
+          );
+
+          return count;
+        } finally {
+          restoreOriginalExecutor();
+        }
+      });
+    } catch (e, s) {
+      FluentLog.error(
+        'Main-thread custom WHERE purge transaction pipeline aborted due to execution driver failure',
+        e,
+        s,
+        tag: '$tableName:exception:deleteWhereExecutor',
+        hint: 'Analyze the syntax of your WHERE clause or inspect active table constraint locks.',
+        context: {'tableName': tableName, 'taskId': task.id, 'whereClause': whereClause},
+      );
+      rethrow;
+    }
+  }
+
   /// Direct data layer coordinator that runs transactional multi-row primary identity purges on the Main thread.
   ///
   /// This pipeline unpacks target argument lists to execute safe, chunked batch destructions inside atomic loops:

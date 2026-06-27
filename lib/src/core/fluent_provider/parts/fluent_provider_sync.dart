@@ -2,6 +2,8 @@
 // Use of this source code is governed by an Apache-2.0 license that can be
 // found in the LICENSE file.
 
+// ignore_for_file: avoid_redundant_argument_values, unreachable_switch_default
+
 part of '../fluent_provider.dart';
 
 /// Provides advanced synchronization capabilities for [FluentProvider].
@@ -37,7 +39,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
   ///
   /// ### Example: Syncing "Task" items
   /// ```dart
-  /// final taskProvider = FluentDb.providerByType<Task>();
+  /// final TaskProvider taskProvider = FluentDb.providerByType<Task>();
   ///
   /// final FluentSyncResult<Task> result = await taskProvider.syncWithServer<Task>(
   ///   strategy: FluentSyncStrategy.pushActive,
@@ -77,44 +79,47 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     Object? tag,
     ExecutionPolicy policy = const ExecutionPolicy(),
   }) async {
-    final String baseTag = tag?.toString() ?? 'sync_$tableName';
     final bool isSoftDeletable = modelSample is FluentSoftDeletable;
 
-    FluentLog.debug('Sync process initiated', tag: baseTag, context: {'strategy': strategy.name});
+    FluentLog.debug('Sync process initiated', tag: 'sync_$tableName', context: {'strategy': strategy.name});
 
     try {
       // 1. PULL AND SAVE
       if (strategy == FluentSyncStrategy.pullAndSave) {
         if (onPull == null) {
           final FluentSyncException exception = FluentSyncException('onPull callback is missing', stackTrace: StackTrace.current);
-          FluentLog.error(exception.message, exception, exception.stackTrace, tag: baseTag, hint: 'The "pullAndSave" strategy requires an onPull function to fetch data from the server.');
+          FluentLog.error(exception.message, exception, exception.stackTrace, tag: 'sync_$tableName', hint: 'The "pullAndSave" strategy requires an onPull function to fetch data from the server.');
           throw exception;
         }
 
-        FluentLog.debug('Fetching data from server...', tag: baseTag);
+        FluentLog.debug('Fetching data from server...', tag: 'sync_$tableName');
         final List<T> serverItems = await onPull();
 
         if (serverItems.isEmpty) {
-          FluentLog.debug('Server returned empty data, sync finished', tag: baseTag);
+          FluentLog.debug('Server returned empty data, sync finished', tag: 'sync_$tableName');
           return FluentSyncResult(strategy: strategy, isSuccess: true);
         }
 
-        FluentLog.debug('Saving ${serverItems.length} items to database', tag: baseTag);
-        await saveItems(serverItems, updateIfExist: true, policy: policy.withTag('${baseTag}_pull'));
+        FluentLog.debug('Saving ${serverItems.length} items to database', tag: 'sync_$tableName');
+        await saveItems(serverItems, updateIfExist: true, policy: policy.withTag('${'sync_$tableName'}_pull'));
 
-        FluentLog.debug('Successfully pulled and saved ${serverItems.length} items', tag: baseTag);
+        FluentLog.debug('Successfully pulled and saved ${serverItems.length} items', tag: 'sync_$tableName');
         return FluentSyncResult(strategy: strategy, isSuccess: true, itemsProcessed: serverItems.length);
       }
 
       // 2. PUSH ACTIVE & PURGE DELETED (READ PHASE)
       if (onPush == null) {
         final FluentSyncException exception = FluentSyncException('onPush callback is missing');
-        FluentLog.error(exception.message, exception, exception.stackTrace, tag: baseTag, hint: 'The push/purge strategy requires an onPush function to transmit data to the server.');
+        FluentLog.error(exception.message, exception, exception.stackTrace, tag: 'sync_$tableName', hint: 'The push/purge strategy requires an onPush function to transmit data to the server.');
         throw exception;
       }
 
       if (strategy == FluentSyncStrategy.purgeDeleted && !isSoftDeletable) {
-        FluentLog.warning('Purge strategy ignored for table "$tableName"', tag: baseTag, hint: 'Ensure that the model class for this provider implements FluentSoftDeletable to use purgeDeleted.');
+        FluentLog.warning(
+          'Purge strategy ignored for table "$tableName"',
+          tag: 'sync_$tableName',
+          hint: 'Ensure that the model class for this provider implements FluentSoftDeletable to use purgeDeleted.',
+        );
         return FluentSyncResult(strategy: strategy, isSuccess: false, errorMessage: 'Model not soft-deletable');
       }
 
@@ -126,47 +131,315 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
         syncWhere = syncWhere == null || syncWhere.trim().isEmpty ? condition : '(${syncWhere.trim()}) AND $condition';
       }
 
-      FluentLog.debug('Reading local items with condition: $syncWhere', tag: baseTag);
-      final List<T> localItems = await find(where: syncWhere, whereArgs: additionalWhereArgs, policy: policy.withTag('${baseTag}_read'));
+      FluentLog.debug('Reading local items with condition: $syncWhere', tag: 'sync_$tableName');
+      final List<T> localItems = await find(where: syncWhere, whereArgs: additionalWhereArgs, policy: policy.withTag('${'sync_$tableName'}_read'));
 
       if (localItems.isEmpty) {
-        FluentLog.debug('No local items found to process', tag: baseTag);
+        FluentLog.debug('No local items found to process', tag: 'sync_$tableName');
         return FluentSyncResult(strategy: strategy, isSuccess: true);
       }
 
       // 3. EXTERNAL TRANSPORT
-      FluentLog.debug('Pushing ${localItems.length} items to server...', tag: baseTag);
+      FluentLog.debug('Pushing ${localItems.length} items to server...', tag: 'sync_$tableName');
       final bool isPushSuccessful = await onPush(localItems);
 
       if (!isPushSuccessful) {
-        FluentLog.warning('Network transport rejected data', tag: baseTag, hint: 'Check API response status or endpoint availability.');
+        FluentLog.warning('Network transport rejected data', tag: 'sync_$tableName', hint: 'Check API response status or endpoint availability.');
         return FluentSyncResult(strategy: strategy, isSuccess: false, errorMessage: 'Network transport returned false');
       }
 
       // 4. POST-SYNC CLEANUP
       if (strategy == FluentSyncStrategy.purgeDeleted) {
-        FluentLog.debug('Purging ${localItems.length} items from database', tag: baseTag);
-        await hardDeleteAll(localItems, policy: policy.withTag('${baseTag}_purge'));
+        FluentLog.debug('Purging ${localItems.length} items from database', tag: 'sync_$tableName');
+        await hardDeleteAll(localItems, policy: policy.withTag('${'sync_$tableName'}_purge'));
       } else if (strategy == FluentSyncStrategy.pushActive && markAsSyncedFields != null) {
         final Set<dynamic> ids = localItems.map((e) => e.primaryKeyValue).where((id) => id != null).toSet();
         if (ids.isNotEmpty) {
-          FluentLog.debug('Marking ${ids.length} items as synced', tag: baseTag);
-          await updateFieldsMultipleByIds(ids, markAsSyncedFields, policy: policy.withTag('${baseTag}_mark_synced'));
+          FluentLog.debug('Marking ${ids.length} items as synced', tag: 'sync_$tableName');
+          await updateFieldsMultipleByIds(ids, markAsSyncedFields, policy: policy.withTag('${'sync_$tableName'}_mark_synced'));
         }
       }
 
-      FluentLog.debug('Sync finished successfully', tag: baseTag);
+      FluentLog.debug('Sync finished successfully', tag: 'sync_$tableName');
       return FluentSyncResult(strategy: strategy, isSuccess: true, itemsProcessed: localItems.length);
     } catch (e, st) {
       FluentLog.error(
         'Critical sync failure',
         e,
         st,
-        tag: baseTag,
+        tag: 'sync_$tableName',
         hint: 'Investigate the network layer or constraint violations during batch processing.',
         context: {'strategy': strategy.name, 'table': tableName},
       );
       return FluentSyncResult(strategy: strategy, isSuccess: false, error: e, errorMessage: e.toString());
+    }
+  }
+
+  /// Performs a reactive synchronization of data between local storage and a remote API.
+  ///
+  /// The pipeline follows a multi-phase lifecycle, emitting [FluentDataEvent] objects
+  /// to notify the UI of state changes (e.g., [FluentPipelinePhase.loadingApi],
+  /// [FluentPipelinePhase.savingToDb]).
+  ///
+  /// ### Synchronization Flow:
+  /// 1. **Cache Phase**: Retrieves existing data based on [localWhere].
+  /// 2. **API Phase**: Fetches remote data with integrated retry logic and status code validation.
+  /// 3. **Error Handling**: Applies [FluentApiErrorBehavior] based on error type or status code.
+  /// 4. **Persistence**: Transforms data via [beforeSave] and commits changes using the selected [FluentMergeStrategy].
+  /// 5. **Completion**: Finalizes the process and invokes [onSuccess].
+  ///
+  /// ### Example: Basic usage
+  /// ```dart
+  /// final UserProvider userProvider = FluentDb.providerByType<User>();
+  ///
+  /// userProvider.reactiveSync<User>(
+  ///   fetchFromApi: () => api.getUsers(),
+  /// );
+  /// ```
+  ///
+  /// ### Example: Advanced usage with filters and custom behaviors
+  /// This example demonstrates how to sync a specific subset of data,
+  /// handle specific HTTP errors, and transform data before persistence.
+  /// ```dart
+  ///
+  /// final UserProvider userProvider = FluentDb.providerByType<User>();
+  ///
+  /// await userProvider.reactiveSync<User>(
+  ///   fetchFromApi: () => api.fetchUserPosts(userId: 123),
+  ///   localWhere: 'user_id = ? AND category = ?',
+  ///   localWhereArgs: [123, 'work'],
+  ///   options: FluentSyncOptions<User>(
+  ///     executionStrategy: FluentExecutionStrategy.cacheThenApiYieldThenSave,
+  ///     mergeStrategy: FluentMergeStrategy.syncDeletions,
+  ///     retryCount: 3,
+  ///     statusBehaviors: {
+  ///       401: FluentApiErrorBehavior.clearCacheAndYieldError,
+  ///       404: FluentApiErrorBehavior.preserveCacheAndComplete,
+  ///     },
+  ///     beforeSave: (items) async => items.map((e) => e.copyWith(
+  ///       updatedAt: DateTime.now(),
+  ///     )).toList(),
+  ///   ),
+  /// ).listen((event) {
+  ///   if (event.phase == FluentPipelinePhase.completed) {
+  ///     print('Sync finished with ${event.data?.length ?? 0} items');
+  ///   }
+  /// });
+  /// ```
+  Stream<FluentDataEvent<T>> reactiveSync({
+    required Future<FluentApiResponse<T>> Function() fetchFromApi,
+    FluentSyncOptions<T> options = const FluentSyncOptions(),
+    String? localWhere,
+    List<Object?>? localWhereArgs,
+    ExecutionPolicy policy = const ExecutionPolicy(),
+  }) async* {
+    FluentLog.info('Initiating sync pipeline', tag: 'sync:pipeline', context: {'model': T.toString()});
+
+    yield FluentDataEvent(phase: FluentPipelinePhase.idle);
+
+    if (options.executionStrategy != FluentExecutionStrategy.apiOnly) {
+      yield FluentDataEvent(phase: FluentPipelinePhase.loadingCache);
+      final List<T> cachedData = await find(where: localWhere, whereArgs: localWhereArgs, policy: policy);
+      FluentLog.debug('Cache loaded', tag: 'sync:cache', context: {'count': cachedData.length, 'model': T.toString()});
+      yield FluentDataEvent(phase: FluentPipelinePhase.cacheReady, data: cachedData);
+    }
+
+    yield FluentDataEvent(phase: FluentPipelinePhase.loadingApi);
+
+    FluentApiResponse<T>? response;
+    int attempts = 0;
+    Object? lastError;
+
+    while (attempts <= options.retryCount) {
+      try {
+        response = await fetchFromApi();
+        if (options.validStatusCodes.contains(response.statusCode)) {
+          FluentLog.debug('API fetch success', tag: 'sync:api', context: {'status': response.statusCode});
+          lastError = null;
+          break;
+        } else {
+          throw FluentApiException(response.statusCode, message: 'Received unexpected status code', originalError: response.error);
+        }
+      } catch (e) {
+        lastError = e;
+        attempts++;
+        FluentLog.warning('API fetch attempt $attempts failed', tag: 'sync:api:retry', hint: 'Check connectivity or server availability', context: {'attempt': attempts, 'error': e.toString()});
+        if (attempts > options.retryCount) {
+          break;
+        }
+        await Future<void>.delayed(options.baseRetryBackoff * attempts);
+      }
+    }
+
+    if (lastError != null) {
+      FluentLog.error(lastError is FluentException ? lastError.message : 'Pipeline terminated with error', lastError, StackTrace.current, tag: 'sync:error', context: {'model': T.toString()});
+      if (options.onError != null) {
+        options.onError?.call(lastError, StackTrace.current);
+      }
+
+      FluentApiErrorBehavior behaviorToUse = options.defaultErrorBehavior;
+      if (lastError is FluentApiException && options.statusBehaviors != null) {
+        behaviorToUse = options.statusBehaviors?[lastError.statusCode] ?? options.defaultErrorBehavior;
+      }
+
+      switch (behaviorToUse) {
+        case FluentApiErrorBehavior.clearCacheAndYieldError:
+          FluentLog.info('Clearing cache due to error', tag: 'sync:error');
+          yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb);
+          await _handleClearCache(localWhere, localWhereArgs, policy);
+          yield FluentDataEvent(phase: FluentPipelinePhase.error, error: lastError);
+          break;
+
+        case FluentApiErrorBehavior.preserveCacheAndComplete:
+          yield FluentDataEvent(phase: FluentPipelinePhase.completed, error: lastError);
+          break;
+
+        case FluentApiErrorBehavior.yieldError:
+        default:
+          yield FluentDataEvent(phase: FluentPipelinePhase.error, error: lastError);
+          break;
+      }
+      return;
+    }
+
+    List<T> apiData = response?.data ?? [];
+
+    if (apiData.isEmpty) {
+      FluentLog.info('Empty API response', tag: 'sync:api');
+      if (options.emptyApiBehavior == FluentEmptyApiBehavior.clearCache) {
+        yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb);
+        await _handleClearCache(localWhere, localWhereArgs, policy);
+      }
+      yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: []);
+      return;
+    }
+
+    if (options.beforeSave != null) {
+      apiData = await options.beforeSave?.call(apiData) ?? [];
+    }
+
+    if (options.executionStrategy == FluentExecutionStrategy.cacheThenApiYieldThenSave) {
+      yield FluentDataEvent(phase: FluentPipelinePhase.apiReady, data: apiData);
+    }
+
+    FluentLog.info('Saving ${apiData.length} records to DB', tag: 'sync:persistence');
+    yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb, data: apiData);
+
+    await _executeMergeStrategy(strategy: options.mergeStrategy, relationSyncMode: options.relationSyncMode, apiData: apiData, localWhere: localWhere, localWhereArgs: localWhereArgs, policy: policy);
+
+    if (options.executionStrategy != FluentExecutionStrategy.cacheThenApiYieldThenSave) {
+      yield FluentDataEvent(phase: FluentPipelinePhase.apiReady, data: apiData);
+    }
+
+    if (options.onSuccess != null) {
+      options.onSuccess?.call(apiData);
+    }
+
+    FluentLog.info('Sync completed successfully', tag: 'sync:pipeline');
+    yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: apiData);
+  }
+
+  /// Executes a cleanup operation on the local database for the entity type [T].
+  ///
+  /// If [localWhere] is provided, this method performs a scoped deletion of
+  /// records matching the condition. Otherwise, it executes a full table
+  /// truncation using [clearTable].
+  ///
+  /// * [localWhere]: The SQL WHERE clause condition.
+  /// * [localWhereArgs]: The arguments for the WHERE clause.
+  /// * [policy]: The [ExecutionPolicy] governing the database transaction.
+  Future<void> _handleClearCache(String? localWhere, List<Object?>? localWhereArgs, ExecutionPolicy policy) async {
+    if (localWhere != null && localWhere.trim().isNotEmpty) {
+      FluentLog.debug('Performing scoped cache cleanup', tag: 'sync:cache:clear', context: {'model': T.toString(), 'where': localWhere, 'args': localWhereArgs});
+      await deleteWhere(where: localWhere, whereArgs: localWhereArgs, isHardDelete: false, policy: policy);
+    } else {
+      FluentLog.warning('Performing full table truncation', tag: 'sync:cache:clear', hint: 'All local records for ${T.toString()} have been purged.', context: {'model': T.toString()});
+      await clearTable(policy: policy);
+    }
+  }
+
+  /// Orchestrates the reconciliation between local storage and incoming API data
+  /// based on the selected [FluentMergeStrategy].
+  ///
+  /// This method performs the following reconciliation steps:
+  /// 1. **Classification**: Separates [apiData] into items to be inserted or updated
+  ///    based on their existence in the local cache.
+  /// 2. **Persistence**:
+  ///    - For `upsert` or `syncDeletions`, performs batch inserts and relational updates.
+  ///    - For `syncDeletions`, identifies and removes stale local records not
+  ///      present in the current API payload.
+  ///    - For `replace`, clears existing records (matching [localWhere]) and
+  ///      performs a bulk insertion of all [apiData].
+  ///
+  /// * [strategy]: The reconciliation mode (e.g., [FluentMergeStrategy.upsert]).
+  /// * [relationSyncMode]: Strategy for handling child/nested entities.
+  /// * [localWhere]: Optional filter to limit the reconciliation scope.
+  /// * [policy]: The [ExecutionPolicy] applied to database transactions.
+  Future<void> _executeMergeStrategy({
+    required FluentMergeStrategy strategy,
+    required FluentRelationSyncMode relationSyncMode,
+    required List<T> apiData,
+    String? localWhere,
+    List<Object?>? localWhereArgs,
+    required ExecutionPolicy policy,
+  }) async {
+    final List<T> localData = await find(where: localWhere, whereArgs: localWhereArgs, policy: policy);
+    final Set<dynamic> localIds = localData.map((e) => e.primaryKeyValue).where((id) => id != null).toSet();
+
+    final List<T> itemsToInsert = [];
+    final List<T> itemsToUpdate = [];
+
+    for (final T item in apiData) {
+      if (localIds.contains(item.primaryKeyValue)) {
+        itemsToUpdate.add(item);
+      } else {
+        itemsToInsert.add(item);
+      }
+    }
+
+    FluentLog.debug('Reconciliation breakdown', tag: 'sync:merge', context: {'model': T.toString(), 'insert': itemsToInsert.length, 'update': itemsToUpdate.length});
+
+    switch (strategy) {
+      case FluentMergeStrategy.upsert:
+      case FluentMergeStrategy.syncDeletions:
+        if (itemsToInsert.isNotEmpty) {
+          await saveItems(itemsToInsert, updateIfExist: false, policy: policy);
+        }
+
+        if (itemsToUpdate.isNotEmpty) {
+          await updateAllWithRelations(itemsToUpdate, syncMode: relationSyncMode, policy: policy);
+        }
+
+        if (strategy == FluentMergeStrategy.syncDeletions) {
+          final Set<dynamic> apiIds = apiData.map((e) => e.primaryKeyValue).where((id) => id != null).toSet();
+
+          final List<T> itemsToDelete = localData.where((local) => !apiIds.contains(local.primaryKeyValue)).toList();
+
+          if (itemsToDelete.isNotEmpty) {
+            final bool isSoftDeletable = modelSample is FluentSoftDeletable;
+
+            FluentLog.info(
+              '${isSoftDeletable ? "Soft" : "Hard"}-deleting ${itemsToDelete.length} obsolete items',
+              tag: 'sync:merge:cleanup',
+              context: {'model': T.toString(), 'count': itemsToDelete.length},
+            );
+
+            if (isSoftDeletable) {
+              FluentLog.debug('Soft-deleting ${itemsToDelete.length} obsolete items', tag: 'PipelineSync');
+              await deleteAll(itemsToDelete, policy: policy);
+            } else {
+              FluentLog.debug('Hard-deleting ${itemsToDelete.length} obsolete items', tag: 'PipelineSync');
+              await hardDeleteAll(itemsToDelete, policy: policy);
+            }
+          }
+        }
+        break;
+
+      case FluentMergeStrategy.replace:
+        FluentLog.info('Executing replace strategy for ${T.toString()}', tag: 'sync:merge');
+        await _handleClearCache(localWhere, localWhereArgs, policy);
+        await saveItems(apiData, updateIfExist: false, policy: policy);
+        break;
     }
   }
 }
