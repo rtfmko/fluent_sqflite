@@ -127,22 +127,45 @@ extension FluentExecuteFind<T extends FluentStorable> on FluentProvider<T> {
   Future<List<T>> _executeFindValidItemsTaskOnMain(FluentTask task) async {
     final SortDirection? sortDirection = task.helper?.sortDirection;
     final int? limit = task.helper?.limit;
+
+    final String? customWhere = task.helper?.where;
+    final List<dynamic>? customWhereArgs = task.helper?.whereArgs;
+
     final int now = DateTime.now().millisecondsSinceEpoch;
 
     // Resolve target column mapping for validation tracking parameters
-    final String expiryCol = _cachedPrimaryKey?.name == 'id' ? 'expiry_date' : modelSample.expiryColumn;
+    final String expiryCol = modelSample.expiryColumn;
+
+    String finalWhere;
+    List<dynamic> finalWhereArgs;
+
+    if (customWhere != null && customWhere.trim().isNotEmpty) {
+      finalWhere = '($customWhere) AND ($expiryCol IS NULL OR $expiryCol > ?)';
+      finalWhereArgs = [...(customWhereArgs ?? []), now];
+    } else {
+      finalWhere = '$expiryCol IS NULL OR $expiryCol > ?';
+      finalWhereArgs = [now];
+    }
 
     FluentLog.debug(
       'Executing Main-thread unexpired validation selection routine',
       tag: '$tableName:findValidItemsExecutor',
-      context: {'tableName': tableName, 'taskId': task.id, 'limit': limit ?? 'unlimited', 'expiryColumn': expiryCol, 'timestampThreshold': now, 'sortDirection': sortDirection},
+      context: {
+        'tableName': tableName,
+        'taskId': task.id,
+        'limit': limit ?? 'unlimited',
+        'expiryColumn': expiryCol,
+        'timestampThreshold': now,
+        'sortDirection': sortDirection,
+        'hasCustomWhere': customWhere != null,
+      },
     );
 
     try {
       final String? orderBy = sortDirection != null ? '$expiryCol ${sortDirection.name.toUpperCase()}' : null;
 
       // Execute the low-level raw query constraints directly against the database driver
-      final List<Map<String, dynamic>> result = await executor.query(tableName, where: '$expiryCol IS NULL OR $expiryCol > ?', whereArgs: [now], limit: limit, orderBy: orderBy);
+      final List<Map<String, dynamic>> result = await executor.query(tableName, where: finalWhere, whereArgs: finalWhereArgs, limit: limit, orderBy: orderBy);
 
       final int resultLength = result.length;
       if (resultLength == 0) {

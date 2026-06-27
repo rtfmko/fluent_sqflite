@@ -239,7 +239,20 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
 
     if (options.executionStrategy != FluentExecutionStrategy.apiOnly) {
       yield FluentDataEvent(phase: FluentPipelinePhase.loadingCache);
-      final List<T> cachedData = await find(where: localWhere, whereArgs: localWhereArgs, policy: policy);
+      final List<T> cachedData;
+      if (options.loadOnlyValidCache) {
+        cachedData = await findValidItems(
+          where: localWhere,
+          whereArgs: localWhereArgs,
+          limit: options.limit,
+          maxDepth: options.maxDepth,
+          sortDirection: options.sortDirection,
+          policy: policy,
+          ignoreLazy: options.ignoreLazy,
+        );
+      } else {
+        cachedData = await find(where: localWhere, whereArgs: localWhereArgs, limit: options.limit, maxDepth: options.maxDepth, policy: policy, ignoreLazy: options.ignoreLazy);
+      }
       FluentLog.debug('Cache loaded', tag: 'sync:cache', context: {'count': cachedData.length, 'model': T.toString()});
       yield FluentDataEvent(phase: FluentPipelinePhase.cacheReady, data: cachedData);
     }

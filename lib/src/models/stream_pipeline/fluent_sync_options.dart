@@ -73,6 +73,21 @@ class FluentSyncOptions<T> {
   /// `baseRetryBackoff * (2 ^ attemptNumber)`.
   final Duration baseRetryBackoff;
 
+  /// If `true`, filters cache for non-expired and non-deleted records.
+  final bool loadOnlyValidCache;
+
+  /// Max rows to return from cache; `null` for unlimited.
+  final int? limit;
+
+  /// Hydration depth for nested relations.
+  final int maxDepth;
+
+  /// Expiration-based sorting direction.
+  final SortDirection? sortDirection;
+
+  /// If `true`, loads all relations immediately, bypassing lazy-loading.
+  final bool ignoreLazy;
+
   /// Creates a [FluentSyncOptions] instance with defined synchronization behavior.
   ///
   /// The pipeline processes the request as follows:
@@ -97,5 +112,10 @@ class FluentSyncOptions<T> {
     this.retryCount = 0,
     this.validStatusCodes = const {200, 201, 202, 204},
     this.baseRetryBackoff = const Duration(milliseconds: 500),
+    this.loadOnlyValidCache = false,
+    this.limit,
+    this.maxDepth = 1,
+    this.sortDirection,
+    this.ignoreLazy = false,
   });
 }

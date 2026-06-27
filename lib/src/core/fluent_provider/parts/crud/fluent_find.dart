@@ -135,7 +135,15 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<List<T>> findValidItems({int? limit, SortDirection? sortDirection, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<List<T>> findValidItems({
+    String? where,
+    List<Object?>? whereArgs,
+    int? limit,
+    SortDirection? sortDirection,
+    int maxDepth = 1,
+    bool ignoreLazy = false,
+    ExecutionPolicy policy = const ExecutionPolicy(),
+  }) {
     FluentLog.debug(
       'Initiating localized query pipeline for unexpired validation row selection',
       tag: '$tableName:findValidItems',
@@ -143,6 +151,8 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
         'tableName': tableName,
         'limit': limit ?? 'unlimited',
         'sortDirection': sortDirection,
+        'where': where,
+        'whereArgs': whereArgs,
         'maxDepth': maxDepth,
         'ignoreLazy': ignoreLazy,
         'hasCustomPolicy': policy != const ExecutionPolicy(),
@@ -155,7 +165,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
       dbName: dbName,
       maxDepth: maxDepth,
       ignoreLazy: ignoreLazy,
-      helper: TableHelper(limit: limit, multiple: true, sortDirection: sortDirection, where: _injectSoftDelete(null)),
+      helper: TableHelper(limit: limit, multiple: true, sortDirection: sortDirection, where: _injectSoftDelete(where), whereArgs: whereArgs),
       policy: policy,
     );
 
