@@ -296,3 +296,92 @@ extension FluentStorableCollectionX<T extends FluentStorable> on Iterable<T> {
     return FluentDb.restoreAll<T>(this, tag: tag, policy: policy);
   }
 }
+
+/// Utility extension on [FluentDataEvent] to simplify state handling in UI and BLoC layers.
+///
+/// Provides convenient getters to check the pipeline phase, safely access data,
+/// and a functional [when] method to eliminate nested conditional branching.
+extension FluentDataEventX<T> on FluentDataEvent<T> {
+  /// Returns `true` if the pipeline is actively performing background operations.
+  ///
+  /// This includes loading from cache, fetching from the API, or saving to the local database.
+  bool get isLoading => phase == FluentPipelinePhase.loadingCache || phase == FluentPipelinePhase.loadingApi || phase == FluentPipelinePhase.savingToDb;
+
+  /// Returns `true` if the pipeline has reached a phase where data delivery is possible.
+  ///
+  /// Used internally for state routing; check [hasValidData] if you also need to ensure the data is not empty.
+  bool get hasDataPhase => phase == FluentPipelinePhase.cacheReady || phase == FluentPipelinePhase.apiReady || phase == FluentPipelinePhase.completed;
+
+  /// Returns `true` if the pipeline has reached its terminal ([completed]) state.
+  bool get isCompleted => phase == FluentPipelinePhase.completed;
+
+  /// Returns `true` if the pipeline reached a data phase AND contains non-empty data.
+  ///
+  /// Ideal for quick `if` checks in business logic or UI when pattern matching is not required.
+  bool get hasValidData => hasDataPhase && data.isNotEmpty;
+
+  /// Safely retrieves the first element from the data list, or `null` if the list is empty.
+  ///
+  /// Ideal for scenarios using `limit: 1` where only a single entity is expected.
+  T? get singleData => data.isNotEmpty ? data.first : null;
+
+  /// Returns `true` if the pipeline encountered an exception during execution.
+  bool get hasError => phase == FluentPipelinePhase.error || error != null;
+
+  /// Strict functional pattern matching for event states.
+  ///
+  /// Forces the handling of all possible outcomes, which prevents unhandled UI states.
+  ///
+  /// * [onData]: Executed when data is available. Provides the list and a flag indicating if it originated from the cache.
+  /// * [onEmpty]: Executed when the pipeline successfully finished but the dataset is empty.
+  /// * [onError]: Executed when an error occurred. Provides the exception object.
+  /// * [onLoading]: Executed while the pipeline is still in progress.
+  ///
+  /// ### Example:
+  /// ```dart
+  /// event.when(
+  ///   onLoading: () => const CircularProgressIndicator(),
+  ///   onError: (err) => ErrorWidget(err.toString()),
+  ///   onEmpty: () => const Text('No data found'),
+  ///   onData: (items, isCache) => ListView(children: ...),
+  /// );
+  /// ```
+  R when<R>({required R Function(List<T> data, bool isFromCache) onData, required R Function() onEmpty, required R Function(Object error) onError, required R Function() onLoading}) {
+    if (hasError) return onError(error!);
+
+    if (hasDataPhase) {
+      if (data.isEmpty) return onEmpty();
+      return onData(data, phase == FluentPipelinePhase.cacheReady);
+    }
+
+    return onLoading();
+  }
+
+  /// Loose functional pattern matching for event states.
+  ///
+  /// Useful for side-effects (like showing snackbars) where you don't need to handle every single state.
+  /// If a specific handler is null, the [orElse] callback is executed.
+  ///
+  /// ### Example:
+  /// ```dart
+  /// event.maybeWhen(
+  ///   onError: (err) => showSnackBar(err.toString()),
+  ///   orElse: () => print('Doing nothing for this phase'),
+  /// );
+  /// ```
+  R maybeWhen<R>({R Function(List<T> data, bool isFromCache)? onData, R Function()? onEmpty, R Function(Object error)? onError, R Function()? onLoading, required R Function() orElse}) {
+    if (hasError) return onError != null ? onError(error!) : orElse();
+
+    if (hasDataPhase) {
+      if (data.isEmpty) return onEmpty != null ? onEmpty() : orElse();
+      return onData != null ? onData(data, phase == FluentPipelinePhase.cacheReady) : orElse();
+    }
+
+    return onLoading != null ? onLoading() : orElse();
+  }
+
+  /// Safely casts and returns the pipeline error if it matches the specified type [E], otherwise returns `null`.
+  ///
+  /// *Use case:* Extracting typed exceptions directly in the BLoC layer.
+  E? errorAs<E>() => error is E ? error as E : null;
+}

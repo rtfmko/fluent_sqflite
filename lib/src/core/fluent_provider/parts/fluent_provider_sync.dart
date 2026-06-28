@@ -237,11 +237,13 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
 
     yield FluentDataEvent(phase: FluentPipelinePhase.idle);
 
+    List<T> localData = [];
+
     if (options.executionStrategy != FluentExecutionStrategy.apiOnly) {
       yield FluentDataEvent(phase: FluentPipelinePhase.loadingCache);
-      final List<T> cachedData;
+
       if (options.loadOnlyValidCache) {
-        cachedData = await findValidItems(
+        localData = await findValidItems(
           where: localWhere,
           whereArgs: localWhereArgs,
           limit: options.limit,
@@ -251,10 +253,16 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
           ignoreLazy: options.ignoreLazy,
         );
       } else {
-        cachedData = await find(where: localWhere, whereArgs: localWhereArgs, limit: options.limit, maxDepth: options.maxDepth, policy: policy, ignoreLazy: options.ignoreLazy);
+        localData = await find(where: localWhere, whereArgs: localWhereArgs, limit: options.limit, maxDepth: options.maxDepth, policy: policy, ignoreLazy: options.ignoreLazy);
       }
-      FluentLog.debug('Cache loaded', tag: 'sync:cache', context: {'count': cachedData.length, 'model': T.toString()});
-      yield FluentDataEvent(phase: FluentPipelinePhase.cacheReady, data: cachedData);
+      FluentLog.debug('Cache loaded', tag: 'sync:cache', context: {'count': localData.length, 'model': T.toString()});
+      yield FluentDataEvent(phase: FluentPipelinePhase.cacheReady, data: localData);
+
+      if (options.executionStrategy == FluentExecutionStrategy.cacheOnly) {
+        FluentLog.info('Execution strategy is cacheOnly. Terminating pipeline.', tag: 'sync:pipeline');
+        yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: localData);
+        return;
+      }
     }
 
     yield FluentDataEvent(phase: FluentPipelinePhase.loadingApi);
@@ -335,10 +343,21 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       yield FluentDataEvent(phase: FluentPipelinePhase.apiReady, data: apiData);
     }
 
-    FluentLog.info('Saving ${apiData.length} records to DB', tag: 'sync:persistence');
-    yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb, data: apiData);
+    if (options.mergeStrategy == FluentMergeStrategy.none) {
+      FluentLog.info('Merge strategy is none. Skipping database persistence.', tag: 'sync:persistence');
+    } else {
+      FluentLog.info('Saving ${apiData.length} records to DB', tag: 'sync:persistence');
+      yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb, data: apiData);
 
-    await _executeMergeStrategy(strategy: options.mergeStrategy, relationSyncMode: options.relationSyncMode, apiData: apiData, localWhere: localWhere, localWhereArgs: localWhereArgs, policy: policy);
+      await _executeMergeStrategy(
+        strategy: options.mergeStrategy,
+        relationSyncMode: options.relationSyncMode,
+        apiData: apiData,
+        localWhere: localWhere,
+        localWhereArgs: localWhereArgs,
+        policy: policy,
+      );
+    }
 
     if (options.executionStrategy != FluentExecutionStrategy.cacheThenApiYieldThenSave) {
       yield FluentDataEvent(phase: FluentPipelinePhase.apiReady, data: apiData);
@@ -396,6 +415,8 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     List<Object?>? localWhereArgs,
     required ExecutionPolicy policy,
   }) async {
+    if (strategy == FluentMergeStrategy.none) return;
+
     final List<T> localData = await find(where: localWhere, whereArgs: localWhereArgs, policy: policy);
     final Set<dynamic> localIds = localData.map((e) => e.primaryKeyValue).where((id) => id != null).toSet();
 
@@ -447,12 +468,13 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
           }
         }
         break;
-
       case FluentMergeStrategy.replace:
         FluentLog.info('Executing replace strategy for ${T.toString()}', tag: 'sync:merge');
         await _handleClearCache(localWhere, localWhereArgs, policy);
         await saveItems(apiData, updateIfExist: false, policy: policy);
         break;
+      case FluentMergeStrategy.none:
+        return;
     }
   }
 }

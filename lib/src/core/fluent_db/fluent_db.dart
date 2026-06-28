@@ -906,6 +906,7 @@ class FluentDb {
   /// });
   /// ```
   ///
+  ///
   /// **2. Syncing a single entity:**
   /// Use [FluentApiResponse.single] to keep the pipeline unified.
   /// Use `options: FluentSyncOptions(limit: 1)` to optimize local cache lookups.
@@ -924,6 +925,7 @@ class FluentDb {
   ///   }
   /// });
   /// ```
+  ///
   ///
   /// **3. Advanced usage with filtering and custom reconciliation:**
   /// Demonstrates using custom merge strategies, error behaviors, and data transformation.
@@ -952,6 +954,31 @@ class FluentDb {
   ///     // event.data is always a List<Post>, ensuring consistent UI updates
   ///     updateUI(event.data);
   ///   }
+  /// });
+  /// ```
+  ///
+  ///
+  /// ### Integration with BLoC
+  ///
+  /// The `reactiveSync` method is designed to work seamlessly with [Bloc].
+  /// By using `emit.forEach`, you can transform the sync stream into UI states
+  /// safely, without causing memory leaks or state errors.
+  ///
+  /// ```dart
+  /// on<FetchUsersEvent>((event, emit) async {
+  ///   await emit.forEach<FluentDataEvent<User>>(
+  ///     FluentDb.reactiveSync<User>(
+  ///       fetchFromApi: () async => FluentApiResponse.single(
+  ///         data: await api.getUsers(),
+  ///        ),
+  ///     ),
+  ///     onData: (syncEvent) => syncEvent.when(
+  ///       onLoading: () => const UserState.loading(),
+  ///       onEmpty: () => const UserState.empty(),
+  ///       onError: (err) => UserState.error(err.toString()),
+  ///       onData: (users, isCache) => UserState.success(users: users, isOffline: isCache),
+  ///     ),
+  ///   );
   /// });
   /// ```
   ///

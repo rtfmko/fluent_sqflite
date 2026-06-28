@@ -534,32 +534,38 @@ enum FluentPipelinePhase {
   error,
 }
 
-/// Defines the reconciliation strategy for merging remote API data into the
-/// local SQLite storage.
-///
-/// These strategies dictate how the persistence layer handles identity conflicts,
-/// orphaned records, and local state preservation during synchronization.
+/// Defines how incoming API data is reconciled with the local database state.
 enum FluentMergeStrategy {
-  /// Performs a smart merge between remote and local datasets.
-  ///
+  /// **Smart Update**
   /// New records are inserted, and existing records (matched by Primary Key)
-  /// are updated. This is the standard strategy for preserving local state
-  /// while incorporating server-side changes.
+  /// are updated. Local records missing from the API response are left untouched.
+  ///
+  /// *Use case:* Standard synchronization where the server sends partial updates.
   upsert,
 
-  /// Performs a total reset of the targeted local dataset.
+  /// **Complete Wipe & Replace**
+  /// Clears all existing records (constrained by [localWhere]) before inserting
+  /// the fresh dataset from the API.
   ///
-  /// This strategy clears existing records (constrained by [localWhere]) before
-  /// inserting the fresh dataset from the API. Use this when the server
-  /// provides the definitive state and no local-only mutations should persist.
+  /// *Use case:* When the server provides the absolute definitive state and
+  /// local-only records must not persist. Faster than [syncDeletions] for large datasets.
   replace,
 
-  /// Performs an [upsert] followed by an automated deletion of obsolete records.
+  /// **Exact Mirror (Upsert + Purge)**
+  /// Performs an upsert, and then actively deletes any local records (matching
+  /// [localWhere]) that were NOT present in the incoming API response.
   ///
-  /// Any records existing locally (matching [localWhere]) that are absent from
-  /// the API response are identified as stale and purged. This is ideal for
-  /// achieving exact state synchronization with server-side collections.
+  /// *Use case:* Syncing lists where items might have been deleted on another
+  /// device, ensuring the local DB is an exact mirror of the server's list.
   syncDeletions,
+
+  /// **Read-Only (Bypass DB)**
+  /// The incoming API data is streamed directly to the UI without touching
+  /// the local database at all.
+  ///
+  /// *Use case:* Search results, temporary filtering, or one-off data fetching
+  /// where caching is unnecessary or undesirable.
+  none,
 }
 
 /// Defines the synchronization orchestration flow between local cache and
@@ -569,28 +575,38 @@ enum FluentMergeStrategy {
 /// timing of persistence operations, allowing developers to optimize for
 /// perceived performance versus strict data consistency.
 enum FluentExecutionStrategy {
-  /// Ensures strict data consistency by awaiting full synchronization.
-  ///
+  /// **Offline-First (High Consistency)**
   /// The pipeline delivers cached data first, fetches the API response,
-  /// commits it to the database, and only then emits the final dataset to the UI.
-  /// Use this when preventing \"flickering\" or partial state updates is critical.
+  /// commits it to the database, and ONLY THEN emits the fresh dataset to the UI.
+  ///
+  /// *Use case:* When you want to prevent the UI from showing data that hasn't
+  /// been successfully saved to the local disk yet (avoids "flickering" state).
   cacheThenApiThenSave,
 
-  /// Optimizes for perceived performance (the recommended default).
-  ///
+  /// **Offline-First (High Performance - Default)**
   /// Delivers cached data immediately, then emits the fresh API response to the
-  /// UI as soon as it arrives. Persistence to the database happens in the
-  /// background, ensuring the UI remains highly responsive without waiting for
-  /// disk I/O to complete.
+  /// UI *as soon as it arrives*. Persistence to the database happens in the
+  /// background.
+  ///
+  /// *Use case:* Standard screens where you want the UI to update instantly
+  /// without waiting for slow disk I/O (database writes).
   cacheThenApiYieldThenSave,
 
-  /// Bypasses local storage entirely.
+  /// **Network-Only**
+  /// Bypasses local storage reading entirely. Forces a fresh network request,
+  /// saves it (depending on MergeStrategy), and delivers the data.
   ///
-  /// Forces a fresh network request, commits the result to the database, and
-  /// delivers the new data only after the transaction is finalized. This is
-  /// ideal for critical, real-time data where stale cached information
-  /// is unacceptable.
+  /// *Use case:* Financial transactions, live charts, or data where stale
+  /// cached information is strictly unacceptable.
   apiOnly,
+
+  /// **Local-Only**
+  /// Reads data exclusively from the local SQLite cache and terminates the pipeline.
+  /// No network requests are made.
+  ///
+  /// *Use case:* Airplane mode, heavy static dictionaries that are updated via
+  /// separate background jobs, or user-forced "offline mode".
+  cacheOnly,
 }
 
 /// Defines how the synchronization pipeline handles cases where the API
