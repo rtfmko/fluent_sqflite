@@ -91,7 +91,7 @@ class FluentApiResponse<T> {
   ///   statusCode: res.statusCode ?? 200,
   /// );
   /// ```
-  factory FluentApiResponse.single({required T data, required int statusCode, Object? error}) => FluentApiResponse._(data: [data], statusCode: statusCode, error: error);
+  factory FluentApiResponse.single({required T? data, int statusCode = 200, Object? error}) => FluentApiResponse._(data: data != null ? <T>[data] : <T>[], statusCode: statusCode, error: error);
 
   /// Wraps a list of entities into a response.
   /// ### Examples
@@ -117,5 +117,6 @@ class FluentApiResponse<T> {
   ///   statusCode: res.statusCode ?? 200,
   /// );
   /// ```
-  factory FluentApiResponse.list({required List<T> data, required int statusCode, Object? error}) => FluentApiResponse._(data: data, statusCode: statusCode, error: error);
+  factory FluentApiResponse.list({required List<T?>? data, int statusCode = 200, Object? error}) =>
+      FluentApiResponse._(data: data?.whereType<T>().toList() ?? <T>[], statusCode: statusCode, error: error);
 }
