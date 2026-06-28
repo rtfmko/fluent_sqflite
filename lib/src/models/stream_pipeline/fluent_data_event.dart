@@ -1,3 +1,7 @@
+// Copyright 2026 RTFM. All rights reserved.
+// Use of this source code is governed by an Apache-2.0 license that can be
+// found in the LICENSE file.
+
 import '../../utils/utils.dart';
 
 /// Represents an event emitted by the [reactiveSync] pipeline during its
@@ -14,7 +18,7 @@ class FluentDataEvent<T> {
   ///
   /// Usually populated when [phase] is [FluentPipelinePhase.cacheReady]
   /// or [FluentPipelinePhase.apiReady].
-  final List<T>? data;
+  final List<T> data;
 
   /// An error object if the pipeline entered the [FluentPipelinePhase.error] state.
   final Object? error;
@@ -23,5 +27,5 @@ class FluentDataEvent<T> {
   bool get isTerminal => phase == FluentPipelinePhase.completed || phase == FluentPipelinePhase.error;
 
   /// Creates a [FluentDataEvent].
-  const FluentDataEvent({required this.phase, this.data, this.error});
+  const FluentDataEvent({required this.phase, this.data = const [], this.error});
 }

@@ -177,53 +177,53 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
 
   /// Performs a reactive synchronization of data between local storage and a remote API.
   ///
-  /// The pipeline follows a multi-phase lifecycle, emitting [FluentDataEvent] objects
-  /// to notify the UI of state changes (e.g., [FluentPipelinePhase.loadingApi],
-  /// [FluentPipelinePhase.savingToDb]).
+  /// The pipeline lifecycle emits [FluentDataEvent] objects, allowing the UI to
+  /// track phases from [FluentPipelinePhase.loadingCache] to [FluentPipelinePhase.completed].
   ///
   /// ### Synchronization Flow:
-  /// 1. **Cache Phase**: Retrieves existing data based on [localWhere].
-  /// 2. **API Phase**: Fetches remote data with integrated retry logic and status code validation.
-  /// 3. **Error Handling**: Applies [FluentApiErrorBehavior] based on error type or status code.
-  /// 4. **Persistence**: Transforms data via [beforeSave] and commits changes using the selected [FluentMergeStrategy].
-  /// 5. **Completion**: Finalizes the process and invokes [onSuccess].
+  /// 1. **Cache Phase**: Retrieves local records (optionally limited by `options.limit`).
+  /// 2. **API Phase**: Fetches remote data using [FluentApiResponse] factories.
+  /// 3. **Persistence**: Performs [FluentMergeStrategy] reconciliation against the local store.
   ///
-  /// ### Example: Basic usage
+  /// ### Example: Syncing a single entity
+  /// Use [FluentApiResponse.single] when the API returns a specific object.
   /// ```dart
-  /// final UserProvider userProvider = FluentDb.providerByType<User>();
-  ///
   /// userProvider.reactiveSync<User>(
-  ///   fetchFromApi: () => api.getUsers(),
+  ///   fetchFromApi: () async => FluentApiResponse.single(
+  ///     data: await api.getUser(123),
+  ///     statusCode: 200,
+  ///   ),
+  ///   options: FluentSyncOptions(limit: 1), // Limits local cache query to 1
   /// );
   /// ```
   ///
-  /// ### Example: Advanced usage with filters and custom behaviors
-  /// This example demonstrates how to sync a specific subset of data,
-  /// handle specific HTTP errors, and transform data before persistence.
+  /// ### Example: Syncing a collection
+  /// Use [FluentApiResponse.list] for multi-record endpoints.
   /// ```dart
+  /// userProvider.reactiveSync<User>(
+  ///   fetchFromApi: () async => FluentApiResponse.list(
+  ///     data: await api.getUsers(),
+  ///     statusCode: 200,
+  ///   ),
+  ///   options: FluentSyncOptions(mergeStrategy: FluentMergeStrategy.syncDeletions),
+  /// );
+  /// ```
   ///
-  /// final UserProvider userProvider = FluentDb.providerByType<User>();
-  ///
+  /// ### Example: Advanced transformation and error handling
+  /// ```dart
   /// await userProvider.reactiveSync<User>(
   ///   fetchFromApi: () => api.fetchUserPosts(userId: 123),
-  ///   localWhere: 'user_id = ? AND category = ?',
-  ///   localWhereArgs: [123, 'work'],
+  ///   localWhere: 'user_id = ?',
+  ///   localWhereArgs: [123],
   ///   options: FluentSyncOptions<User>(
-  ///     executionStrategy: FluentExecutionStrategy.cacheThenApiYieldThenSave,
   ///     mergeStrategy: FluentMergeStrategy.syncDeletions,
-  ///     retryCount: 3,
-  ///     statusBehaviors: {
-  ///       401: FluentApiErrorBehavior.clearCacheAndYieldError,
-  ///       404: FluentApiErrorBehavior.preserveCacheAndComplete,
-  ///     },
-  ///     beforeSave: (items) async => items.map((e) => e.copyWith(
-  ///       updatedAt: DateTime.now(),
-  ///     )).toList(),
+  ///     beforeSave: (items) async => items.map((e) => e.copyWith(syncedAt: DateTime.now())).toList(),
+  ///     statusBehaviors: { 404: FluentApiErrorBehavior.preserveCacheAndComplete },
   ///   ),
   /// ).listen((event) {
-  ///   if (event.phase == FluentPipelinePhase.completed) {
-  ///     print('Sync finished with ${event.data?.length ?? 0} items');
-  ///   }
+  ///   // event.data is always a List<T>, providing consistent UI handling
+  ///   final items = event.data;
+  ///   print('Sync phase: ${event.phase}, items count: ${items.length}');
   /// });
   /// ```
   Stream<FluentDataEvent<T>> reactiveSync({

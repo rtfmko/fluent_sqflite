@@ -130,18 +130,24 @@ extension FluentDbActionX on FluentDbAction {
     FluentDbAction.updateSingleField,
     FluentDbAction.updateMultipleFields,
     FluentDbAction.updateWithRelations,
+    FluentDbAction.updateAllWithRelations,
     FluentDbAction.updateAll,
     FluentDbAction.updateMultipleFieldsByIds,
     FluentDbAction.delete,
     FluentDbAction.deleteBy,
+    FluentDbAction.deleteWhere,
     FluentDbAction.deleteItemsByIds,
     FluentDbAction.restore,
     FluentDbAction.restoreItemsByIds,
     FluentDbAction.hardDelete,
     FluentDbAction.hardDeleteBy,
+    FluentDbAction.hardDeleteWhere,
     FluentDbAction.hardDeleteItemsByIds,
     FluentDbAction.purgeSoftDeleted,
     FluentDbAction.forcePurgeSoftDeleted,
+    FluentDbAction.clearExpired,
+    FluentDbAction.clearTable,
+    FluentDbAction.wipeAll,
   };
 
   /// Defines the set of operations that trigger database stream notifications.
@@ -149,7 +155,7 @@ extension FluentDbActionX on FluentDbAction {
   /// This includes all mutation operations as well as administrative tasks
   /// that affect the overall state of the table (e.g., clearing expired items),
   /// ensuring that observers receive timely updates regarding the data layer.
-  static const Set<FluentDbAction> _streamActions = {..._writeActions, FluentDbAction.clearExpired, FluentDbAction.clearTable};
+  static const Set<FluentDbAction> _streamActions = {..._writeActions};
 
   /// Returns `true` if the current operation modifies the underlying database state.
   bool get isWriteOp => _writeActions.contains(this);

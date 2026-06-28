@@ -1,34 +1,52 @@
+// Copyright 2026 RTFM. All rights reserved.
+// Use of this source code is governed by an Apache-2.0 license that can be
+// found in the LICENSE file.
+
 /// Represents the structured response wrapper returned by an API execution.
 ///
-/// This class acts as a container for both successful payloads and error states,
-/// decoupling the raw HTTP response from the synchronization pipeline logic.
+/// This class acts as a container for payloads and error states, ensuring
+/// that the synchronization pipeline consistently processes data as a [List].
 ///
 /// ### Examples
 ///
-/// Using with the **http** package:
+/// **Using with `http` package:**
+///
+/// Returning a collection (list):
 /// ```dart
-/// final Response response = await http.get(Uri.parse('https://api.example.com/users'));
-/// final FluentApiResponse fluentResponse = FluentApiResponse<User>(
-///   data: response.statusCode == 200 ? parseUsers(response.body) : null,
-///   statusCode: response.statusCode,
-///   error: response.statusCode != 200 ? response.reasonPhrase : null,
+/// final http.Response res = await http.get(Uri.parse('https://api.example.com/users'));
+/// return FluentApiResponse.list(
+///   data: (jsonDecode(res.body) as List).map((e) => User.fromJson(e)).toList(),
+///   statusCode: res.statusCode,
 /// );
 /// ```
 ///
-/// Using with the **dio** package:
+/// Returning a single entity:
 /// ```dart
-/// try {
-///   final Response response = await dio.get('/users');
-///   return FluentApiResponse<User>(
-///     data: (response.data as List).map((e) => User.fromJson(e)).toList(),
-///     statusCode: response.statusCode ?? 200,
-///   );
-/// } on DioException catch (e) {
-///   return FluentApiResponse<User>(
-///     statusCode: e.response?.statusCode ?? 500,
-///     error: e.error,
-///   );
-/// }
+/// final http.Response res = await http.get(Uri.parse('https://api.example.com/users/1'));
+/// return FluentApiResponse.single(
+///   data: User.fromJson(jsonDecode(res.body)),
+///   statusCode: res.statusCode,
+/// );
+/// ```
+///
+/// **Using with `dio` package:**
+///
+/// Returning a collection (list):
+/// ```dart
+/// final Response res = await dio.get('/users');
+/// return FluentApiResponse.list(
+///   data: (res.data as List).map((e) => User.fromJson(e)).toList(),
+///   statusCode: res.statusCode ?? 200,
+/// );
+/// ```
+///
+/// Returning a single entity:
+/// ```dart
+/// final Response res = await dio.get('/users/1');
+/// return FluentApiResponse.single(
+///   data: User.fromJson(res.data),
+///   statusCode: res.statusCode ?? 200,
+/// );
 /// ```
 class FluentApiResponse<T> {
   /// The list of entities successfully retrieved from the API.
@@ -47,5 +65,57 @@ class FluentApiResponse<T> {
   /// * [data]: The collection of items returned by the server.
   /// * [statusCode]: The status code of the HTTP response.
   /// * [error]: Optional error object if the request did not succeed.
-  FluentApiResponse({this.data, required this.statusCode, this.error});
+  FluentApiResponse._({required this.data, required this.statusCode, required this.error});
+
+  /// Wraps a single entity into a list response.
+  /// ### Examples
+  ///
+  /// **Using with `http` package:**
+  ///
+  /// Returning a single entity:
+  /// ```dart
+  /// final http.Response res = await http.get(Uri.parse('https://api.example.com/users/1'));
+  /// return FluentApiResponse.single(
+  ///   data: User.fromJson(jsonDecode(res.body)),
+  ///   statusCode: res.statusCode,
+  /// );
+  /// ```
+  ///
+  /// **Using with `dio` package:**
+  ///
+  /// Returning a single entity:
+  /// ```dart
+  /// final Response res = await dio.get('/users/1');
+  /// return FluentApiResponse.single(
+  ///   data: User.fromJson(res.data),
+  ///   statusCode: res.statusCode ?? 200,
+  /// );
+  /// ```
+  factory FluentApiResponse.single({required T data, required int statusCode, Object? error}) => FluentApiResponse._(data: [data], statusCode: statusCode, error: error);
+
+  /// Wraps a list of entities into a response.
+  /// ### Examples
+  ///
+  /// **Using with `http` package:**
+  ///
+  /// Returning a collection (list):
+  /// ```dart
+  /// final http.Response res = await http.get(Uri.parse('https://api.example.com/users'));
+  /// return FluentApiResponse.list(
+  ///   data: (jsonDecode(res.body) as List).map((e) => User.fromJson(e)).toList(),
+  ///   statusCode: res.statusCode,
+  /// );
+  /// ```
+  ///
+  /// **Using with `dio` package:**
+  ///
+  /// Returning a collection (list):
+  /// ```dart
+  /// final Response res = await dio.get('/users');
+  /// return FluentApiResponse.list(
+  ///   data: (res.data as List).map((e) => User.fromJson(e)).toList(),
+  ///   statusCode: res.statusCode ?? 200,
+  /// );
+  /// ```
+  factory FluentApiResponse.list({required List<T> data, required int statusCode, Object? error}) => FluentApiResponse._(data: data, statusCode: statusCode, error: error);
 }

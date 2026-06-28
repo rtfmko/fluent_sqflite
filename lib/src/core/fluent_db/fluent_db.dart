@@ -889,28 +889,67 @@ class FluentDb {
   ///
   /// ### Examples
   ///
-  /// **1. Basic usage:**
+  /// **1. Syncing a collection (List):**
+  /// Use [FluentApiResponse.list] when the endpoint returns multiple items.
   /// ```dart
-  /// FluentDb.reactiveSync<User>(fetchFromApi: () => api.getUsers())
-  ///   .listen((event) => print('Phase: ${event.phase}'));
+  /// FluentDb.reactiveSync<User>(
+  ///   fetchFromApi: () async {
+  ///     final http.Response response = await http.get(Uri.parse('[https://api.example.com/users](https://api.example.com/users)'));
+  ///     final List<User> users = (jsonDecode(response.body) as List)
+  ///         .map((e) => User.fromJson(e)).toList();
+  ///     return FluentApiResponse.list(data: users, statusCode: response.statusCode);
+  ///   },
+  /// ).listen((event) {
+  ///   if (event.phase == FluentPipelinePhase.apiReady) {
+  ///     print('Loaded ${event.data.length} users');
+  ///   }
+  /// });
   /// ```
   ///
-  /// **2. Advanced usage with filters and custom behaviors:**
+  /// **2. Syncing a single entity:**
+  /// Use [FluentApiResponse.single] to keep the pipeline unified.
+  /// Use `options: FluentSyncOptions(limit: 1)` to optimize local cache lookups.
   /// ```dart
-  /// await FluentDb.reactiveSync<User>(
-  ///   fetchFromApi: () => api.fetchUserPosts(userId: 123),
+  /// FluentDb.reactiveSync<User>(
+  ///   fetchFromApi: () async {
+  ///     final http.Response response = await http.get(Uri.parse('[https://api.example.com/users/123](https://api.example.com/users/123)'));
+  ///     final User user = User.fromJson(jsonDecode(response.body));
+  ///     return FluentApiResponse.single(data: user, statusCode: response.statusCode);
+  ///   },
+  ///   options: const FluentSyncOptions(limit: 1),
+  /// ).listen((event) {
+  ///   final user = event.data.firstOrNull;
+  ///   if (user != null) {
+  ///     print('User synchronized: ${user.name}');
+  ///   }
+  /// });
+  /// ```
+  ///
+  /// **3. Advanced usage with filtering and custom reconciliation:**
+  /// Demonstrates using custom merge strategies, error behaviors, and data transformation.
+  /// ```dart
+  /// await FluentDb.reactiveSync<Post>(
+  ///   fetchFromApi: () async {
+  ///     final Response res = await dio.get('/posts', queryParameters: {'userId': 123});
+  ///     return FluentApiResponse.list(
+  ///       data: (res.data as List).map((e) => Post.fromJson(e)).toList(),
+  ///       statusCode: res.statusCode ?? 200,
+  ///     );
+  ///   },
   ///   localWhere: 'user_id = ?',
   ///   localWhereArgs: [123],
-  ///   options: FluentSyncOptions<User>(
+  ///   options: FluentSyncOptions<Post>(
   ///     executionStrategy: FluentExecutionStrategy.cacheThenApiYieldThenSave,
   ///     mergeStrategy: FluentMergeStrategy.syncDeletions,
   ///     retryCount: 3,
+  ///     beforeSave: (items) async => items.map((p) => p.copyWith(syncedAt: DateTime.now())).toList(),
   ///     statusBehaviors: {
   ///       401: FluentApiErrorBehavior.clearCacheAndYieldError,
   ///     },
   ///   ),
   /// ).listen((event) {
   ///   if (event.phase == FluentPipelinePhase.completed) {
+  ///     // event.data is always a List<Post>, ensuring consistent UI updates
   ///     updateUI(event.data);
   ///   }
   /// });
