@@ -339,7 +339,9 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       apiData = await options.beforeSave?.call(apiData) ?? [];
     }
 
-    if (options.executionStrategy == FluentExecutionStrategy.cacheThenApiYieldThenSave) {
+    final bool yieldBeforeSave = options.executionStrategy == FluentExecutionStrategy.cacheThenApiYieldThenSave || options.executionStrategy == FluentExecutionStrategy.apiOnly;
+
+    if (yieldBeforeSave) {
       yield FluentDataEvent(phase: FluentPipelinePhase.apiReady, data: apiData);
     }
 
@@ -359,7 +361,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       );
     }
 
-    if (options.executionStrategy != FluentExecutionStrategy.cacheThenApiYieldThenSave) {
+    if (!yieldBeforeSave) {
       yield FluentDataEvent(phase: FluentPipelinePhase.apiReady, data: apiData);
     }
 
