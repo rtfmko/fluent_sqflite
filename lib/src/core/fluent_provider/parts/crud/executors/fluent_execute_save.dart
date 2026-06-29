@@ -68,18 +68,14 @@ extension FluentExecuteSave<T extends FluentStorable> on FluentProvider<T> {
       items = <T>[task.data as T];
     }
 
-    final currentTxn = _transactionExecutor;
-
-    // SCENARIO A: An active external transaction context already exists on this thread
-    if (currentTxn is Transaction) {
+    if (_transactionExecutor != null && _transactionExecutor is Transaction) {
       try {
         FluentLog.debug(
           'Executing Main-thread save routine within an inherited active transaction',
           tag: '$tableName:saveExecutor',
-          context: {'tableName': tableName, 'taskId': task.id, 'batchSize': items.length, 'transactionMode': 'inherited'},
+          context: {'batchSize': items.length, 'transactionMode': 'inherited'},
         );
-
-        await _executeAdd(currentTxn, items, task, parentJsons: null);
+        await _executeAdd(_transactionExecutor as Transaction, items, task, parentJsons: null);
         return;
       } on DatabaseException catch (e, stackTrace) {
         _handleDatabaseException(e, stackTrace);
@@ -87,21 +83,11 @@ extension FluentExecuteSave<T extends FluentStorable> on FluentProvider<T> {
       }
     }
 
-    // SCENARIO B: No inherited context — open a new isolated local database transaction block
     try {
-      FluentLog.debug(
-        'Opening an exclusive standalone transaction block for Main-thread execution',
-        tag: '$tableName:saveExecutor',
-        context: {'tableName': tableName, 'taskId': task.id, 'batchSize': items.length, 'transactionMode': 'standalone'},
-      );
-      await db.transaction((txn) async {
-        setTransactionExecutor(txn);
+      FluentLog.debug('Opening an exclusive standalone transaction block', tag: '$tableName:saveExecutor', context: {'batchSize': items.length, 'transactionMode': 'standalone'});
 
-        try {
-          await _executeAdd(txn, items, task, parentJsons: null);
-        } finally {
-          restoreOriginalExecutor();
-        }
+      await db.transaction((txn) async {
+        await _executeAdd(txn, items, task, parentJsons: null);
       });
     } on DatabaseException catch (e, stackTrace) {
       _handleDatabaseException(e, stackTrace);

@@ -172,16 +172,30 @@ extension FluentDbActionX on FluentDbAction {
 /// reducing boilerplate code and improving readability in business logic.
 extension FluentActiveRecords<T extends FluentStorable> on T {
   /// Saves a single [item].
-  Future<void> save({bool updateIfExist = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async =>
-      await FluentDb.saveItem<T>(this, updateIfExist: updateIfExist, tag: tag, policy: policy);
+  ///
+  /// The [saveStrategy] determines how to handle records that already exist:
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  Future<void> save({FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async =>
+      await FluentDb.saveItem<T>(this, saveStrategy: saveStrategy, tag: tag, policy: policy);
 
-  /// Updates an entire record represented by [item].
+  /// Updates the record in the database with the current state of this instance.
+  ///
+  /// Note: This performs a standard update of the entity fields.
+  /// Use [updateWithRelations] if you need to synchronize nested child objects.
   Future<int> update({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async => await FluentDb.update<T>(this, tag: tag, policy: policy);
 
-  /// Updates a record represented by [item] along with its related entities.
+  /// Updates the record and synchronizes its relational graph (child/nested entities).
+  ///
+  /// This is the preferred method when your model has M2M or O2M relationships
+  /// that need to be reflected in the database.
   Future<int> updateWithRelations({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async => await FluentDb.updateWithRelations<T>(this, tag: tag, policy: policy);
 
-  /// Updates an entity instance and returns its fully synchronized state from the database.
+  /// Updates the entity and returns the fresh state from the database.
+  ///
+  /// Useful for immediate UI updates when database triggers or default column values
+  /// (like `createdAt` or auto-incremented fields) change the data during the update.
   Future<T?> updateAndFetch({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async => await FluentDb.updateAndFetch<T>(this, tag: tag, policy: policy);
 
   /// Checks if a record exists in the table.
@@ -260,9 +274,9 @@ extension FluentStorableCollectionX<T extends FluentStorable> on Iterable<T> {
   /// Safely handles mixed-type collections (e.g., saving Users and Posts together)
   /// by automatically grouping them by their runtime types and routing them
   /// to the appropriate providers.
-  Future<void> saveItems({bool updateIfExists = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
+  Future<void> saveItems({FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
     if (isEmpty) return;
-    return FluentDb.saveItems<T>(toList(growable: false), updateIfExists: updateIfExists, tag: tag, policy: policy);
+    return FluentDb.saveItems<T>(toList(growable: false), saveStrategy: saveStrategy, tag: tag, policy: policy);
   }
 
   /// Updates all items in the collection in a single batch transaction.

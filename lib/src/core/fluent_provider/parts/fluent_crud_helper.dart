@@ -101,8 +101,8 @@ extension FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
   /// * Evaluates payload properties against [tableColumns] to detect invalid attributes.
   /// * Sanitizes extraneous keys to prevent underlying SQLite syntax errors.
   /// * Fires warning telemetry via [FluentLog.warning] if any model attributes were stripped.
-  /// * Configures structural [ConflictAlgorithm] states according to the [updateIfExist] modifier.
-  void _upsertItemInTxn(Batch batch, Map<String, dynamic> map, bool updateIfExist) {
+  /// * Configures structural [FluentSaveStrategy] states according to the [strategy] modifier.
+  void _upsertItemInTxn(Batch batch, Map<String, dynamic> map, FluentSaveStrategy strategy) {
     final Set<String> allowedColumns = tableColumns;
 
     // Evaluate input map structure against the verified schema constraints
@@ -140,9 +140,27 @@ extension FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
       );
     }
 
-    final ConflictAlgorithm conflictAlgorithm = updateIfExist ? ConflictAlgorithm.replace : ConflictAlgorithm.abort;
+    switch (strategy) {
+      case FluentSaveStrategy.upsert:
+        batch.insert(tableName, sqlData, conflictAlgorithm: ConflictAlgorithm.replace);
+        break;
 
-    batch.insert(tableName, sqlData, conflictAlgorithm: conflictAlgorithm);
+      case FluentSaveStrategy.insertOnly:
+        batch.insert(tableName, sqlData, conflictAlgorithm: ConflictAlgorithm.ignore);
+        break;
+
+      case FluentSaveStrategy.patch:
+      case FluentSaveStrategy.updateOnly:
+        final String pkName = _cachedPrimaryKey?.name ?? 'id';
+        final dynamic pkValue = sqlData[pkName];
+
+        if (pkValue != null) {
+          batch.update(tableName, sqlData, where: '$pkName = ?', whereArgs: [pkValue]);
+        } else {
+          FluentLog.warning('Update strategy used but no primary key found in payload. Skipping record.', tag: '$tableName:schema:upsertItemExecutor');
+        }
+        break;
+    }
   }
 
   /// Splits an un-sanitized, generic runtime input map into a strongly decoupled, structure-aligned record tuple.

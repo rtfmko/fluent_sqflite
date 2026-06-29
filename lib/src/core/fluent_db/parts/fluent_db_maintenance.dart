@@ -24,15 +24,15 @@ extension FluentDbMaintenance on FluentDb {
   /// executes their orphan cleanup logic within a single atomic database
   /// transaction to maintain relational integrity and prevent partial cleanup state.
   Future<void> cleanOrphans(FluentGroup group) async {
-    if (group.daos.isEmpty) return;
+    if (group.providerList.isEmpty) return;
 
     FluentLog.info('Manual orphan cleanup started', tag: 'FluentDb:maintenance', context: {'dbName': group.dbName});
 
     try {
-      final Database db = group.daos.first.db;
+      final Database db = group.providerList.first.db;
 
       await db.transaction((txn) async {
-        for (final FluentProvider dao in group.daos) {
+        for (final FluentProvider dao in group.providerList) {
           if (dao is FluentRelationsMixin) {
             FluentLog.debug('Cleaning orphans for table', tag: 'FluentDb:maintenance', context: {'table': dao.tableName});
             await (dao as FluentProvider).cleanupOrphans(txn);
@@ -62,16 +62,16 @@ extension FluentDbMaintenance on FluentDb {
   /// All operations are executed within a single transaction to minimize I/O overhead
   /// and ensure global consistency across tables.
   Future<void> _runInitialMaintenance(FluentGroup group) async {
-    if (group.daos.isEmpty) return;
+    if (group.providerList.isEmpty) return;
 
-    final Database db = group.daos.first.db;
+    final Database db = group.providerList.first.db;
     FluentLog.info('Starting hygiene maintenance for group "${group.dbName}"', tag: 'FluentDb:maintenance');
     try {
       await db.transaction((txn) async {
         int expiredCleaned = 0;
         int orphansCleaned = 0;
 
-        for (final FluentProvider dao in group.daos) {
+        for (final FluentProvider dao in group.providerList) {
           // 1. TTL Cleanup
           try {
             await dao.clearExpiredItems(executor: txn);

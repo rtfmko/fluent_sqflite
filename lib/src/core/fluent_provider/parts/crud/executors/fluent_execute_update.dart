@@ -332,7 +332,7 @@ extension FluentExecuteUpdate<T extends FluentStorable> on FluentProvider<T> {
 
     try {
       return await db.transaction((txn) async {
-        setTransactionExecutor(txn);
+        final Batch batch = txn.batch();
 
         // Filter: Separate core table fields from relational keys to prevent SQL injection or schema mismatch errors
         final Map<String, dynamic> sqlFields = {};
@@ -344,7 +344,19 @@ extension FluentExecuteUpdate<T extends FluentStorable> on FluentProvider<T> {
           }
         }
 
-        final int count = await txn.update(tableName, sqlFields, where: '$pkName = ?', whereArgs: [id]);
+        batch.update(tableName, sqlFields, where: '$pkName = ?', whereArgs: [id]);
+
+        if (_hasRelations && _relationsMixin != null) {
+          FluentLog.debug('Processing deep-linked relational entity associations', tag: '$tableName:updateWithRelationsExecutor', context: {'tableName': tableName, 'taskId': task.id});
+
+          final List<T> batchList = List<T>.filled(1, item, growable: false);
+
+          await _relationsMixin!._processBatchRelations(txn, batchList, task, batch: batch, parentJsons: task.relations, currentDepth: 0, visitedTables: <String>{tableName}, syncMode: syncMode);
+        }
+
+        final List<Object?> results = await batch.commit();
+
+        final int count = (results.isNotEmpty && results.first is int) ? results.first as int : 0;
 
         if (count == 0) {
           FluentLog.warning(
@@ -353,14 +365,6 @@ extension FluentExecuteUpdate<T extends FluentStorable> on FluentProvider<T> {
             hint: 'Attempted to perform an update on a non-existent identifier. Verify record existence or evaluate if an insert operation is required.',
             context: {'tableName': tableName, 'targetRecordId': id.toString()},
           );
-        }
-
-        if (_hasRelations && _relationsMixin != null) {
-          FluentLog.debug('Processing deep-linked relational entity associations', tag: '$tableName:updateWithRelationsExecutor', context: {'tableName': tableName, 'taskId': task.id});
-
-          final List<T> batchList = List<T>.filled(1, item, growable: false);
-
-          await _relationsMixin!._processBatchRelations(txn, batchList, task, parentJsons: task.relations, currentDepth: 0, visitedTables: <String>{tableName}, syncMode: syncMode);
         }
 
         FluentLog.debug('Deep transactional model update successfully persisted', tag: '$tableName:updateWithRelationsExecutor', context: {'tableName': tableName, 'targetRecordId': id.toString()});
@@ -376,8 +380,6 @@ extension FluentExecuteUpdate<T extends FluentStorable> on FluentProvider<T> {
         context: {'tableName': tableName, 'targetRecordId': id.toString()},
       );
       rethrow;
-    } finally {
-      restoreOriginalExecutor();
     }
   }
 
@@ -402,7 +404,6 @@ extension FluentExecuteUpdate<T extends FluentStorable> on FluentProvider<T> {
 
     try {
       return await db.transaction((txn) async {
-        setTransactionExecutor(txn);
         int validItemsCount = 0;
 
         final Batch batch = txn.batch();
@@ -431,7 +432,7 @@ extension FluentExecuteUpdate<T extends FluentStorable> on FluentProvider<T> {
         if (_hasRelations && _relationsMixin != null) {
           FluentLog.debug('Processing deep-linked relational batch associations', tag: '$tableName:updateAllWithRelationsExecutor');
 
-          await _relationsMixin!._processBatchRelations(txn, items, task, parentJsons: preparedJsons, currentDepth: 0, visitedTables: <String>{tableName}, syncMode: syncMode);
+          await _relationsMixin!._processBatchRelations(txn, items, task, batch: batch, parentJsons: preparedJsons, currentDepth: 0, visitedTables: <String>{tableName}, syncMode: syncMode);
         }
 
         return validItemsCount;
@@ -445,8 +446,6 @@ extension FluentExecuteUpdate<T extends FluentStorable> on FluentProvider<T> {
         context: {'tableName': tableName, 'taskId': task.id},
       );
       rethrow;
-    } finally {
-      restoreOriginalExecutor();
     }
   }
 

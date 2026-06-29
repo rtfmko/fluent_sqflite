@@ -101,7 +101,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
         }
 
         FluentLog.debug('Saving ${serverItems.length} items to database', tag: 'sync_$tableName');
-        await saveItems(serverItems, updateIfExist: true, policy: policy.withTag('${'sync_$tableName'}_pull'));
+        await saveItems(serverItems, saveStrategy: FluentSaveStrategy.upsert, policy: policy.withTag('${'sync_$tableName'}_pull'));
 
         FluentLog.debug('Successfully pulled and saved ${serverItems.length} items', tag: 'sync_$tableName');
         return FluentSyncResult(strategy: strategy, isSuccess: true, itemsProcessed: serverItems.length);
@@ -451,7 +451,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       case FluentMergeStrategy.upsert:
       case FluentMergeStrategy.syncDeletions:
         if (itemsToInsert.isNotEmpty) {
-          await saveItems(itemsToInsert, updateIfExist: false, policy: policy);
+          await saveItems(itemsToInsert, saveStrategy: FluentSaveStrategy.insertOnly, policy: policy);
         }
 
         if (itemsToUpdate.isNotEmpty) {
@@ -485,7 +485,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       case FluentMergeStrategy.replace:
         FluentLog.info('Executing replace strategy for ${T.toString()}', tag: 'sync:merge');
         await _handleClearCache(localWhere, localWhereArgs, policy);
-        await saveItems(apiData, updateIfExist: false, policy: policy);
+        await saveItems(apiData, saveStrategy: FluentSaveStrategy.insertOnly, policy: policy);
         break;
       case FluentMergeStrategy.none:
         return;

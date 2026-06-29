@@ -14,12 +14,13 @@ import 'sqlite_config/sqlite_performance_config.dart';
 /// defining which DAO providers belong to which database file and applying
 /// a specific [SQLitePerformanceConfig] to all operations within that group.
 class FluentGroup {
-  /// The unique identifier or file name of the database (e.g., 'user_data.db').
+  /// The unique identifier or file name of the database (e.g., 'user_data').
+  /// Automatically added '.db' extension.
   final String dbName;
 
-  /// The set of Data Access Objects (DAOs) associated with this database.
+  /// The set of [FluentProvider] associated with this database.
   /// Using a [Set] ensures that each provider is registered exactly once.
-  final Set<FluentProvider> daos;
+  final Set<FluentProvider> providerList;
 
   /// The performance tuning parameters (e.g., WAL mode, cache size, journal mode)
   /// applied to the SQLite connection handle for this specific database.
@@ -28,24 +29,24 @@ class FluentGroup {
   /// Creates a [FluentGroup] configuration.
   ///
   /// * [dbName]: The unique name of the database file.
-  /// * [daos]: The collection of Data Access Objects for this database.
+  /// * [providerList]: The collection of Data Access Objects for this database.
   ///
   /// **Example:**
   /// ```dart
   /// final FluentGroup cacheGroup = FluentGroup(
-  ///   dbName: 'cache_store.db',
-  ///   daos: [
+  ///   dbName: 'cache_store',
+  ///   providerList: [
   ///     ImageCacheProvider(),
   ///     SessionProvider(),
   ///   ],
   /// );
   /// ```
-  FluentGroup({required this.dbName, required Iterable<FluentProvider> daos, this.performanceConfig = const SQLitePerformanceConfig()}) : daos = daos.toSet() {
+  FluentGroup({required this.dbName, required Iterable<FluentProvider> providerList, this.performanceConfig = const SQLitePerformanceConfig()}) : providerList = providerList.toSet() {
     _validateTableNames();
   }
 
   /// Creates a copy of this [FluentGroup] with the specified fields replaced.
-  FluentGroup copyWith({SQLitePerformanceConfig? performanceConfig}) => FluentGroup(dbName: dbName, daos: daos, performanceConfig: performanceConfig ?? this.performanceConfig);
+  FluentGroup copyWith({SQLitePerformanceConfig? performanceConfig}) => FluentGroup(dbName: dbName, providerList: providerList, performanceConfig: performanceConfig ?? this.performanceConfig);
 
   /// Performs schema validation for the current [FluentGroup] by ensuring
   /// that no two [FluentProvider] instances map to the same table name.
@@ -54,7 +55,7 @@ class FluentGroup {
   /// DAO inadvertently affect the data of another due to shared table mapping.
   void _validateTableNames() {
     final Map<String, Type> names = <String, Type>{};
-    for (final FluentProvider dao in daos) {
+    for (final FluentProvider dao in providerList) {
       final String tableName = dao.tableName;
       if (names.containsKey(tableName)) {
         final String existingClass = names[tableName].toString();
@@ -92,6 +93,6 @@ class FluentGroup {
 
   @override
   String toString() {
-    return 'FluentGroup{dbName: $dbName, daos: $daos, performanceConfig: $performanceConfig}';
+    return 'FluentGroup{dbName: $dbName, providerList: $providerList, performanceConfig: $performanceConfig}';
   }
 }

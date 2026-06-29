@@ -41,7 +41,7 @@ extension FluentDbLifecycle on FluentDb {
 
     final Map<String, FluentGroup> uniqueGroupsMap = {};
     for (final FluentGroup g in groups) {
-      if (g.daos.isEmpty) continue;
+      if (g.providerList.isEmpty) continue;
       if (uniqueGroupsMap.containsKey(g.dbName)) {
         FluentLog.warning(
           'Found duplicate FluentGroup for database "${g.dbName}".',
@@ -80,11 +80,11 @@ extension FluentDbLifecycle on FluentDb {
         FluentLog.info('Initializing database group: ${group.dbName}', tag: 'FluentDb:init');
 
         // Registration & Relational Linkage
-        for (final FluentProvider dao in group.daos) {
+        for (final FluentProvider dao in group.providerList) {
           dao.registerSelf(_register);
         }
 
-        for (final FluentProvider dao in group.daos) {
+        for (final FluentProvider dao in group.providerList) {
           if (dao case final FluentRelationsMixin relDao) {
             FluentLog.debug('Linking relations for ${dao.tableName}', tag: 'FluentDb:init');
 
@@ -95,14 +95,14 @@ extension FluentDbLifecycle on FluentDb {
                 FluentLog.debug('Fixed model binding', tag: 'FluentDb:init', context: {'table': dao.tableName, 'from': oldType.toString(), 'to': relation.modelType.toString()});
               }
             });
-            relDao.linkRelations(group.daos);
+            relDao.linkRelations(group.providerList);
           }
         }
 
         final List<String> tableNames = [];
         final Map<String, int> relationsManifest = {};
 
-        for (final FluentProvider dao in group.daos) {
+        for (final FluentProvider dao in group.providerList) {
           dao.refreshSchema();
           _verifyAndFixIntegrity(dao);
 
@@ -116,10 +116,10 @@ extension FluentDbLifecycle on FluentDb {
           }
         }
 
-        final List<FluentProvider> sortedDaos = _getSortedProviders(group.daos);
+        final List<FluentProvider> sortedDaos = _getSortedProviders(group.providerList);
         FluentLog.debug('Group "${group.dbName}": Relations established and sorted.', tag: 'FluentDb:init');
 
-        final String path = '$databasesPath/${group.dbName}';
+        final String path = '$databasesPath/${group.dbName}.db';
         performanceConfigs[group.dbName] = group.performanceConfig;
         dbTables[group.dbName] = tableNames;
         dbRelationsCount[group.dbName] = relationsManifest;
@@ -140,7 +140,7 @@ extension FluentDbLifecycle on FluentDb {
 
         dbNameWithDb[group.dbName] = db;
 
-        for (final FluentProvider dao in group.daos) {
+        for (final FluentProvider dao in group.providerList) {
           dao.setDb(db);
           dao.setDbName(group.dbName);
         }

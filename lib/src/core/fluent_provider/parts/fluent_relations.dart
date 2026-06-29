@@ -152,6 +152,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
             hint: 'Verify foreign key indexing on the child table and check for referential locking constraints.',
             context: {'childTable': childTable},
           );
+          rethrow;
         }
       }
     }
@@ -191,7 +192,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     final bool isRootBatch = sharedBatch == null;
     final Batch batch = sharedBatch ?? txn!.batch();
 
-    final bool effectiveUpdateIfExist = task.helper?.updateIfExist ?? false;
+    final FluentSaveStrategy saveStrategy = task.helper?.saveStrategy ?? FluentSaveStrategy.upsert;
     final bool hasRels = _hasRelations && _relationsMixin != null;
     final Set<String> relKeys = relationKeys;
 
@@ -228,7 +229,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
           }
         }
 
-        _upsertItemInTxn(batch, flatSqlJson, effectiveUpdateIfExist);
+        _upsertItemInTxn(batch, flatSqlJson, saveStrategy);
       }
     }
 
@@ -473,7 +474,9 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
 
       FluentTask taskToUse = task;
       if (hasIdentityConflict && !isChildAutoIncrement) {
-        taskToUse = task.copyWith(helper: TableHelper(updateIfExist: true, syncMode: syncMode));
+        taskToUse = task.copyWith(
+          helper: TableHelper(saveStrategy: FluentSaveStrategy.upsert, syncMode: syncMode),
+        );
       }
 
       if (rel.relationType == FluentDbRelationType.manyToMany) {
@@ -774,22 +777,33 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
 
       final List<Map<String, dynamic>> existingJsons = [];
 
+      final FluentSaveStrategy strategy = task.helper?.saveStrategy ?? FluentSaveStrategy.upsert;
+
       for (final FluentStorable child in existingChildrenToUpsert) {
         final Map<String, dynamic> json = childToSqlJson[child]!;
         existingJsons.add(json);
         final dynamic id = json[childPkName];
 
-        effectiveBatch.insert(childDao.tableName, json, conflictAlgorithm: ConflictAlgorithm.ignore);
+        switch (strategy) {
+          case FluentSaveStrategy.upsert:
+            effectiveBatch.insert(childDao.tableName, json, conflictAlgorithm: ConflictAlgorithm.replace);
+            break;
 
-        if (task.helper?.updateIfExist == true) {
-          final Map<String, dynamic> updateData = <String, dynamic>{};
-          final Set<String> relKeys = childDao.relationKeys;
-          for (final MapEntry<String, dynamic> entry in json.entries) {
-            if (!relKeys.contains(entry.key)) {
-              updateData[entry.key] = entry.value;
+          case FluentSaveStrategy.patch:
+          case FluentSaveStrategy.updateOnly:
+            final Map<String, dynamic> updateData = <String, dynamic>{};
+            final Set<String> relKeys = childDao.relationKeys;
+            for (final MapEntry<String, dynamic> entry in json.entries) {
+              if (!relKeys.contains(entry.key)) {
+                updateData[entry.key] = entry.value;
+              }
             }
-          }
-          effectiveBatch.update(childDao.tableName, updateData, where: '$childPkName = ?', whereArgs: [id]);
+            effectiveBatch.update(childDao.tableName, updateData, where: '$childPkName = ?', whereArgs: [id]);
+            break;
+
+          case FluentSaveStrategy.insertOnly:
+            effectiveBatch.insert(childDao.tableName, json, conflictAlgorithm: ConflictAlgorithm.ignore);
+            break;
         }
       }
 

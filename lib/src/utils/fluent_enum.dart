@@ -201,6 +201,32 @@ enum FluentDbRelationType {
   manyToMany,
 }
 
+/// Defines how the database should handle incoming data during save operations.
+///
+/// This strategy dictates the SQL conflict resolution and update logic,
+/// ensuring data integrity during synchronization from APIs or local mutations.
+enum FluentSaveStrategy {
+  /// **"Insert only"**
+  /// Adds new records. If a record already exists, it is ignored
+  /// (the database keeps the existing version).
+  insertOnly,
+
+  /// **"Replace everything" (Default)**
+  /// The "nuclear" option: if the record exists, it is completely overwritten
+  /// by the new data. If not, it is created.
+  upsert,
+
+  /// **"Update fields only"**
+  /// Updates only the specific fields provided. Does not touch other
+  /// existing data in the row. Requires the record to already exist.
+  patch,
+
+  /// **"Strict update"**
+  /// Updates existing records only. If the record does not exist in the
+  /// database, nothing happens (no creation).
+  updateOnly,
+}
+
 /// Defines the expected output format for database query results.
 ///
 /// This enum guides the [FluentProvider] on how to deserialize raw SQLite

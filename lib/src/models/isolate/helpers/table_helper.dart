@@ -38,9 +38,6 @@ class TableHelper {
   /// A map representing the key-value pairs of the record to be inserted or updated.
   final Map<String, dynamic>? dataMap;
 
-  /// If true, performs an 'UPSERT' operation instead of a standard insert.
-  final bool updateIfExist;
-
   /// If true, automatically appends a validity constraint (e.g., `is_deleted = 0`) to the query.
   final bool onlyValid;
 
@@ -72,11 +69,17 @@ class TableHelper {
   /// or merge nested entities when a parent record is synchronized.
   final FluentRelationSyncMode syncMode;
 
+  /// Defines how the database should handle incoming data during save operations.
+  ///
+  /// This strategy dictates the SQL conflict resolution and update logic,
+  /// ensuring data integrity during synchronization from APIs or local mutations.
+  final FluentSaveStrategy saveStrategy;
+
   /// The [TableHelper] constructor initializes query constraints and operational flags.
   ///
-  /// Note that `updateIfExist` and `multiple` default to `true` to prioritize
-  /// developer productivity for bulk/upsert operations, which are the most
-  /// common patterns in data-syncing applications.
+  /// Note that [saveStrategy] defaults to [FluentSaveStrategy.upsert] to prioritize
+  /// developer productivity for bulk sync operations, automatically handling
+  /// both new records (insertion) and existing ones (updates).
   TableHelper({
     this.limit,
     this.offset,
@@ -90,12 +93,12 @@ class TableHelper {
     this.sql,
     this.arguments,
     this.column,
-    this.updateIfExist = true,
     this.onlyValid = false,
     this.sortDirection,
     this.multiple = true,
     this.isHardDelete = false,
     this.syncMode = FluentRelationSyncMode.preserveLocal,
+    this.saveStrategy = FluentSaveStrategy.upsert,
   });
 
   /// Creates a copy of this [TableHelper] with the specified fields replaced.
@@ -109,7 +112,6 @@ class TableHelper {
     String? key,
     dynamic value,
     Map<String, dynamic>? dataMap,
-    bool? updateIfExist,
     bool? onlyValid,
     SortDirection? sortDirection,
     String? sql,
@@ -118,6 +120,7 @@ class TableHelper {
     String? column,
     bool? isHardDelete,
     FluentRelationSyncMode? syncMode,
+    FluentSaveStrategy? saveStrategy,
   }) => TableHelper(
     limit: limit ?? this.limit,
     offset: offset ?? this.offset,
@@ -131,12 +134,12 @@ class TableHelper {
     sql: sql ?? this.sql,
     arguments: arguments ?? this.arguments,
     column: column ?? this.column,
-    updateIfExist: updateIfExist ?? this.updateIfExist,
     onlyValid: onlyValid ?? this.onlyValid,
     sortDirection: sortDirection ?? this.sortDirection,
     multiple: multiple ?? this.multiple,
     isHardDelete: isHardDelete ?? this.isHardDelete,
     syncMode: syncMode ?? this.syncMode,
+    saveStrategy: saveStrategy ?? this.saveStrategy,
   );
 
   /// Serializes the [TableHelper] instance into a JSON-compatible map.
@@ -153,7 +156,7 @@ class TableHelper {
     'sql': sql,
     'arguments': arguments,
     'column': column,
-    'updateIfExist': updateIfExist,
+    'saveStrategy': saveStrategy.index,
     'onlyValid': onlyValid,
     'sortDirection': sortDirection?.index,
     'multiple': multiple,
@@ -175,16 +178,16 @@ class TableHelper {
     sql: map['sql'] is String ? map['sql'] as String : null,
     arguments: map['arguments'] is List ? map['arguments'] as List : null,
     column: map['column'] is String ? map['column'] as String : null,
-    updateIfExist: map['updateIfExist'] is bool ? map['updateIfExist'] as bool : false,
     onlyValid: map['onlyValid'] is bool ? map['onlyValid'] as bool : false,
     sortDirection: map['sortDirection'] is int ? SortDirection.values.elementAt(map['sortDirection'] as int) : null,
     multiple: map['multiple'] is bool ? map['multiple'] as bool : true,
     isHardDelete: map['isHardDelete'] is bool ? map['isHardDelete'] as bool : false,
     syncMode: map['syncMode'] is int ? FluentRelationSyncMode.values[map['syncMode'] as int] : FluentRelationSyncMode.preserveLocal,
+    saveStrategy: map['saveStrategy'] is int ? FluentSaveStrategy.values[map['saveStrategy'] as int] : FluentSaveStrategy.upsert,
   );
 
   @override
   String toString() {
-    return 'TableHelper{limit: $limit, offset: $offset, where: $where, whereArgs: $whereArgs, orderBy: $orderBy, id: $id, key: $key, value: $value, dataMap: $dataMap, updateIfExist: $updateIfExist, onlyValid: $onlyValid, sortDirection: $sortDirection, sql: $sql, arguments: $arguments, multiple: $multiple, column: $column, isHardDelete: $isHardDelete, syncMode: $syncMode}';
+    return 'TableHelper{limit: $limit, offset: $offset, where: $where, whereArgs: $whereArgs, orderBy: $orderBy, id: $id, key: $key, value: $value, dataMap: $dataMap, saveStrategy: $saveStrategy, onlyValid: $onlyValid, sortDirection: $sortDirection, sql: $sql, arguments: $arguments, multiple: $multiple, column: $column, isHardDelete: $isHardDelete, syncMode: $syncMode}';
   }
 }

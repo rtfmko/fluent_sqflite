@@ -42,15 +42,16 @@ part of '../../fluent_provider.dart';
 /// * [FluentEngine], which orchestrates transactional safety and task planning.
 /// * [ExecutionPolicy], which defines constraints for batch saving and concurrency.
 extension FluentSave<T extends FluentStorable> on FluentProvider<T> {
-  /// Saves or updates a single object [item] in the table [$tableName].
+  /// Saves a single object [item] into the table [$tableName].
   ///
-  /// If a record with the same primary key already exists in the database,
-  /// the behavior is determined by the [updateIfExist] flag:
-  /// * `true` — The existing record will be updated with new field values (UPSERT).
-  /// * `false` — SQLite will throw a uniqueness constraint violation exception.
+  /// The [saveStrategy] parameter determines how the database handles the insertion:
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites existing records or creates a new one.
+  /// * [FluentSaveStrategy.insertOnly] — Ignores duplicate primary keys.
+  /// * [FluentSaveStrategy.patch] — Updates only the provided fields (requires record to exist).
+  /// * [FluentSaveStrategy.updateOnly] — Updates only existing records; skips new ones.
   ///
-  /// The [policy] parameter allows overriding the default task execution settings
-  /// (e.g., forcing execution inside the background isolate or bypassing request collapsing).
+  /// The [policy] parameter allows overriding default execution settings, such as
+  /// forcing background isolate execution or bypassing request collapsing.
   ///
   /// ### Usage Example:
   /// ```dart
@@ -58,27 +59,29 @@ extension FluentSave<T extends FluentStorable> on FluentProvider<T> {
   ///
   /// await userRepository.saveItem(
   ///   user,
-  ///   updateIfExist: true,
+  ///   saveStrategy: FluentSaveStrategy.upsert,
   ///   policy: const ExecutionPolicy(useIsolate: false), // Force Main-thread execution
   /// );
   /// ```
   @internal
-  Future<void> saveItem(T item, {bool updateIfExist = false, ExecutionPolicy policy = const ExecutionPolicy()}) async {
+  Future<void> saveItem(T item, {FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert, ExecutionPolicy policy = const ExecutionPolicy()}) async {
     FluentLog.debug(
       'Request to add single item into data layer pipeline',
       tag: '$tableName:saveItem',
-      context: {'tableName': tableName, 'updateIfExist': updateIfExist, 'hasCustomPolicy': policy != const ExecutionPolicy()},
+      context: {'tableName': tableName, 'saveStrategy': saveStrategy.name, 'hasCustomPolicy': policy != const ExecutionPolicy()},
     );
 
-    await saveItems([item], updateIfExist: updateIfExist, policy: policy);
+    await saveItems([item], saveStrategy: saveStrategy, policy: policy);
   }
 
-  /// Saves or updates a collection of objects [items] in the table [$tableName].
+  /// Saves a collection of objects [items] into the table [$tableName].
   ///
-  /// This batch operation is highly optimized for performance and memory consumption.
-  /// It pre-compiles internal JSON structures before evaluating thread allocation strategies.
+  /// This operation is highly optimized for batch processing. It supports various
+  /// strategies for handling data collisions via the [saveStrategy] parameter:
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates records.
+  /// * [FluentSaveStrategy.insertOnly] — Skips records that already exist.
+  /// * [FluentSaveStrategy.patch] / [FluentSaveStrategy.updateOnly] — Partial or strict updates.
   ///
-  /// [updateIfExist] controls the SQLite resolution behavior on constraint conflicts (UPSERT).
   /// [sharedBatch] allows chaining this operation into an existing cascading transaction.
   /// [cachedJsons] bypasses the serialization loop if payload maps were computed beforehand.
   /// [policy] defines customized scheduler constraints for the underlying [FluentTask].
@@ -92,7 +95,7 @@ extension FluentSave<T extends FluentStorable> on FluentProvider<T> {
   ///
   /// await orderRepository.saveItems(
   ///   newOrders,
-  ///   updateIfExist: true,
+  ///   saveStrategy: FluentSaveStrategy.upsert,
   ///   policy: const ExecutionPolicy(
   ///     cancelIfDuplicate: true,
   ///     useIsolate: true, // Offload heavy batch parsing to background worker
@@ -100,7 +103,7 @@ extension FluentSave<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<void> saveItems(List<T> items, {bool updateIfExist = false, Batch? sharedBatch, List<Map<String, dynamic>>? cachedJsons, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<void> saveItems(List<T> items, {FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert, Batch? sharedBatch, List<Map<String, dynamic>>? cachedJsons, ExecutionPolicy policy = const ExecutionPolicy()}) {
     final int itemsLength = items.length;
     if (itemsLength == 0) return Future.value();
 
@@ -123,14 +126,14 @@ extension FluentSave<T extends FluentStorable> on FluentProvider<T> {
       maxDepth: 0,
       data: items,
       relations: effectiveJsons,
-      helper: TableHelper(updateIfExist: updateIfExist),
+      helper: TableHelper(saveStrategy: saveStrategy),
       policy: policy,
     );
 
     FluentLog.debug(
       'Request to add batch of items into data layer pipeline',
       tag: '$tableName:saveItems',
-      context: {'tableName': tableName, 'batchSize': itemsLength, 'updateIfExist': updateIfExist, 'hasSharedBatch': sharedBatch != null, 'hasCachedJsons': cachedJsons != null, 'taskId': task.id},
+      context: {'tableName': tableName, 'batchSize': itemsLength, 'saveStrategy': saveStrategy.name, 'hasSharedBatch': sharedBatch != null, 'hasCachedJsons': cachedJsons != null, 'taskId': task.id},
     );
 
     if (sharedBatch != null) {

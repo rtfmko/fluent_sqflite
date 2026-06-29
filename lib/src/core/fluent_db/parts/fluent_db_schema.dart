@@ -31,7 +31,7 @@ extension FluentDbSchema on FluentDb {
   Future<void> _syncSchema(Database db, FluentGroup group, {List<FluentProvider>? sortedProviders}) async {
     FluentLog.info('Synchronizing schema for group: "${group.dbName}"', tag: 'FluentDb:syncSchema');
 
-    final Iterable<FluentProvider<FluentStorable>> providersToSync = sortedProviders ?? group.daos;
+    final Iterable<FluentProvider<FluentStorable>> providersToSync = sortedProviders ?? group.providerList;
 
     const String rawSql = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'";
     FluentLog.sql(rawSql, tag: 'FluentDb:syncSchema');
