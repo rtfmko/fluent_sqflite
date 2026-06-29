@@ -119,4 +119,20 @@ class FluentApiResponse<T> {
   /// ```
   factory FluentApiResponse.list({required List<T?>? data, int statusCode = 200, Object? error}) =>
       FluentApiResponse._(data: data?.whereType<T>().toList() ?? <T>[], statusCode: statusCode, error: error);
+
+  /// Creates an empty response.
+  ///
+  /// Useful when [FluentExecutionStrategy.cacheOnly] is active and no API call
+  /// is required, or as a placeholder to satisfy the [reactiveSync] contract.
+  ///
+  /// ### Example:
+  /// ```dart
+  /// FluentDb.reactiveSync<User>(
+  ///   fetchFromApi: () async => FluentApiResponse.empty(),
+  ///   options: const FluentSyncOptions(
+  ///     executionStrategy: FluentExecutionStrategy.cacheOnly,
+  ///   ),
+  /// );
+  /// ```
+  factory FluentApiResponse.empty() => FluentApiResponse._(data: [], statusCode: 200, error: null);
 }

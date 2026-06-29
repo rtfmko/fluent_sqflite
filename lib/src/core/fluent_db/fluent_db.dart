@@ -973,15 +973,17 @@ class FluentDb {
   ///        ),
   ///     ),
   ///     onData: (syncEvent) => syncEvent.when(
-  ///       onLoading: () => const UserState.loading(),
-  ///       onEmpty: () => const UserState.empty(),
-  ///       onError: (err) => UserState.error(err.toString()),
-  ///       onData: (users, isCache) => UserState.success(users: users, isOffline: isCache),
+  ///       onLoading: (e) => const UserState.loading(),
+  ///       onEmpty: (e) => const UserState.empty(),
+  ///       onError: (e) => UserState.error(e.error.toString()),
+  ///       onData: (e) => UserState.success(
+  ///         user: e.singleData!,
+  ///         isOffline: e.isFromCache,
+  ///       ),
   ///     ),
   ///   );
   /// });
   /// ```
-  ///
   /// *Note: This method is non-blocking and provides a [Stream] of [FluentDataEvent].*
   static Stream<FluentDataEvent<T>> reactiveSync<T extends FluentStorable>({
     required Future<FluentApiResponse<T>> Function() fetchFromApi,

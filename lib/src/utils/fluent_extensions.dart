@@ -315,6 +315,18 @@ extension FluentDataEventX<T> on FluentDataEvent<T> {
   /// Returns `true` if the pipeline has reached its terminal ([completed]) state.
   bool get isCompleted => phase == FluentPipelinePhase.completed;
 
+  /// Returns `true` if the data currently held by the event originated from the local cache.
+  bool get isFromCache => phase == FluentPipelinePhase.cacheReady;
+
+  /// Returns `true` if the data currently held by the event originated from the remote API.
+  bool get isFromApi => phase == FluentPipelinePhase.apiReady;
+
+  /// Returns `true` if the pipeline is currently in the process of committing data to the local database.
+  bool get isSaving => phase == FluentPipelinePhase.savingToDb;
+
+  /// Returns `true` if any synchronization or background loading operation is active.
+  bool get isSyncing => isLoading || phase == FluentPipelinePhase.loadingApi;
+
   /// Returns `true` if the pipeline reached a data phase AND contains non-empty data.
   ///
   /// Ideal for quick `if` checks in business logic or UI when pattern matching is not required.
@@ -330,54 +342,66 @@ extension FluentDataEventX<T> on FluentDataEvent<T> {
 
   /// Strict functional pattern matching for event states.
   ///
-  /// Forces the handling of all possible outcomes, which prevents unhandled UI states.
-  ///
-  /// * [onData]: Executed when data is available. Provides the list and a flag indicating if it originated from the cache.
-  /// * [onEmpty]: Executed when the pipeline successfully finished but the dataset is empty.
-  /// * [onError]: Executed when an error occurred. Provides the exception object.
-  /// * [onLoading]: Executed while the pipeline is still in progress.
+  /// Forces the handling of all possible outcomes. Each callback receives the
+  /// current [FluentDataEvent], allowing you to access event properties
+  /// (like [singleData] or [errorAs]) directly within the scope.
   ///
   /// ### Example:
   /// ```dart
   /// event.when(
-  ///   onLoading: () => const CircularProgressIndicator(),
-  ///   onError: (err) => ErrorWidget(err.toString()),
-  ///   onEmpty: () => const Text('No data found'),
-  ///   onData: (items, isCache) => ListView(children: ...),
+  ///   onLoading: (e) => const CircularProgressIndicator(),
+  ///   onError: (e) => ErrorWidget(e.error.toString()),
+  ///   onEmpty: (e) => const Text('No data found'),
+  ///   onData: (e) => ListView.builder(
+  ///     itemCount: e.data.length,
+  ///     itemBuilder: (_, i) => Text(e.data[i].toString()),
+  ///   ),
   /// );
   /// ```
-  R when<R>({required R Function(List<T> data, bool isFromCache) onData, required R Function() onEmpty, required R Function(Object error) onError, required R Function() onLoading}) {
-    if (hasError) return onError(error!);
+  R when<R>({
+    required R Function(FluentDataEvent<T> event) onData,
+    required R Function(FluentDataEvent<T> event) onEmpty,
+    required R Function(FluentDataEvent<T> event) onError,
+    required R Function(FluentDataEvent<T> event) onLoading,
+  }) {
+    if (hasError) return onError(this);
 
     if (hasDataPhase) {
-      if (data.isEmpty) return onEmpty();
-      return onData(data, phase == FluentPipelinePhase.cacheReady);
+      if (data.isEmpty) return onEmpty(this);
+      return onData(this);
     }
 
-    return onLoading();
+    return onLoading(this);
   }
 
   /// Loose functional pattern matching for event states.
   ///
-  /// Useful for side-effects (like showing snackbars) where you don't need to handle every single state.
-  /// If a specific handler is null, the [orElse] callback is executed.
+  /// Useful for side-effects (like showing snackbars) where you don't need to
+  /// handle every single state. If a specific handler is null, the [orElse]
+  /// callback is executed.
   ///
   /// ### Example:
   /// ```dart
   /// event.maybeWhen(
-  ///   onError: (err) => showSnackBar(err.toString()),
-  ///   orElse: () => print('Doing nothing for this phase'),
+  ///   onError: (e) => showSnackBar(e.error.toString()),
+  ///   orElse: (e) => print('State: ${e.phase}'),
   /// );
   /// ```
-  R maybeWhen<R>({R Function(List<T> data, bool isFromCache)? onData, R Function()? onEmpty, R Function(Object error)? onError, R Function()? onLoading, required R Function() orElse}) {
-    if (hasError) return onError != null ? onError(error!) : orElse();
+  R maybeWhen<R>({
+    R Function(FluentDataEvent<T> event)? onData,
+    R Function(FluentDataEvent<T> event)? onEmpty,
+    R Function(FluentDataEvent<T> event)? onError,
+    R Function(FluentDataEvent<T> event)? onLoading,
+    required R Function(FluentDataEvent<T> event) orElse,
+  }) {
+    if (hasError) return onError != null ? onError(this) : orElse(this);
 
     if (hasDataPhase) {
-      if (data.isEmpty) return onEmpty != null ? onEmpty() : orElse();
-      return onData != null ? onData(data, phase == FluentPipelinePhase.cacheReady) : orElse();
+      if (data.isEmpty) return onEmpty != null ? onEmpty(this) : orElse(this);
+      return onData != null ? onData(this) : orElse(this);
     }
 
-    return onLoading != null ? onLoading() : orElse();
+    return onLoading != null ? onLoading(this) : orElse(this);
   }
 
   /// Safely casts and returns the pipeline error if it matches the specified type [E], otherwise returns `null`.
