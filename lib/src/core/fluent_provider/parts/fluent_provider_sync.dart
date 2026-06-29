@@ -236,12 +236,12 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     final Stopwatch pipelineTimer = Stopwatch()..start();
     FluentLog.info('Initiating sync pipeline', tag: 'sync:pipeline', context: {'model': T.toString()});
 
-    yield FluentDataEvent(phase: FluentPipelinePhase.idle);
+    yield FluentDataEvent(phase: FluentPipelinePhase.idle, executionMs: pipelineTimer.elapsedMilliseconds);
 
     List<T> localData = [];
 
     if (options.executionStrategy != FluentExecutionStrategy.apiOnly) {
-      yield FluentDataEvent(phase: FluentPipelinePhase.loadingCache);
+      yield FluentDataEvent(phase: FluentPipelinePhase.loadingCache, executionMs: pipelineTimer.elapsedMilliseconds);
 
       if (options.loadOnlyValidCache) {
         localData = await findValidItems(
@@ -257,16 +257,16 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
         localData = await find(where: localWhere, whereArgs: localWhereArgs, limit: options.limit, maxDepth: options.maxDepth, policy: policy, ignoreLazy: options.ignoreLazy);
       }
       FluentLog.debug('Cache loaded', tag: 'sync:cache', context: {'count': localData.length, 'model': T.toString(), 'ms': pipelineTimer.elapsedMilliseconds});
-      yield FluentDataEvent(phase: FluentPipelinePhase.cacheReady, data: localData);
+      yield FluentDataEvent(phase: FluentPipelinePhase.cacheReady, data: localData, executionMs: pipelineTimer.elapsedMilliseconds);
 
       if (options.executionStrategy == FluentExecutionStrategy.cacheOnly) {
         FluentLog.info('Execution strategy is cacheOnly. Terminating pipeline.', tag: 'sync:pipeline');
-        yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: localData);
+        yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: localData, executionMs: pipelineTimer.elapsedMilliseconds);
         return;
       }
     }
 
-    yield FluentDataEvent(phase: FluentPipelinePhase.loadingApi);
+    yield FluentDataEvent(phase: FluentPipelinePhase.loadingApi, executionMs: pipelineTimer.elapsedMilliseconds);
 
     FluentApiResponse<T>? response;
     int attempts = 0;
@@ -307,18 +307,18 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       switch (behaviorToUse) {
         case FluentApiErrorBehavior.clearCacheAndYieldError:
           FluentLog.info('Clearing cache due to error', tag: 'sync:error');
-          yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb);
+          yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb, executionMs: pipelineTimer.elapsedMilliseconds);
           await _handleClearCache(localWhere, localWhereArgs, policy);
-          yield FluentDataEvent(phase: FluentPipelinePhase.error, error: lastError);
+          yield FluentDataEvent(phase: FluentPipelinePhase.error, error: lastError, executionMs: pipelineTimer.elapsedMilliseconds);
           break;
 
         case FluentApiErrorBehavior.preserveCacheAndComplete:
-          yield FluentDataEvent(phase: FluentPipelinePhase.completed, error: lastError);
+          yield FluentDataEvent(phase: FluentPipelinePhase.completed, error: lastError, executionMs: pipelineTimer.elapsedMilliseconds);
           break;
 
         case FluentApiErrorBehavior.yieldError:
         default:
-          yield FluentDataEvent(phase: FluentPipelinePhase.error, error: lastError);
+          yield FluentDataEvent(phase: FluentPipelinePhase.error, error: lastError, executionMs: pipelineTimer.elapsedMilliseconds);
           break;
       }
       return;
@@ -329,10 +329,10 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     if (apiData.isEmpty) {
       FluentLog.info('Empty API response', tag: 'sync:api');
       if (options.emptyApiBehavior == FluentEmptyApiBehavior.clearCache) {
-        yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb);
+        yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb, executionMs: pipelineTimer.elapsedMilliseconds);
         await _handleClearCache(localWhere, localWhereArgs, policy);
       }
-      yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: []);
+      yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: [], executionMs: pipelineTimer.elapsedMilliseconds);
       return;
     }
 
@@ -340,18 +340,14 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       apiData = await options.beforeSave?.call(apiData) ?? [];
     }
 
-    final bool yieldBeforeSave = options.executionStrategy == FluentExecutionStrategy.cacheThenApiYieldThenSave || options.executionStrategy == FluentExecutionStrategy.apiOnly;
-
-    if (yieldBeforeSave) {
-      yield FluentDataEvent(phase: FluentPipelinePhase.apiReady, data: apiData);
-    }
+    Future<void>? persistenceFuture;
 
     if (options.mergeStrategy == FluentMergeStrategy.none) {
       FluentLog.info('Merge strategy is none. Skipping database persistence.', tag: 'sync:persistence');
     } else {
       FluentLog.info('Initiating database persistence', tag: 'sync:persistence');
 
-      final Future<void> persistenceFuture =
+      persistenceFuture =
           _executeMergeStrategy(
             strategy: options.mergeStrategy,
             relationSyncMode: options.relationSyncMode,
@@ -362,15 +358,21 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
           ).catchError((Object e, StackTrace st) {
             FluentLog.error('Background DB persistence failed', e, st, tag: 'sync:persistence:error');
           });
+    }
 
-      if (options.awaitPersistence) {
-        yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb, data: apiData);
-        await persistenceFuture;
-      }
+    final bool yieldBeforeSave = options.executionStrategy == FluentExecutionStrategy.cacheThenApiYieldThenSave || options.executionStrategy == FluentExecutionStrategy.apiOnly;
+
+    if (yieldBeforeSave) {
+      yield FluentDataEvent(phase: FluentPipelinePhase.apiReady, data: apiData, executionMs: pipelineTimer.elapsedMilliseconds);
+    }
+
+    if (persistenceFuture != null && options.awaitPersistence) {
+      yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb, data: apiData, executionMs: pipelineTimer.elapsedMilliseconds);
+      await persistenceFuture;
     }
 
     if (!yieldBeforeSave) {
-      yield FluentDataEvent(phase: FluentPipelinePhase.apiReady, data: apiData);
+      yield FluentDataEvent(phase: FluentPipelinePhase.apiReady, data: apiData, executionMs: pipelineTimer.elapsedMilliseconds);
     }
 
     if (options.onSuccess != null) {
@@ -380,7 +382,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     pipelineTimer.stop();
     FluentLog.info('Sync completed successfully', tag: 'sync:pipeline', context: {'total_ms': pipelineTimer.elapsedMilliseconds});
 
-    yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: apiData);
+    yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: apiData, executionMs: pipelineTimer.elapsedMilliseconds);
   }
 
   /// Executes a cleanup operation on the local database for the entity type [T].

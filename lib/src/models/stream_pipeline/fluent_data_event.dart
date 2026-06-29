@@ -23,9 +23,15 @@ class FluentDataEvent<T> {
   /// An error object if the pipeline entered the [FluentPipelinePhase.error] state.
   final Object? error;
 
+  /// The time elapsed since the synchronization pipeline started, in milliseconds.
+  ///
+  /// This provides a precise metric for performance tracking and profiling
+  /// of the synchronization process at each phase.
+  final int? executionMs;
+
   /// Returns `true` if the pipeline has finished its execution (successfully or not).
   bool get isTerminal => phase == FluentPipelinePhase.completed || phase == FluentPipelinePhase.error;
 
   /// Creates a [FluentDataEvent].
-  const FluentDataEvent({required this.phase, this.data = const [], this.error});
+  const FluentDataEvent({required this.phase, this.data = const [], this.error, this.executionMs});
 }
