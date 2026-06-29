@@ -233,6 +233,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     List<Object?>? localWhereArgs,
     ExecutionPolicy policy = const ExecutionPolicy(),
   }) async* {
+    final Stopwatch pipelineTimer = Stopwatch()..start();
     FluentLog.info('Initiating sync pipeline', tag: 'sync:pipeline', context: {'model': T.toString()});
 
     yield FluentDataEvent(phase: FluentPipelinePhase.idle);
@@ -255,7 +256,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       } else {
         localData = await find(where: localWhere, whereArgs: localWhereArgs, limit: options.limit, maxDepth: options.maxDepth, policy: policy, ignoreLazy: options.ignoreLazy);
       }
-      FluentLog.debug('Cache loaded', tag: 'sync:cache', context: {'count': localData.length, 'model': T.toString()});
+      FluentLog.debug('Cache loaded', tag: 'sync:cache', context: {'count': localData.length, 'model': T.toString(), 'ms': pipelineTimer.elapsedMilliseconds});
       yield FluentDataEvent(phase: FluentPipelinePhase.cacheReady, data: localData);
 
       if (options.executionStrategy == FluentExecutionStrategy.cacheOnly) {
@@ -275,7 +276,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       try {
         response = await fetchFromApi();
         if (options.validStatusCodes.contains(response.statusCode)) {
-          FluentLog.debug('API fetch success', tag: 'sync:api', context: {'status': response.statusCode});
+          FluentLog.debug('API fetch success', tag: 'sync:api', context: {'status': response.statusCode, 'ms': pipelineTimer.elapsedMilliseconds});
           lastError = null;
           break;
         } else {
@@ -348,17 +349,24 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     if (options.mergeStrategy == FluentMergeStrategy.none) {
       FluentLog.info('Merge strategy is none. Skipping database persistence.', tag: 'sync:persistence');
     } else {
-      FluentLog.info('Saving ${apiData.length} records to DB', tag: 'sync:persistence');
-      yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb, data: apiData);
+      FluentLog.info('Initiating database persistence', tag: 'sync:persistence');
 
-      await _executeMergeStrategy(
-        strategy: options.mergeStrategy,
-        relationSyncMode: options.relationSyncMode,
-        apiData: apiData,
-        localWhere: localWhere,
-        localWhereArgs: localWhereArgs,
-        policy: policy,
-      );
+      final Future<void> persistenceFuture =
+          _executeMergeStrategy(
+            strategy: options.mergeStrategy,
+            relationSyncMode: options.relationSyncMode,
+            apiData: apiData,
+            localWhere: localWhere,
+            localWhereArgs: localWhereArgs,
+            policy: policy,
+          ).catchError((Object e, StackTrace st) {
+            FluentLog.error('Background DB persistence failed', e, st, tag: 'sync:persistence:error');
+          });
+
+      if (options.awaitPersistence) {
+        yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb, data: apiData);
+        await persistenceFuture;
+      }
     }
 
     if (!yieldBeforeSave) {
@@ -369,7 +377,9 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       options.onSuccess?.call(apiData);
     }
 
-    FluentLog.info('Sync completed successfully', tag: 'sync:pipeline');
+    pipelineTimer.stop();
+    FluentLog.info('Sync completed successfully', tag: 'sync:pipeline', context: {'total_ms': pipelineTimer.elapsedMilliseconds});
+
     yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: apiData);
   }
 

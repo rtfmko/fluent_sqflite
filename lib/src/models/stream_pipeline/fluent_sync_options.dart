@@ -92,6 +92,10 @@ class FluentSyncOptions<T> {
   /// If `true`, loads all relations immediately, bypassing lazy-loading.
   final bool ignoreLazy;
 
+  /// Should the pipeline wait for database operations to finish before completing?
+  /// Set to `false` to perform UI-blocking DB saves in the background.
+  final bool awaitPersistence;
+
   /// Creates a [FluentSyncOptions] instance with defined synchronization behavior.
   ///
   /// The pipeline processes the request as follows:
@@ -121,5 +125,6 @@ class FluentSyncOptions<T> {
     this.maxDepth = 1,
     this.sortDirection,
     this.ignoreLazy = false,
+    this.awaitPersistence = true,
   });
 }
