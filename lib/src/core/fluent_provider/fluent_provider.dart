@@ -494,7 +494,7 @@ abstract class FluentProvider<T extends FluentStorable> {
   /// Throws [ProviderNotFoundException] if the provider for the given type
   /// is not registered in this specific database group.
   @internal
-  FluentProvider<T> relatedProvider(Type type) => FluentDb.providerForType(type, dbName: dbName) as FluentProvider<T>;
+  FluentProvider relatedProvider(Type type) => FluentDb.providerForType(type, dbName: dbName);
 
   /// Self-registers this provider instance with the central system registry.
   ///
