@@ -420,6 +420,8 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
         tag: 'debug',
         hint: 'Debug',
         context: {
+          'task.dbName': task.dbName,
+          'task': task.toString(),
           'childDao.dbName': childDao.dbName,
           'childDao.tableName': childDao.tableName,
           'childDao.hashCode': childDao.hashCode,
