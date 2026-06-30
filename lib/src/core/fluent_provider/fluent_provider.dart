@@ -505,8 +505,9 @@ abstract class FluentProvider<T extends FluentStorable> {
   }
 
   @override
-  bool operator ==(Object other) => identical(this, other) || other is FluentProvider && runtimeType == other.runtimeType && tableName == other.tableName;
+  bool operator ==(Object other) =>
+      identical(this, other) || other is FluentProvider && runtimeType == other.runtimeType && _dbName == other._dbName && _db == other._db && tableName == other.tableName;
 
   @override
-  int get hashCode => runtimeType.hashCode ^ tableName.hashCode;
+  int get hashCode => Object.hash(_dbName, _db, tableName);
 }
