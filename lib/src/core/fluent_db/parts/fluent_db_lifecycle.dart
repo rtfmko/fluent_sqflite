@@ -41,6 +41,20 @@ extension FluentDbLifecycle on FluentDb {
   /// 6. **Maintenance:** Triggers an initial global purge of soft-deleted records.
   ///
   /// [isRetry] acts as a safety guard to prevent infinite loops during recovery in dev mode.
+  ///
+  /// ### Usage:
+  /// ```dart
+  /// await FluentDb.init([
+  ///   FluentGroup(
+  ///     dbKey: AppDatabases.cache,
+  ///     providerList: [GoodsProvider(), PriceProvider()],
+  ///   ),
+  ///   FluentGroup(
+  ///     dbKey: AppDatabases.user,
+  ///     providerList: [UserProvider(), ProfileProvider()],
+  ///   ),
+  /// ]);
+  /// ```
   Future<void> init(Iterable<FluentGroup> groups, {Duration? purgeDuration, bool isDev = false, bool isRetry = false}) async {
     if (_isInitialized) return;
 
@@ -48,16 +62,16 @@ extension FluentDbLifecycle on FluentDb {
     final Map<String, FluentGroup> uniqueGroupsMap = {};
     for (final FluentGroup g in groups) {
       if (g.providerList.isEmpty) continue;
-      if (uniqueGroupsMap.containsKey(g.dbName)) {
+      if (uniqueGroupsMap.containsKey(g.dbKey.dbName)) {
         FluentLog.warning(
-          'Found duplicate FluentGroup for database "${g.dbName}".',
+          'Found duplicate FluentGroup for database "${g.dbKey.dbName}".',
           tag: 'FluentDb:init',
           hint:
               'You are trying to register two different FluentGroup objects with the same dbName. '
               'Only the first one will be used. Consider merging all DAOs into a single FluentGroup for this database.',
         );
       } else {
-        uniqueGroupsMap[g.dbName] = g;
+        uniqueGroupsMap[g.dbKey.dbName] = g;
       }
     }
 
@@ -82,9 +96,9 @@ extension FluentDbLifecycle on FluentDb {
     final String databasesPath = await getDatabasesPath();
 
     for (final FluentGroup group in activeGroups) {
-      if (!_isSafeDbName(group.dbName)) {
+      if (!_isSafeDbName(group.dbKey.dbName)) {
         final FluentDatabaseNameException exception = FluentDatabaseNameException(
-          'Invalid database name: "${group.dbName}". '
+          'Invalid database name: "${group.dbKey.dbName}". '
           'Database names must contain only alphanumeric characters and underscores (a-z, A-Z, 0-9, _).',
           stackTrace: StackTrace.current,
         );
@@ -97,18 +111,18 @@ extension FluentDbLifecycle on FluentDb {
           hint:
               'Rename your FluentGroup to use only letters, numbers, or underscores. '
               'Avoid using special characters, spaces, or path separators (/, \\).',
-          context: {'dbName': group.dbName},
+          context: {'dbName': group.dbKey.dbName},
         );
 
         throw exception;
       }
 
       try {
-        FluentLog.info('Initializing database group: ${group.dbName}', tag: 'FluentDb:init');
+        FluentLog.info('Initializing database group: ${group.dbKey.dbName}', tag: 'FluentDb:init');
 
         // Registration & Relational Linkage
         for (final FluentProvider dao in group.providerList) {
-          dao.setDbName(group.dbName);
+          dao.setDbName(group.dbKey.dbName);
           dao.registerSelf(_register);
         }
 
@@ -132,7 +146,7 @@ extension FluentDbLifecycle on FluentDb {
 
         for (final FluentProvider dao in group.providerList) {
           dao.refreshSchema();
-          _verifyAndFixIntegrity(dao, group.dbName);
+          _verifyAndFixIntegrity(dao, group.dbKey.dbName);
 
           tableNames.add(dao.tableName);
 
@@ -145,53 +159,53 @@ extension FluentDbLifecycle on FluentDb {
         }
 
         final List<FluentProvider> sortedDaos = _getSortedProviders(group.providerList);
-        FluentLog.debug('Group "${group.dbName}": Relations established and sorted.', tag: 'FluentDb:init');
+        FluentLog.debug('Group "${group.dbKey.dbName}": Relations established and sorted.', tag: 'FluentDb:init');
 
-        final String path = '$databasesPath/${group.dbName}.db';
-        performanceConfigs[group.dbName] = group.performanceConfig;
-        dbTables[group.dbName] = tableNames;
-        dbRelationsCount[group.dbName] = relationsManifest;
+        final String path = '$databasesPath/${group.dbKey.dbName}.db';
+        performanceConfigs[group.dbKey.dbName] = group.performanceConfig;
+        dbTables[group.dbKey.dbName] = tableNames;
+        dbRelationsCount[group.dbKey.dbName] = relationsManifest;
 
-        FluentLog.debug('Opening database: ${group.dbName}', tag: 'FluentDb:init', context: {'path': path});
+        FluentLog.debug('Opening database: ${group.dbKey.dbName}', tag: 'FluentDb:init', context: {'path': path});
 
         final Database db = await openDatabase(
           path,
           version: 1,
           onConfigure: (db) => _applyPerformanceConfig(db, group.performanceConfig, isFullConfig: true),
           onCreate: (db, version) async {
-            FluentLog.info('First run for ${group.dbName}. Building initial schema...', tag: 'FluentDb:init');
+            FluentLog.info('First run for ${group.dbKey.dbName}. Building initial schema...', tag: 'FluentDb:init');
             for (final FluentProvider dao in sortedDaos) {
               await dao.createTable(db);
             }
           },
         );
 
-        dbNameWithDb[group.dbName] = db;
+        dbNameWithDb[group.dbKey.dbName] = db;
 
         for (final FluentProvider dao in group.providerList) {
           dao.setDb(db);
         }
 
-        FluentLog.info('Syncing schema and running maintenance for ${group.dbName}', tag: 'FluentDb:init');
+        FluentLog.info('Syncing schema and running maintenance for ${group.dbKey.dbName}', tag: 'FluentDb:init');
         await _syncSchema(db, group, sortedProviders: sortedDaos);
         await _runInitialMaintenance(group);
       } catch (e, st) {
         FluentLog.error(
-          'Critical error while initializing group "${group.dbName}"',
+          'Critical error while initializing group "${group.dbKey.dbName}"',
           e,
           st,
           tag: 'FluentDb:init',
           hint: 'Check the database schema definitions or migration scripts for potential syntax errors or constraint violations.',
-          context: {'dbName': group.dbName, 'isRetry': isRetry},
+          context: {'dbName': group.dbKey.dbName, 'isRetry': isRetry},
         );
 
         if (_isDevMod && !isRetry) {
           FluentLog.warning(
-            'DevMode: Recreating database "${group.dbName}"...',
+            'DevMode: Recreating database "${group.dbKey.dbName}"...',
             tag: 'FluentDb:init',
             hint: 'The initialization failure triggered an automatic wipe of the local database file to restore schema integrity.',
           );
-          await databaseFactory.deleteDatabase('$databasesPath/${group.dbName}');
+          await databaseFactory.deleteDatabase('$databasesPath/${group.dbKey.dbName}');
           reset();
           return await init(groups, isDev: isDev, isRetry: true);
         } else {
@@ -199,7 +213,7 @@ extension FluentDbLifecycle on FluentDb {
           rethrow;
         }
       }
-      FluentLog.debug('Group "${group.dbName}" initialized successfully', tag: 'FluentDb:init', context: {'elapsed': stopwatch.elapsedMilliseconds});
+      FluentLog.debug('Group "${group.dbKey.dbName}" initialized successfully', tag: 'FluentDb:init', context: {'elapsed': stopwatch.elapsedMilliseconds});
     }
     FluentLog.info('Registry: Spawning FluentDb...', tag: 'FluentDb:init');
 

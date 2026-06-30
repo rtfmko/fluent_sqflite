@@ -184,7 +184,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     final int nextDepth = currentDepth + 1;
     final int maxAllowedDepth = (task.action != FluentDbAction.save) ? (task.maxDepth != 0 ? task.maxDepth : 99) : 99;
     if (nextDepth > maxAllowedDepth) {
-      FluentLog.warning('Relational depth-limit exceeded; aborting sub-graph hydration', tag: '$tableName:executeAddExecutor', context: {'currentDepth': currentDepth, 'maxDepth': maxAllowedDepth});
+      FluentLog.debug('Relational depth-limit exceeded; aborting sub-graph hydration', tag: '$tableName:executeAddExecutor', context: {'currentDepth': currentDepth, 'maxDepth': maxAllowedDepth});
       return;
     }
 

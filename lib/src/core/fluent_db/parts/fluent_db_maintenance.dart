@@ -26,7 +26,7 @@ extension FluentDbMaintenance on FluentDb {
   Future<void> cleanOrphans(FluentGroup group) async {
     if (group.providerList.isEmpty) return;
 
-    FluentLog.info('Manual orphan cleanup started', tag: 'FluentDb:maintenance', context: {'dbName': group.dbName});
+    FluentLog.info('Manual orphan cleanup started', tag: 'FluentDb:maintenance', context: {'dbName': group.dbKey.dbName});
 
     try {
       final Database db = group.providerList.first.db;
@@ -40,10 +40,10 @@ extension FluentDbMaintenance on FluentDb {
         }
       });
 
-      FluentLog.info('Group "${group.dbName}": All orphans removed successfully.', tag: 'FluentDb:maintenance');
+      FluentLog.info('Group "${group.dbKey.dbName}": All orphans removed successfully.', tag: 'FluentDb:maintenance');
     } catch (e, st) {
       FluentLog.error(
-        'Failed to execute manual orphan cleanup for "${group.dbName}"',
+        'Failed to execute manual orphan cleanup for "${group.dbKey.dbName}"',
         e,
         st,
         tag: 'FluentDb:maintenance',
@@ -65,7 +65,7 @@ extension FluentDbMaintenance on FluentDb {
     if (group.providerList.isEmpty) return;
 
     final Database db = group.providerList.first.db;
-    FluentLog.info('Starting hygiene maintenance for group "${group.dbName}"', tag: 'FluentDb:maintenance');
+    FluentLog.info('Starting hygiene maintenance for group "${group.dbKey.dbName}"', tag: 'FluentDb:maintenance');
     try {
       await db.transaction((txn) async {
         int expiredCleaned = 0;
@@ -74,7 +74,7 @@ extension FluentDbMaintenance on FluentDb {
         for (final FluentProvider dao in group.providerList) {
           // 1. TTL Cleanup
           try {
-            await dao.clearExpiredItems(executor: txn, dbName: group.dbName);
+            await dao.clearExpiredItems(executor: txn, dbName: group.dbKey.dbName);
             expiredCleaned++;
           } catch (e, st) {
             FluentLog.error('Failed to clear expired items in "${dao.tableName}"', e, st, tag: 'FluentDb:maintenance', hint: 'Check if the TTL column is indexed properly for performance.');
@@ -94,13 +94,13 @@ extension FluentDbMaintenance on FluentDb {
         FluentLog.debug(
           'Maintenance routine completed for group',
           tag: 'FluentDb:maintenance',
-          context: {'dbName': group.dbName, 'tablesProcessedTTL': expiredCleaned, 'tablesProcessedOrphans': orphansCleaned},
+          context: {'dbName': group.dbKey.dbName, 'tablesProcessedTTL': expiredCleaned, 'tablesProcessedOrphans': orphansCleaned},
         );
       });
 
-      FluentLog.info('Maintenance for "${group.dbName}" completed.', tag: 'FluentDb:maintenance');
+      FluentLog.info('Maintenance for "${group.dbKey.dbName}" completed.', tag: 'FluentDb:maintenance');
     } catch (e, st) {
-      FluentLog.error('Critical storage error during maintenance of "${group.dbName}"', e, st, tag: 'FluentDb:maintenance');
+      FluentLog.error('Critical storage error during maintenance of "${group.dbKey.dbName}"', e, st, tag: 'FluentDb:maintenance');
       if (_isDevMod) rethrow;
     }
   }

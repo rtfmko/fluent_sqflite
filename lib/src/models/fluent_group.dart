@@ -5,6 +5,7 @@
 import '../core/core.dart';
 import '../core/fluent_sqlite_internal.dart';
 import '../exceptions/exceptions.dart';
+import '../interfaces/interfaces.dart';
 import 'sqlite_config/sqlite_performance_config.dart';
 
 /// Represents a logical grouping of database providers (DAOs) associated
@@ -14,9 +15,13 @@ import 'sqlite_config/sqlite_performance_config.dart';
 /// defining which DAO providers belong to which database file and applying
 /// a specific [SQLitePerformanceConfig] to all operations within that group.
 class FluentGroup {
-  /// The unique identifier or file name of the database (e.g., 'user_data').
-  /// Automatically added '.db' extension.
-  final String dbName;
+  /// The unique identifier for this database instance.
+  ///
+  /// The [FluentDbKey] defines the underlying file name for the database
+  /// (e.g., using an [Enum] or a custom [Class] implementation).
+  /// The system will automatically append the '.db' extension during
+  /// the initialization process.
+  final FluentDbKey dbKey;
 
   /// The set of [FluentProvider] associated with this database.
   /// Using a [Set] ensures that each provider is registered exactly once.
@@ -34,19 +39,19 @@ class FluentGroup {
   /// **Example:**
   /// ```dart
   /// final FluentGroup cacheGroup = FluentGroup(
-  ///   dbName: 'cache_store',
+  ///   dbKey: AppDatabases.cache,
   ///   providerList: [
   ///     ImageCacheProvider(),
   ///     SessionProvider(),
   ///   ],
   /// );
   /// ```
-  FluentGroup({required this.dbName, required Iterable<FluentProvider> providerList, this.performanceConfig = const SQLitePerformanceConfig()}) : providerList = providerList.toSet() {
+  FluentGroup({required this.dbKey, required Iterable<FluentProvider> providerList, this.performanceConfig = const SQLitePerformanceConfig()}) : providerList = providerList.toSet() {
     _validateTableNames();
   }
 
   /// Creates a copy of this [FluentGroup] with the specified fields replaced.
-  FluentGroup copyWith({SQLitePerformanceConfig? performanceConfig}) => FluentGroup(dbName: dbName, providerList: providerList, performanceConfig: performanceConfig ?? this.performanceConfig);
+  FluentGroup copyWith({SQLitePerformanceConfig? performanceConfig}) => FluentGroup(dbKey: dbKey, providerList: providerList, performanceConfig: performanceConfig ?? this.performanceConfig);
 
   /// Performs schema validation for the current [FluentGroup] by ensuring
   /// that no two [FluentProvider] instances map to the same table name.
@@ -86,13 +91,13 @@ class FluentGroup {
   }
 
   @override
-  bool operator ==(Object other) => identical(this, other) || other is FluentGroup && runtimeType == other.runtimeType && dbName == other.dbName;
+  bool operator ==(Object other) => identical(this, other) || other is FluentGroup && runtimeType == other.runtimeType && dbKey.dbName == other.dbKey.dbName;
 
   @override
-  int get hashCode => dbName.hashCode;
+  int get hashCode => dbKey.dbName.hashCode;
 
   @override
   String toString() {
-    return 'FluentGroup{dbName: $dbName, providerList: $providerList, performanceConfig: $performanceConfig}';
+    return 'FluentGroup{dbName: $dbKey.dbName, providerList: $providerList, performanceConfig: $performanceConfig}';
   }
 }

@@ -173,47 +173,169 @@ extension FluentDbActionX on FluentDbAction {
 extension FluentActiveRecords<T extends FluentStorable> on T {
   /// Saves a single [item].
   ///
-  /// The [saveStrategy] determines how to handle records that already exist:
+  /// **The [saveStrategy] determines how to handle records that already exist:**
   /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
   /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
   /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
-  Future<void> save({FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert, Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async =>
-      await FluentDb.saveItem<T>(this, saveStrategy: saveStrategy, tag: tag, policy: policy, dbName: dbName);
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  Future<void> save({FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert, Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) async =>
+      await FluentDb.saveItem<T>(this, saveStrategy: saveStrategy, tag: tag, policy: policy, dbKey: dbKey);
 
   /// Updates the record in the database with the current state of this instance.
   ///
-  /// Note: This performs a standard update of the entity fields.
-  /// Use [updateWithRelations] if you need to synchronize nested child objects.
-  Future<int> update({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async => await FluentDb.update<T>(this, tag: tag, policy: policy, dbName: dbName);
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  ///
+  /// *Note: This performs a standard update of the entity fields.
+  /// Use [updateWithRelations] if you need to synchronize nested child objects.*
+  Future<int> update({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) async => await FluentDb.update<T>(this, tag: tag, policy: policy, dbKey: dbKey);
 
   /// Updates the record and synchronizes its relational graph (child/nested entities).
   ///
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  ///
   /// This is the preferred method when your model has M2M or O2M relationships
   /// that need to be reflected in the database.
-  Future<int> updateWithRelations({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async =>
-      await FluentDb.updateWithRelations<T>(this, tag: tag, policy: policy, dbName: dbName);
+  Future<int> updateWithRelations({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) async =>
+      await FluentDb.updateWithRelations<T>(this, tag: tag, policy: policy, dbKey: dbKey);
 
   /// Updates the entity and returns the fresh state from the database.
   ///
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  ///
   /// Useful for immediate UI updates when database triggers or default column values
   /// (like `createdAt` or auto-incremented fields) change the data during the update.
-  Future<T?> updateAndFetch({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async => await FluentDb.updateAndFetch<T>(this, tag: tag, policy: policy, dbName: dbName);
+  Future<T?> updateAndFetch({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) async =>
+      await FluentDb.updateAndFetch<T>(this, tag: tag, policy: policy, dbKey: dbKey);
 
   /// Checks if a record exists in the table.
-  Future<bool> exists({ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async => await FluentDb.exists<T>(primaryKeyValue, policy: policy);
+  ///
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  Future<bool> exists({ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) async => await FluentDb.exists<T>(primaryKeyValue, policy: policy);
 
   /// Deletes a specific record instance.
-  Future<int> delete({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async => await FluentDb.delete<T>(this, tag: tag, policy: policy, dbName: dbName);
+  ///
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  Future<int> delete({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) async => await FluentDb.delete<T>(this, tag: tag, policy: policy, dbKey: dbKey);
 
   /// Restores a previously soft-deleted object instance.
-  Future<int> restore({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async => await FluentDb.restore<T>(this, tag: tag, policy: policy, dbName: dbName);
+  ///
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  Future<int> restore({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) async => await FluentDb.restore<T>(this, tag: tag, policy: policy, dbKey: dbKey);
 
   /// Restores a soft-deleted entity instance and returns its refreshed state from the database.
-  Future<T?> restoreAndFetch({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async =>
-      await FluentDb.restoreAndFetch<T>(this, tag: tag, policy: policy, dbName: dbName);
+  ///
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  Future<T?> restoreAndFetch({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) async =>
+      await FluentDb.restoreAndFetch<T>(this, tag: tag, policy: policy, dbKey: dbKey);
 
   /// Permanently removes an object instance from the database, bypassing any soft-delete mechanisms.
-  Future<int> hardDelete({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async => await FluentDb.hardDelete<T>(this, tag: tag, policy: policy, dbName: dbName);
+  ///
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  Future<int> hardDelete({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) async => await FluentDb.hardDelete<T>(this, tag: tag, policy: policy, dbKey: dbKey);
 
   /// Hydrates lazy-loaded relational associations directly on the model instance.
   ///
@@ -234,14 +356,23 @@ extension FluentActiveRecords<T extends FluentStorable> on T {
   /// final Post firstPost = user.posts.first;
   /// print(firstPost.comments.first.text);
   /// ```
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
   ///
   /// [maxDepth] defines how deep into the relationship graph the hydration
   /// process should traverse to load dependent entities.
-  Future<void> ensureLoaded<R extends FluentStorable>({int maxDepth = 1, String? dbName}) async {
-    final FluentProvider<FluentStorable> provider = FluentDb.providerForType(runtimeType, dbName: dbName);
-
-    await provider.ensureLoaded(this, maxDepth: maxDepth);
-  }
+  Future<void> ensureLoaded({int maxDepth = 1, FluentDbKey? dbKey}) async => await FluentDb.ensureLoaded(this, maxDepth: maxDepth, dbKey: dbKey);
 
   /// Fetches the latest state of this instance from the database and returns a
   /// refreshed copy of the object.
@@ -260,8 +391,22 @@ extension FluentActiveRecords<T extends FluentStorable> on T {
   /// });
   /// ```
   /// Returns the refreshed instance [T] if found, otherwise `null`.
-  Future<T?> refresh({String? dbName}) async {
-    final T? refreshed = await FluentDb.findById<T>(primaryKeyValue, dbName: dbName);
+  ///
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  Future<T?> refresh({FluentDbKey? dbKey}) async {
+    final T? refreshed = await FluentDb.findById<T>(primaryKeyValue, dbKey: dbKey);
     return refreshed;
   }
 }
@@ -276,40 +421,129 @@ extension FluentStorableCollectionX<T extends FluentStorable> on Iterable<T> {
   /// Safely handles mixed-type collections (e.g., saving Users and Posts together)
   /// by automatically grouping them by their runtime types and routing them
   /// to the appropriate providers.
-  Future<void> saveItems({FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert, Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async {
+  ///
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  Future<void> saveItems({FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert, Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) async {
     if (isEmpty) return;
-    return FluentDb.saveItems<T>(toList(growable: false), saveStrategy: saveStrategy, tag: tag, policy: policy, dbName: dbName);
+    return FluentDb.saveItems<T>(toList(growable: false), saveStrategy: saveStrategy, tag: tag, policy: policy, dbKey: dbKey);
   }
 
   /// Updates all items in the collection in a single batch transaction.
-  Future<int> updateAll({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async {
+  ///
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  Future<int> updateAll({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) async {
     if (isEmpty) return 0;
-    return FluentDb.updateAll<T>(this, tag: tag, policy: policy, dbName: dbName);
+    return FluentDb.updateAll<T>(this, tag: tag, policy: policy, dbKey: dbKey);
   }
 
   /// Performs a transactional batch update of multiple entities along with their
   /// full relational graphs.
-  Future<int> updateAllWithRelations({FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal, Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async {
+  ///
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  Future<int> updateAllWithRelations({
+    FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal,
+    Object? tag,
+    ExecutionPolicy policy = const ExecutionPolicy(),
+    FluentDbKey? dbKey,
+  }) async {
     if (isEmpty) return 0;
-    return FluentDb.updateAllWithRelations<T>(this, syncMode: syncMode, tag: tag, policy: policy, dbName: dbName);
+    return FluentDb.updateAllWithRelations<T>(this, syncMode: syncMode, tag: tag, policy: policy, dbKey: dbKey);
   }
 
   /// Soft-deletes all items in the collection in a single batch transaction.
-  Future<int> deleteAll({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async {
+  ///
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  Future<int> deleteAll({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) async {
     if (isEmpty) return 0;
-    return FluentDb.deleteAll<T>(this, tag: tag, policy: policy, dbName: dbName);
+    return FluentDb.deleteAll<T>(this, tag: tag, policy: policy, dbKey: dbKey);
   }
 
   /// Permanently deletes all items in the collection, bypassing soft-delete markers.
-  Future<int> hardDeleteAll({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async {
+  ///
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  Future<int> hardDeleteAll({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) async {
     if (isEmpty) return 0;
-    return FluentDb.hardDeleteAll<T>(this, tag: tag, policy: policy, dbName: dbName);
+    return FluentDb.hardDeleteAll<T>(this, tag: tag, policy: policy, dbKey: dbKey);
   }
 
   /// Restores all soft-deleted items in the collection.
-  Future<int> restoreAll({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async {
+  ///
+  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
+  /// * [FluentSaveStrategy.insertOnly] — Skips the operation if the record exists.
+  /// * [FluentSaveStrategy.patch] — Updates only the fields provided.
+  ///
+  /// **The [dbKey] parameter defines the target database for this operation.**
+  ///
+  /// * If provided, the operation is explicitly scoped to that database instance.
+  /// * If omitted, the system will attempt to resolve the database automatically
+  ///   based on the model type [T].
+  ///
+  /// *Note: If the model [T] is registered in multiple database groups,
+  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  Future<int> restoreAll({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) async {
     if (isEmpty) return 0;
-    return FluentDb.restoreAll<T>(this, tag: tag, policy: policy, dbName: dbName);
+    return FluentDb.restoreAll<T>(this, tag: tag, policy: policy, dbKey: dbKey);
   }
 }
 

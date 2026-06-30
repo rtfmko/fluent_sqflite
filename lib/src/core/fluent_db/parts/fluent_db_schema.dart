@@ -29,7 +29,7 @@ extension FluentDbSchema on FluentDb {
   /// 3. **Index Synchronization:** Updates or recreates indexes within a dedicated
   ///    transaction to ensure query performance is maintained.
   Future<void> _syncSchema(Database db, FluentGroup group, {List<FluentProvider>? sortedProviders}) async {
-    FluentLog.info('Synchronizing schema for group: "${group.dbName}"', tag: 'FluentDb:syncSchema');
+    FluentLog.info('Synchronizing schema for group: "${group.dbKey.dbName}"', tag: 'FluentDb:syncSchema');
 
     final Iterable<FluentProvider<FluentStorable>> providersToSync = sortedProviders ?? group.providerList;
 
@@ -62,6 +62,6 @@ extension FluentDbSchema on FluentDb {
       }
     });
 
-    FluentLog.info('Schema synchronization completed for group: "${group.dbName}"', tag: 'FluentDb:syncSchema');
+    FluentLog.info('Schema synchronization completed for group: "${group.dbKey.dbName}"', tag: 'FluentDb:syncSchema');
   }
 }
