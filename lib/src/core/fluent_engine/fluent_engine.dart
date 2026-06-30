@@ -1097,7 +1097,7 @@ class FluentEngine {
     }
 
     try {
-      final FluentProvider provider = FluentDb.getProviderByTable(tableName);
+      final FluentProvider provider = FluentDb.getProviderByTable(tableName, dbName: task.dbName);
 
       final dynamic result = await provider
           .internalExecute(task)
@@ -1114,7 +1114,7 @@ class FluentEngine {
 
       if (task.isStreamOp) {
         try {
-          final FluentProvider<FluentStorable> provider = FluentDb.getProviderByTable(tableName);
+          final FluentProvider<FluentStorable> provider = FluentDb.getProviderByTable(tableName, dbName: task.dbName);
           List<dynamic> normalizedItems = [];
 
           if (task.data is List) {

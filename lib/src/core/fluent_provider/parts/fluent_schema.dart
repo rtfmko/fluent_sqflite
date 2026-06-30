@@ -524,7 +524,7 @@ CREATE TABLE IF NOT EXISTS $pivotName (
           String? targetTable = rel.targetTable;
           String? targetPk = rel.remoteKey;
 
-          final targetProvider = FluentDb.providerForType(rel.modelType);
+          final FluentProvider<FluentStorable> targetProvider = relatedProvider(rel.modelType);
           if (targetTable == null || targetPk == null) {
             targetTable ??= targetProvider.tableName;
             targetPk ??= targetProvider.modelSample.primaryKey.name;
@@ -632,7 +632,7 @@ CREATE TABLE IF NOT EXISTS $pivotName (
           continue;
         }
 
-        final FluentProvider<FluentStorable> childDao = FluentDb.providerForType(rel.modelType);
+        final FluentProvider<FluentStorable> childDao = relatedProvider(rel.modelType);
 
         FluentLog.info('Creating missing pivot table: $pivotName', tag: '$tableName:syncPivotTables', context: {'parent': dao.tableName, 'child': childDao.tableName});
 

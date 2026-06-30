@@ -59,7 +59,7 @@ extension FluentMaintenance<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<int> clearExpiredItems({DatabaseExecutor? executor, Batch? batch, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> clearExpiredItems({DatabaseExecutor? executor, Batch? batch, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     final String colName = modelSample.expiryColumn;
     final int now = DateTime.now().millisecondsSinceEpoch;
 
@@ -94,7 +94,7 @@ extension FluentMaintenance<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.clearExpired,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(where: whereClause, whereArgs: whereArgs, multiple: true),
       policy: policy,
     );
@@ -124,7 +124,7 @@ extension FluentMaintenance<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<int> clearTable({ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> clearTable({ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     FluentLog.debug(
       'Initiating global operational query pipeline for full storage table evacuation purges',
       tag: '$tableName:clearTable',
@@ -138,7 +138,7 @@ extension FluentMaintenance<T extends FluentStorable> on FluentProvider<T> {
 
     // SCENARIO B: STANDARD TASK PIPELINE — Encapsulate table truncation parameters into a uniform framework task.
     // TableHelper configures multiple: true to signal a comprehensive dataset evacuation.
-    final FluentTask task = FluentTask(action: FluentDbAction.clearTable, table: tableName, dbName: dbName, helper: TableHelper(multiple: true), policy: policy);
+    final FluentTask task = FluentTask(action: FluentDbAction.clearTable, table: tableName, dbName: dbName ?? this.dbName, helper: TableHelper(multiple: true), policy: policy);
 
     return FluentDb.executeTask<T, int>(provider: this, task: task);
   }

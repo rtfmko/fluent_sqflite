@@ -73,7 +73,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
         continue;
       }
 
-      final FluentProvider childProvider = FluentDb.providerForType(entry.key);
+      final FluentProvider childProvider = _relationsMixin!.relatedProvider(entry.key);
 
       final String childTable = childProvider.tableName;
 
@@ -369,7 +369,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       final Type childType = entry.key;
       final FluentDbRelation rel = entry.value;
 
-      final FluentProvider childDao = FluentDb.providerForType(childType);
+      final FluentProvider childDao = FluentDb.providerForType(childType, dbName: task.dbName);
 
       if (task.action != FluentDbAction.save && rel.isLazy && !task.ignoreLazy) continue;
       if (visitedTables != null && visitedTables.contains(childDao.tableName)) continue;
@@ -901,7 +901,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
   Future<void> ensureLoaded<R extends FluentStorable>(T model, {int maxDepth = 1}) async {
     if (!_hasRelations || _relationsMixin == null) return;
 
-    final relations = _relationsMixin!.resolvedRelations;
+    final Map<Type, FluentDbRelation<FluentStorable, FluentStorable>> relations = _relationsMixin!.resolvedRelations;
     if (relations.isEmpty) return;
 
     final String parentPkName = _cachedPrimaryKey?.name ?? 'id';
@@ -928,12 +928,12 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
         if (childType != R) continue;
       }
 
-      final FluentProvider childDao = FluentDb.providerForType(childType);
+      final FluentProvider childDao = _relationsMixin!.relatedProvider(childType);
       final String whereKey = rel.remoteKey ?? resolveRemoteKey(childDao) ?? fallbackRemoteKey;
 
       FluentLog.debug('Hydrating lazy relational association', tag: '$tableName:relations', context: {'mapKey': mapKey, 'childTable': childDao.tableName, 'parentId': id.toString()});
 
-      final List<dynamic> children = await childDao.find(where: '$whereKey = ?', whereArgs: [id], maxDepth: maxDepth, ignoreLazy: true);
+      final List<dynamic> children = await childDao.find(where: '$whereKey = ?', whereArgs: [id], maxDepth: maxDepth, ignoreLazy: true, dbName: childDao.dbName);
 
       dynamic finalResult;
       final castType = rel.castType;

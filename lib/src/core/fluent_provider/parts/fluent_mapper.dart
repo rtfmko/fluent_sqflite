@@ -64,7 +64,7 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
 
       if (data == null) continue;
       try {
-        final FluentProvider childDao = FluentDb.providerForType(rel.modelType);
+        final FluentProvider childDao = _relationsMixin!.relatedProvider(rel.modelType);
 
         if (data is List && rel.castType == FluentModelCast.modelList) {
           if (data.isEmpty) {
@@ -173,7 +173,7 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
         if (data == null) continue;
 
         try {
-          final FluentProvider childDao = FluentDb.providerForType(rel.modelType);
+          final FluentProvider childDao = _relationsMixin!.relatedProvider(rel.modelType);
           if (data is List && rel.castType == FluentModelCast.modelList) {
             if (data.isEmpty) {
               model.setRelation(key, childDao._createTypedList(<FluentStorable>[]));
@@ -413,7 +413,7 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
     for (final MapEntry<Type, FluentDbRelation<FluentStorable, FluentStorable>> entry in relations.entries) {
       final FluentDbRelation rel = entry.value;
       final String key = rel.mapToKey;
-      final FluentProvider childDao = FluentDb.providerForType(entry.key);
+      final FluentProvider childDao = FluentDb.providerForType(entry.key, dbName: task.dbName);
 
       FluentLog.warning(
         'Debugging case',
@@ -582,7 +582,7 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
 
       if (result.containsKey(key)) {
         final dynamic rawData = result[key];
-        final FluentProvider childDao = FluentDb.providerForType(entry.key);
+        final FluentProvider childDao = _relationsMixin!.relatedProvider(entry.key);
 
         if (rawData == null) {
           if (!rel.nullable && rel.castType == FluentModelCast.modelList) {

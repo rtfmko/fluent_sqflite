@@ -60,7 +60,7 @@ extension FluentRaw<T extends FluentStorable> on FluentProvider<T> {
   /// }
   /// ```
   @internal
-  Future<Map<String, dynamic>?> rawGetItemBy(dynamic value, {String? column, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<Map<String, dynamic>?> rawGetItemBy(dynamic value, {String? column, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     // Fall back to the configured table primary key name if no explicit column is specified
     final String searchCol = column ?? primaryKeyColumn.name;
 
@@ -73,7 +73,7 @@ extension FluentRaw<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.rawGetItem,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(column: searchCol, value: value, where: '$searchCol = ?', whereArgs: [value], limit: 1, multiple: false),
       policy: policy,
     );
@@ -101,7 +101,7 @@ extension FluentRaw<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<List<Map<String, dynamic>>> rawGetItemsBy(dynamic value, {String? column, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<List<Map<String, dynamic>>> rawGetItemsBy(dynamic value, {String? column, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     // Fall back to the configured table primary key name if no explicit column is specified
     final String searchCol = column ?? primaryKeyColumn.name;
 
@@ -114,7 +114,7 @@ extension FluentRaw<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.rawGetItems,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(column: searchCol, value: value, where: _injectSoftDelete('$searchCol = ?'), whereArgs: [value], multiple: true),
       policy: policy,
     );
@@ -145,7 +145,7 @@ extension FluentRaw<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<int> execute(String sql, {List<dynamic>? arguments, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> execute(String sql, {List<dynamic>? arguments, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (sql.trim().isEmpty) {
       throw FluentArgumentException(tableName, 'SQL query cannot be empty.', StackTrace.current);
     }
@@ -164,7 +164,7 @@ extension FluentRaw<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.execute,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(sql: sql, whereArgs: arguments),
       policy: policy,
     );

@@ -48,15 +48,15 @@ class FluentDb {
   /// Default execution policy for database operations.
   static ExecutionPolicy globalPolicy = ExecutionPolicy.rootDefault();
 
-  /// O(1) lookup index mapping table names to their respective `FluentProvider`.
-  /// Critical for high-performance cross-reference operations and isolate-based messaging.
-  final Map<String, FluentProvider<FluentStorable>> _tableToProviderIndex = {};
-
   /// Stores the most recent configuration applied to the registry for restarts/re-init.
   static List<FluentGroup>? _lastConfig;
 
-  /// Internal storage mapping `Type` (model or provider class) to the corresponding `FluentProvider` instance.
-  final Map<Type, FluentProvider> _providers = {};
+  /// Internal storage mapping database group names (dbName) to their respective
+  /// provider registries.
+  ///
+  /// This multi-level registry ensures strict isolation between different
+  /// database contexts and enables both strict-context resolution and system-wide "smart" lookups.
+  final Map<String, Map<Type, FluentProvider>> _groupedRegistry = {};
 
   /// Defines the retention interval for soft-deleted records before they become
   /// eligible for permanent removal.
@@ -85,160 +85,202 @@ class FluentDb {
 
   /// Resolves a `FluentProvider` instance using the target database table name.
   ///
-  /// This lookup utilizes the internal O(1) table-to-provider index, making it the
-  /// most efficient way to map raw SQL table references back to their corresponding
-  /// `FluentProvider` logic.
+  /// This lookup utilizes the internal index to map raw SQL table references back
+  /// to their corresponding `FluentProvider` logic.
+  ///
+  /// If [dbName] is provided, it resolves the provider within that specific database group.
+  /// If omitted, it performs a system-wide lookup and resolves automatically
+  /// if the table is registered uniquely.
+  ///
+  /// Throws [ProviderNotFoundException] if the table is not registered.
+  /// Throws [AmbiguousProviderException] if the table exists in multiple database groups.
   ///
   /// **Example Usage:**
   /// ```dart
+  /// // Automatically resolves based on table uniqueness
   /// final provider = FluentDb.getProviderByTable('users_table');
-  /// if (provider != null) {
-  ///   // Perform operations on the resolved provider
-  /// }
+  ///
+  /// // Context-specific resolution
+  /// final provider = FluentDb.getProviderByTable('users_table', dbName: 'core_app');
   /// ```
-  static FluentProvider getProviderByTable(String tableName) {
-    final FluentProvider? provider = _instance._tableToProviderIndex[tableName];
-
-    if (provider == null) {
-      final ProviderNotFoundException exception = ProviderNotFoundException(Null, stackTrace: StackTrace.current);
-      FluentLog.error(
-        'Provider for table "$tableName" is not registered',
-        exception,
-        exception.stackTrace,
-        tag: 'FluentDb:providerByTable',
-        hint: 'Ensure that the provider for this table has been registered during the init() phase.',
-        context: {'tableName': tableName},
-      );
-      throw exception;
-    }
-
-    return provider;
-  }
+  static FluentProvider getProviderByTable(String tableName, {String? dbName}) => _resolveProvider(tableName: tableName, dbName: dbName);
 
   /// Retrieves a provider instance using a specific [model] instance.
   ///
   /// This is particularly useful in generic logic where you have a [FluentStorable]
   /// object and need to perform database operations on it.
   ///
+  /// If [dbName] is provided, it resolves the provider within that specific database group.
+  /// If omitted, it performs a system-wide lookup and resolves automatically
+  /// if the model type is registered uniquely.
+  ///
   /// Throws [ProviderNotFoundException] if the model's type is not registered.
+  /// Throws [AmbiguousProviderException] if the model's type is registered in multiple database groups.
   ///
   /// **Example:**
   /// ```dart
   /// final UserModel user = UserModel(id: 1, name: 'John');
+  /// // Resolves automatically based on registry
   /// final FluentProvider<FluentStorable> provider = FluentDb.providerByModel(user);
   /// await provider.update(user);
   /// ```
-  static FluentProvider providerByModel(FluentStorable model) {
-    final Type type = model.runtimeType;
-    final FluentProvider? provider = _instance._providers[type];
-
-    if (provider != null) {
-      return provider;
-    }
-
-    final ProviderNotFoundException exception = ProviderNotFoundException(type, stackTrace: StackTrace.current);
-    FluentLog.error(
-      'Provider for model "$type" is not registered',
-      exception,
-      exception.stackTrace,
-      tag: 'FluentDb:providerByModel',
-      hint: 'Ensure that the provider for this model type has been registered during the init() phase.',
-      context: {'modelType': type.toString()},
-    );
-    throw exception;
-  }
+  static FluentProvider providerByModel(FluentStorable model, {String? dbName}) => _resolveProvider(modelType: model.runtimeType, dbName: dbName);
 
   /// Retrieves a provider instance by its model [type].
   ///
   /// Use this when you have a [Type] variable and need to get the
-  /// corresponding DAO.
+  /// corresponding DAO dynamically.
+  ///
+  /// If [dbName] is provided, it resolves the provider within that specific database group.
+  /// If omitted, it performs a system-wide lookup and resolves automatically
+  /// if the model is registered uniquely.
   ///
   /// Throws [ProviderNotFoundException] if the [type] is not registered.
+  /// Throws [AmbiguousProviderException] if the [type] is registered in multiple database groups.
   ///
   /// **Example:**
   /// ```dart
   /// Type dynamicType = UserModel;
+  /// // Resolves automatically based on registry
   /// final FluentProvider<FluentStorable> provider = FluentDb.providerForType(dynamicType);
   /// ```
-  static FluentProvider providerForType(Type type) {
-    final FluentProvider? provider = _instance._providers[type];
-
-    if (provider != null) {
-      return provider;
-    }
-
-    final ProviderNotFoundException exception = ProviderNotFoundException(type, stackTrace: StackTrace.current);
-    FluentLog.error(
-      'Provider for type "$type" is not registered',
-      exception,
-      exception.stackTrace,
-      tag: 'FluentDb:providerForType',
-      hint: 'Verify that the class type is registered in your FluentGroup configuration before accessing it.',
-      context: {'type': type.toString()},
-    );
-    throw exception;
-  }
+  static FluentProvider providerForType(Type type, {String? dbName}) => _resolveProvider(modelType: type, dbName: dbName);
 
   /// The primary and most type-safe way to access a Data Access Object (DAO).
   ///
   /// It retrieves the [FluentProvider] associated with the model type [T].
-  /// Use this for all standard CRUD operations.
+  /// If [dbName] is provided, it resolves the provider within that specific database group.
+  /// If omitted, it performs a system-wide lookup and resolves automatically
+  /// if the model is registered uniquely.
   ///
   /// Throws [ProviderNotFoundException] if the model [T] has no registered provider.
+  /// Throws [AmbiguousProviderException] if the model [T] is registered in multiple database groups.
   ///
   /// **Example:**
   /// ```dart
-  /// final FluentProvider<UserModel> userDAO = FluentDb.dao<UserModel>();
+  /// // Standard access
+  /// final FluentProvider<UserModel> userDAO = FluentDb.providerByType<UserModel>();
   /// final List<UserModel>? users = await userDAO.getItems();
+  ///
+  /// // Context-specific access
+  /// final FluentProvider<Goods> cardProvider = FluentDb.providerByType<Goods>(dbName: 'history');
   /// ```
-  static FluentProvider<T> providerByType<T extends FluentStorable>() {
-    final FluentProvider? provider = _instance._providers[T];
+  static FluentProvider<T> providerByType<T extends FluentStorable>({String? dbName}) => _resolveProvider(modelType: T, dbName: dbName) as FluentProvider<T>;
 
-    if (provider != null) {
-      return provider as FluentProvider<T>;
-    }
-
-    final ProviderNotFoundException exception = ProviderNotFoundException(T, stackTrace: StackTrace.current);
-    FluentLog.error(
-      'Provider for model "$T" is not registered',
-      exception,
-      exception.stackTrace,
-      tag: 'FluentDb:providerByType',
-      hint: 'Check your FluentDb.init configuration to ensure this model type is included in a FluentGroup.',
-      context: {'modelType': T.toString()},
-    );
-    throw exception;
-  }
-
-  /// Finds a registered [FluentProvider] by its own implementation type [T].
+  /// Finds a registered [FluentProvider] by its implementation type [T].
   ///
   /// Use this when you need to access custom methods or properties defined
   /// specifically in your provider class, rather than the base [FluentProvider] interface.
   ///
-  /// Throws [ProviderNotFoundException] if the model [T] has no registered provider.
+  /// If [dbName] is provided, it searches only within that database group.
+  /// If [dbName] is omitted, it performs a system-wide search.
+  ///
+  /// Throws [ProviderNotFoundException] if no provider of type [T] is found.
+  /// Throws [AmbiguousProviderException] if the provider type [T] exists in multiple database groups.
   ///
   /// **Example:**
   /// ```dart
-  /// // Accessing a custom method like 'syncWithServer()' defined in UserProvider
+  /// // Accessing a custom method defined in UserDAO
   /// final UserDAO userDao = FluentDb.provider<UserDAO>();
   /// await userDao.syncWithServer();
   /// ```
-  static T provider<T extends FluentProvider>() {
-    final FluentProvider<FluentStorable>? provider = _instance._providers[T];
+  static T provider<T extends FluentProvider>({String? dbName}) => _resolveProvider(providerType: T, dbName: dbName) as T;
 
-    if (provider != null) {
-      return provider as T;
+  /// Resolves the appropriate [FluentProvider] based on the provided criteria.
+  ///
+  /// This is the central resolution engine for multi-database architecture.
+  /// It performs the following steps:
+  /// 1. Validates the search criteria (model type, provider type, or table name).
+  /// 2. Performs a strict lookup if [dbName] is provided.
+  /// 3. Performs a system-wide "smart" lookup if [dbName] is omitted.
+  /// 4. Handles collisions and missing provider cases with specific exceptions.
+  ///
+  /// Throws [FluentConfigurationException] if criteria are missing.
+  /// Throws [ProviderNotFoundException] if the provider cannot be resolved.
+  /// Throws [AmbiguousProviderException] if the model exists in multiple databases.
+  static FluentProvider _resolveProvider({Type? modelType, Type? providerType, String? tableName, String? dbName}) {
+    if (modelType == null && providerType == null && tableName == null) {
+      final FluentConfigurationException exception = FluentConfigurationException(
+        'Invalid resolution criteria: Must provide at least one search criterion '
+        '(modelType, providerType, or tableName).',
+        stackTrace: StackTrace.current,
+      );
+      FluentLog.error('Invalid resolution criteria provided', exception, exception.stackTrace, tag: 'FluentDb:resolve');
+      throw exception;
+    }
+    final String target = modelType?.toString() ?? providerType?.toString() ?? tableName!;
+
+    // Helper to match criteria against provider metadata.
+    bool isMatch(FluentProvider p) {
+      if (modelType != null) return p.modelType == modelType;
+      if (providerType != null) return p.runtimeType == providerType;
+      if (tableName != null) return p.tableName == tableName;
+      return false;
     }
 
-    final ProviderNotFoundException exception = ProviderNotFoundException(T, stackTrace: StackTrace.current);
+    // Strict Search: Search only within the specified database group.
+    if (dbName != null) {
+      final Map<Type, FluentProvider<FluentStorable>>? group = _instance._groupedRegistry[dbName];
+      if (group != null) {
+        for (final FluentProvider<FluentStorable> p in group.values) {
+          if (isMatch(p)) return p;
+        }
+      }
+      final ProviderNotFoundException exception = ProviderNotFoundException('$target (in group: $dbName)', stackTrace: StackTrace.current);
+
+      FluentLog.error(
+        'Provider resolution failed: target not found in specified database',
+        exception,
+        exception.stackTrace,
+        tag: 'FluentDb:resolve',
+        hint: 'Verify that the model or DAO is correctly registered within the "$dbName" group during the initialization phase.',
+        context: {'target': target, 'requestedGroup': dbName},
+      );
+      throw exception;
+    }
+
+    // Smart Search: Scan all registered database groups.
+    final Map<String, FluentProvider> matches = {};
+    for (final MapEntry<String, Map<Type, FluentProvider<FluentStorable>>> entry in _instance._groupedRegistry.entries) {
+      for (final FluentProvider<FluentStorable> p in entry.value.values) {
+        if (isMatch(p)) {
+          matches[entry.key] = p;
+          break;
+        }
+      }
+    }
+
+    if (matches.isEmpty) {
+      final ProviderNotFoundException exception = ProviderNotFoundException(target, stackTrace: StackTrace.current);
+
+      FluentLog.warning(
+        'Provider resolution failed: No match found across all registered databases',
+        tag: 'FluentDb:resolve',
+        hint: 'The requested entity is not registered in any database group. Check your init() setup.',
+        context: {'target': target},
+      );
+      throw exception;
+    }
+
+    // Handle Success: Single match found (the ideal scenario).
+    if (matches.length == 1) {
+      final String resolvedDbName = matches.keys.first;
+      FluentLog.debug('Successfully resolved "$target" to database "$resolvedDbName"', tag: 'fluentdb:resolve', context: {'target': target, 'dbName': resolvedDbName});
+      return matches.values.first;
+    }
+
+    // Handle Collision: Same model found in multiple databases (Ambiguity).
+    final AmbiguousProviderException exception = AmbiguousProviderException(target, matches.keys.toList(), stackTrace: StackTrace.current);
+
     FluentLog.error(
-      'Provider type "$T" not found in registry',
+      'Collision detected during provider resolution',
       exception,
       exception.stackTrace,
-      tag: 'FluentDb:provider',
-      hint: 'Ensure that the specific provider class is registered in the FluentDb during initialization.',
-      context: {'requestedType': T.toString()},
+      tag: 'FluentDb:resolve',
+      hint: 'Model "$target" is registered in multiple database groups. Please specify "dbName" in your repository call or task configuration.',
+      context: {'target': target, 'detectedInGroups': matches.keys.toList()},
     );
+
     throw exception;
   }
 
@@ -259,23 +301,27 @@ class FluentDb {
   ///
   /// Returns a list of records containing the [parentProvider] and the specific [FluentDbRelation].
   @internal
-  static List<({FluentProvider parentProvider, FluentDbRelation relation})> getIncomingRelationsFor(Type targetModelType) {
+  static List<({FluentProvider parentProvider, FluentDbRelation relation})> getIncomingRelationsFor(Type targetModelType, {String? dbName}) {
     final List<({FluentProvider parentProvider, FluentDbRelation relation})> incoming = [];
 
-    for (final FluentProvider<FluentStorable> parentProvider in _instance._providers.values) {
-      if (parentProvider is FluentRelationsMixin) {
-        final Map<Type, FluentDbRelation> relationsMap = parentProvider.resolvedRelations;
+    final groups = dbName != null ? [_instance._groupedRegistry[dbName]].whereType<Map<Type, FluentProvider>>() : _instance._groupedRegistry.values;
 
-        if (relationsMap.containsKey(targetModelType)) {
-          final FluentDbRelation rel = relationsMap[targetModelType]!;
+    for (final Map<Type, FluentProvider> group in groups) {
+      for (final FluentProvider<FluentStorable> parentProvider in group.values) {
+        if (parentProvider is FluentRelationsMixin) {
+          final Map<Type, FluentDbRelation> relationsMap = parentProvider.resolvedRelations;
 
-          incoming.add((parentProvider: parentProvider, relation: rel));
+          if (relationsMap.containsKey(targetModelType)) {
+            final FluentDbRelation rel = relationsMap[targetModelType]!;
 
-          FluentLog.debug(
-            'Found incoming relation',
-            tag: 'FluentDb:getIncomingRelationsFor',
-            context: {'sourceTable': parentProvider.tableName, 'targetModel': targetModelType.toString(), 'relationType': rel.runtimeType.toString()},
-          );
+            incoming.add((parentProvider: parentProvider, relation: rel));
+
+            FluentLog.debug(
+              'Found incoming relation',
+              tag: 'FluentDb:getIncomingRelationsFor',
+              context: {'sourceTable': parentProvider.tableName, 'targetModel': targetModelType.toString(), 'relationType': rel.runtimeType.toString()},
+            );
+          }
         }
       }
     }
@@ -322,6 +368,10 @@ class FluentDb {
 
   /// Saves a single [item] of type [T] into its corresponding database table.
   ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
+  ///
   /// The [saveStrategy] parameter defines how to handle records:
   /// * [FluentSaveStrategy.upsert] (default) — Overwrites or creates the record.
   /// * [FluentSaveStrategy.insertOnly] — Adds the record only if it doesn't exist.
@@ -332,28 +382,58 @@ class FluentDb {
   /// // Updates the user if they exist, or creates a new one
   /// await FluentDb.saveItem(User(id: 1, name: 'John Doe'), saveStrategy: FluentSaveStrategy.upsert);
   /// ```
-  static Future<void> saveItem<T extends FluentStorable>(T item, {FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().saveItem(item, saveStrategy: saveStrategy, policy: policy.withTag(tag));
+  static Future<void> saveItem<T extends FluentStorable>(
+    T item, {
+    FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert,
+    Object? tag,
+    ExecutionPolicy policy = const ExecutionPolicy(),
+    String? dbName,
+  }) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:saveItem');
+    }
+    return providerByType<T>(dbName: dbName).saveItem(item, saveStrategy: saveStrategy, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Retrieves a single record of type [T].
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// final User user = await FluentDb.findOne<User>(maxDepth: 2);
   /// ```
-  static Future<T?> findOne<T extends FluentStorable>({int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().findOne(maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy);
+  static Future<T?> findOne<T extends FluentStorable>({int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:findOne');
+    }
+    return providerByType<T>(dbName: dbName).findOne(maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy, dbName: dbName);
+  }
 
   /// Retrieves a list of records of type [T] with optional constraints.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// final List<User> recentUsers = await FluentDb.findAll<User>(limit: 10, maxDepth: 0);
   /// ```
-  static Future<List<T>> findAll<T extends FluentStorable>({int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().findAll(limit: limit, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy);
+  static Future<List<T>> findAll<T extends FluentStorable>({int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:findAll');
+    }
+    return providerByType<T>(dbName: dbName).findAll(limit: limit, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy, dbName: dbName);
+  }
 
   /// Fetches items that have not yet expired based on their TTL configuration.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
@@ -365,28 +445,62 @@ class FluentDb {
     int maxDepth = 1,
     bool ignoreLazy = false,
     ExecutionPolicy policy = const ExecutionPolicy(),
-  }) => providerByType<T>().findValidItems(limit: limit, sortDirection: sortDirection, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy);
+    String? dbName,
+  }) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:findValidItems');
+    }
+    return providerByType<T>(dbName: dbName).findValidItems(limit: limit, sortDirection: sortDirection, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy, dbName: dbName);
+  }
 
   /// Performs a lookup based on a specific property key and value.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// final List<User> users = await FluentDb.findItemsBy<User>('admin', key: 'role');
   /// ```
-  static Future<List<T>> findItemsBy<T extends FluentStorable>(dynamic value, {String? key, int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().findItemsBy(value, key: key, limit: limit, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy);
+  static Future<List<T>> findItemsBy<T extends FluentStorable>(
+    dynamic value, {
+    String? key,
+    int? limit,
+    int maxDepth = 1,
+    bool ignoreLazy = false,
+    ExecutionPolicy policy = const ExecutionPolicy(),
+    String? dbName,
+  }) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:findItemsBy');
+    }
+    return providerByType<T>(dbName: dbName).findItemsBy(value, key: key, limit: limit, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy, dbName: dbName);
+  }
 
   /// Retrieves a single record by its primary key identifier.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// final Order order = await FluentDb.findById<Order>(101, maxDepth: 2);
   /// ```
-  static Future<T?> findById<T extends FluentStorable>(dynamic id, {int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().findById(id, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy);
+  static Future<T?> findById<T extends FluentStorable>(dynamic id, {int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:findById');
+    }
+    return providerByType<T>(dbName: dbName).findById(id, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy, dbName: dbName);
+  }
 
   /// Executes a custom SQL-based query with support for `WHERE` clauses,
   /// ordering, and pagination.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
@@ -405,35 +519,72 @@ class FluentDb {
     int maxDepth = 1,
     bool ignoreLazy = false,
     ExecutionPolicy policy = const ExecutionPolicy(),
-  }) => providerByType<T>().find(where: where, whereArgs: whereArgs, orderBy: orderBy, limit: limit, offset: offset, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy);
+    String? dbName,
+  }) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:find');
+    }
+    return providerByType<T>(
+      dbName: dbName,
+    ).find(where: where, whereArgs: whereArgs, orderBy: orderBy, limit: limit, offset: offset, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy, dbName: dbName);
+  }
 
   /// Retrieves a single raw record map by a specific column value.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// final Map<String, dynamic>? rawUser = await FluentDb.rawGetItemBy<User>('admin@example.com', column: 'email');
   /// ```
-  static Future<Map<String, dynamic>?> rawGetItemBy<T extends FluentStorable>(dynamic value, {String? column, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().rawGetItemBy(value, column: column, policy: policy);
+  static Future<Map<String, dynamic>?> rawGetItemBy<T extends FluentStorable>(dynamic value, {String? column, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:rawGetItemBy');
+    }
+    return providerByType<T>(dbName: dbName).rawGetItemBy(value, column: column, policy: policy, dbName: dbName);
+  }
 
   /// Retrieves a list of raw record maps matching the specified column value.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// final List<Map<String, dynamic>> activeOrders = await FluentDb.rawGetItemsBy<Order>('pending', column: 'status');
   /// ```
-  static Future<List<Map<String, dynamic>>> rawGetItemsBy<T extends FluentStorable>(dynamic value, {String? column, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().rawGetItemsBy(value, column: column, policy: policy);
+  static Future<List<Map<String, dynamic>>> rawGetItemsBy<T extends FluentStorable>(dynamic value, {String? column, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:rawGetItemsBy');
+    }
+    return providerByType<T>(dbName: dbName).rawGetItemsBy(value, column: column, policy: policy, dbName: dbName);
+  }
 
   /// Updates an entire record represented by [item].
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// await FluentDb.update<User>(updatedUserInstance);
   /// ```
-  static Future<int> update<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().update(item, policy: policy.withTag(tag));
+  static Future<int> update<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:update');
+    }
+    return providerByType<T>(dbName: dbName).update(item, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Updates a record represented by [item] along with its related entities.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// Use this method when your model has dependencies (Foreign Keys) that also need
   /// to be synchronized or updated in a single transaction.
@@ -449,10 +600,20 @@ class FluentDb {
     FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal,
     Object? tag,
     ExecutionPolicy policy = const ExecutionPolicy(),
-  }) => providerByType<T>().updateWithRelations(item, syncMode: syncMode, policy: policy.withTag(tag));
+    String? dbName,
+  }) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:updateWithRelations');
+    }
+    return providerByType<T>(dbName: dbName).updateWithRelations(item, syncMode: syncMode, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Performs a transactional batch update of multiple entities along with their
   /// full relational graphs.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// This method is the high-performance counterpart to [updateWithRelations]. It
   /// processes the entire collection of [items] in a single atomic database
@@ -484,9 +645,23 @@ class FluentDb {
     FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal,
     Object? tag,
     ExecutionPolicy policy = const ExecutionPolicy(),
-  }) => _executeMixedBatch(items, (provider, typedItems) => provider.updateAllWithRelations(typedItems, syncMode: syncMode, policy: policy.withTag(tag)));
+    String? dbName,
+  }) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:updateAllWithRelations');
+    }
+    return _executeMixedBatch(
+      items,
+      (provider, typedItems) => provider.updateAllWithRelations(typedItems, syncMode: syncMode, policy: policy.withTag(tag), dbName: dbName),
+      dbName: dbName,
+    );
+  }
 
   /// Updates an entity instance and returns its fully synchronized state from the database.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// This method performs an atomic update of the provided [item] and immediately
   /// triggers a follow-up fetch to ensure the object in memory reflects the latest
@@ -502,28 +677,52 @@ class FluentDb {
   ///   print('Entity updated and synchronized: ${refreshedUser.updatedAt}');
   /// }
   /// ```
-  static Future<T?> updateAndFetch<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().updateAndFetch(item, policy: policy.withTag(tag));
+  static Future<T?> updateAndFetch<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:updateAndFetch');
+    }
+    return providerByType<T>(dbName: dbName).updateAndFetch(item, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Performs a targeted, partial update on a single field of a record identified by ID.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// await FluentDb.updateByKey<User>(1, 'last_login', DateTime.now().toString());
   /// ```
-  static Future<int> updateByKey<T extends FluentStorable>(dynamic id, String updateKey, dynamic updateValue, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().updateByKey(id, updateKey, updateValue, policy: policy.withTag(tag));
+  static Future<int> updateByKey<T extends FluentStorable>(dynamic id, String updateKey, dynamic updateValue, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:updateByKey');
+    }
+    return providerByType<T>(dbName: dbName).updateByKey(id, updateKey, updateValue, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Performs a partial update on multiple fields for a specific record.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// await FluentDb.updateFieldsMultiple<User>(1, {'status': 'active', 'last_seen': '2026-05-25'});
   /// ```
-  static Future<int> updateFieldsMultiple<T extends FluentStorable>(dynamic id, Map<String, dynamic> fields, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().updateFieldsMultiple(id, fields, policy: policy.withTag(tag));
+  static Future<int> updateFieldsMultiple<T extends FluentStorable>(dynamic id, Map<String, dynamic> fields, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:updateFieldsMultiple');
+    }
+    return providerByType<T>(dbName: dbName).updateFieldsMultiple(id, fields, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Performs a transactional batch restoration, safely handling mixed-type collections.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// This method iterates through the provided [items], synchronizes their
   /// fields with the database schema, and commits the updates as an atomic
@@ -537,10 +736,22 @@ class FluentDb {
   /// final int affectedRows = await FluentDb.updateAll(usersToUpdate);
   /// print('Successfully updated $affectedRows records.');
   /// ```
-  static Future<int> updateAll<T extends FluentStorable>(Iterable<T>? items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      _executeMixedBatch<T>(items, (provider, typedItems) => provider.updateAll(typedItems, policy: policy.withTag(tag)));
+  static Future<int> updateAll<T extends FluentStorable>(Iterable<T>? items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:updateAll');
+    }
+    return _executeMixedBatch<T>(
+      items,
+      (provider, typedItems) => provider.updateAll(typedItems, policy: policy.withTag(tag), dbName: dbName),
+      dbName: dbName,
+    );
+  }
 
   /// Performs a transactional batch update of specific fields for a set of identified entities.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// This method is designed for high-performance bulk state changes. It takes a set
   /// of primary keys and a map of fields, updates all matching records in the
@@ -556,27 +767,58 @@ class FluentDb {
   /// );
   /// print('Successfully updated $updatedCount records.');
   /// ```
-  static Future<int> updateMultipleFieldsByIds<T extends FluentStorable>(Set<dynamic> ids, Map<String, dynamic> fields, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().updateFieldsMultipleByIds(ids, fields, policy: policy.withTag(tag));
+  static Future<int> updateMultipleFieldsByIds<T extends FluentStorable>(
+    Set<dynamic> ids,
+    Map<String, dynamic> fields, {
+    Object? tag,
+    ExecutionPolicy policy = const ExecutionPolicy(),
+    String? dbName,
+  }) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:updateMultipleFieldsByIds');
+    }
+    return providerByType<T>(dbName: dbName).updateFieldsMultipleByIds(ids, fields, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Deletes a specific record instance.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// await FluentDb.delete<User>(userInstance);
   /// ```
-  static Future<int> delete<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().delete(item, policy: policy.withTag(tag));
+  static Future<int> delete<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:delete');
+    }
+    return providerByType<T>(dbName: dbName).delete(item, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Deletes records matching a specific field value.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// await FluentDb.deleteBy<User>('inactive', key: 'status');
   /// ```
-  static Future<int> deleteBy<T extends FluentStorable>(dynamic value, {Object? tag, String? key, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().deleteBy(value, key: key, policy: policy.withTag(tag));
+  static Future<int> deleteBy<T extends FluentStorable>(dynamic value, {Object? tag, String? key, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:delete');
+    }
+    return providerByType<T>(dbName: dbName).deleteBy(value, key: key, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Performs a transactional batch restoration, safely handling mixed-type collections.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// This method iterates through the provided collection of [items], extracts
   /// their primary keys, and executes a bulk removal operation. Depending on
@@ -590,10 +832,22 @@ class FluentDb {
   /// final int deletedCount = await FluentDb.deleteAll(usersToDelete);
   /// print('Successfully processed $deletedCount deletions.');
   /// ```
-  static Future<int> deleteAll<T extends FluentStorable>(Iterable<T>? items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      _executeMixedBatch<T>(items, (provider, typedItems) => provider.deleteAll(typedItems, policy: policy.withTag(tag)));
+  static Future<int> deleteAll<T extends FluentStorable>(Iterable<T>? items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:deleteAll');
+    }
+    return _executeMixedBatch<T>(
+      items,
+      (provider, typedItems) => provider.deleteAll(typedItems, policy: policy.withTag(tag), dbName: dbName),
+      dbName: dbName,
+    );
+  }
 
   /// Performs a transactional batch restoration, safely handling mixed-type collections.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// Unlike standard deletion methods that may utilize soft-delete markers, this
   /// routine executes a permanent removal of the specified [items] from the
@@ -606,54 +860,108 @@ class FluentDb {
   /// final int deletedCount = await FluentDb.hardDeleteAll(expiredUsers);
   /// print('Permanently removed $deletedCount records.');
   /// ```
-  static Future<int> hardDeleteAll<T extends FluentStorable>(Iterable<T>? items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      _executeMixedBatch<T>(items, (provider, typedItems) => provider.hardDeleteAll(typedItems, policy: policy.withTag(tag)));
+  static Future<int> hardDeleteAll<T extends FluentStorable>(Iterable<T>? items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:hardDeleteAll');
+    }
+    return _executeMixedBatch<T>(
+      items,
+      (provider, typedItems) => provider.hardDeleteAll(typedItems, policy: policy.withTag(tag), dbName: dbName),
+      dbName: dbName,
+    );
+  }
 
   /// Deletes a batch of records identified by their primary keys.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// await FluentDb.deleteItemsByIds<User>({1, 2, 3});
   /// ```
-  static Future<int> deleteItemsByIds<T extends FluentStorable>(Set<dynamic> ids, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().deleteItemsByIds(ids, policy: policy.withTag(tag));
+  static Future<int> deleteItemsByIds<T extends FluentStorable>(Set<dynamic> ids, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:deleteItemsByIds');
+    }
+    return providerByType<T>(dbName: dbName).deleteItemsByIds(ids, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Clears items that have exceeded their TTL (Time To Live).
   /// Typically used by maintenance routines.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// await FluentDb.clearExpiredItems<Cache>();
   /// ```
-  static Future<int> clearExpiredItems<T extends FluentStorable>({Object? tag, DatabaseExecutor? executor, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().clearExpiredItems(executor: executor, policy: policy.withTag(tag));
+  static Future<int> clearExpiredItems<T extends FluentStorable>({Object? tag, DatabaseExecutor? executor, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:clearExpiredItems');
+    }
+    return providerByType<T>(dbName: dbName).clearExpiredItems(executor: executor, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Removes all records from the table associated with type [T].
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// await FluentDb.clearTable<Cache>();
   /// ```
-  static Future<int> clearTable<T extends FluentStorable>({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().clearTable(policy: policy.withTag(tag));
+  static Future<int> clearTable<T extends FluentStorable>({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:clearTable');
+    }
+    return providerByType<T>(dbName: dbName).clearTable(policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Checks if a record with the given [id] exists in the table.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// final bool isExisting = await FluentDb.exists<User>(101);
   /// ```
-  static Future<bool> exists<T extends FluentStorable>(dynamic id, {ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().exists(id, policy: policy);
+  static Future<bool> exists<T extends FluentStorable>(dynamic id, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:exists');
+    }
+    return providerByType<T>(dbName: dbName).exists(id, policy: policy, dbName: dbName);
+  }
 
   /// Returns the count of records matching the optional [where] clause.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// final int activeCount = await FluentDb.count<User>(where: 'status = ?', whereArgs: ['active']);
   /// ```
-  static Future<int> count<T extends FluentStorable>({String? where, List<Object?>? whereArgs, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().count(where: where, whereArgs: whereArgs, policy: policy);
+  static Future<int> count<T extends FluentStorable>({String? where, List<Object?>? whereArgs, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:count');
+    }
+    return providerByType<T>(dbName: dbName).count(where: where, whereArgs: whereArgs, policy: policy, dbName: dbName);
+  }
 
   /// Executes a custom SQL statement against the database for the specified entity type [T].
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// Use this method for complex database operations that are not covered
   /// by standard CRUD methods. Returns the number of affected rows.
@@ -666,20 +974,36 @@ class FluentDb {
   ///   arguments: [1, cutoffDate],
   /// );
   /// ```
-  static Future<int> execute<T extends FluentStorable>(String sql, {List<dynamic>? arguments, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().execute(sql, arguments: arguments, policy: policy);
+  static Future<int> execute<T extends FluentStorable>(String sql, {List<dynamic>? arguments, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:execute');
+    }
+    return providerByType<T>(dbName: dbName).execute(sql, arguments: arguments, policy: policy, dbName: dbName);
+  }
 
   /// Restores a soft-deleted record by its unique primary key.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// final int count = await FluentDb.restoreById<User>(101);
   /// ```
-  static Future<int> restoreById<T extends FluentStorable>(dynamic id, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().restoreById(id, policy: policy.withTag(tag));
+  static Future<int> restoreById<T extends FluentStorable>(dynamic id, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:restoreById');
+    }
+    return providerByType<T>(dbName: dbName).restoreById(id, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Restores a soft-deleted record by its unique primary key and immediately
   /// retrieves the fully refreshed entity.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// This method combines [restoreById] and [findById] into a single atomic-like
   /// operation. It is the preferred way to restore a record when you need to
@@ -695,18 +1019,35 @@ class FluentDb {
   ///   print('User restored successfully: ${restoredUser.name}');
   /// }
   /// ```
-  static Future<T?> restoreAndFetchById<T extends FluentStorable>(dynamic id, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().restoreAndFetchById(id, policy: policy.withTag(tag));
+  static Future<T?> restoreAndFetchById<T extends FluentStorable>(dynamic id, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:restoreAndFetchById');
+    }
+    return providerByType<T>(dbName: dbName).restoreAndFetchById(id, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Restores a previously soft-deleted object instance.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// final int restoredCount = await FluentDb.restore<User>(userInstance);
   /// ```
-  static Future<int> restore<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().restore(item, policy: policy.withTag(tag));
+  static Future<int> restore<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:restore');
+    }
+    return providerByType<T>(dbName: dbName).restore(item, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Restores a soft-deleted entity instance and returns its refreshed state from the database.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// This method is the instance-based counterpart to [restoreAndFetchById]. It is
   /// designed for scenarios where you already hold the entity object in memory (e.g.,
@@ -722,10 +1063,18 @@ class FluentDb {
   ///   print('Entity restored and synced: ${activeUser.id}');
   /// }
   /// ```
-  static Future<T?> restoreAndFetch<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().restoreAndFetch(item, policy: policy.withTag(tag));
+  static Future<T?> restoreAndFetch<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:restoreAndFetch');
+    }
+    return providerByType<T>(dbName: dbName).restoreAndFetch(item, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Performs a transactional batch restoration, safely handling mixed-type collections.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// This method iterates through the provided collection of [items], extracts their
   /// primary keys, and initiates a bulk restoration sequence. It is the most
@@ -739,11 +1088,23 @@ class FluentDb {
   /// final int restoredCount = await FluentDb.restoreAll(deletedUsers);
   /// print('Successfully restored $restoredCount records.');
   /// ```
-  static Future<int> restoreAll<T extends FluentStorable>(Iterable<T>? items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      _executeMixedBatch<T>(items, (provider, typedItems) => provider.restoreAll(typedItems, policy: policy.withTag(tag)));
+  static Future<int> restoreAll<T extends FluentStorable>(Iterable<T>? items, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:restoreAll');
+    }
+    return _executeMixedBatch<T>(
+      items,
+      (provider, typedItems) => provider.restoreAll(typedItems, policy: policy.withTag(tag), dbName: dbName),
+      dbName: dbName,
+    );
+  }
 
   /// Performs a transactional batch restoration of multiple soft-deleted entities
   /// identified by their primary keys.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// This method is the primary entry point for bulk recovery operations. It
   /// coordinates the restoration process by resetting deletion markers across
@@ -755,66 +1116,124 @@ class FluentDb {
   /// final int restoredCount = await FluentDb.restoreItemsByIds<User>({101, 102, 103});
   /// print('Restored $restoredCount records.');
   /// ```
-  static Future<int> restoreItemsByIds<T extends FluentStorable>(Set<dynamic> ids, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().restoreItemsByIds(ids, policy: policy.withTag(tag));
+  static Future<int> restoreItemsByIds<T extends FluentStorable>(Set<dynamic> ids, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:restoreItemsByIds');
+    }
+    return providerByType<T>(dbName: dbName).restoreItemsByIds(ids, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Permanently removes an object instance from the database, bypassing any soft-delete mechanisms.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// await FluentDb.hardDelete<User>(userInstance);
   /// ```
-  static Future<int> hardDelete<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().hardDelete(item, policy: policy.withTag(tag));
+  static Future<int> hardDelete<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:hardDelete');
+    }
+    return providerByType<T>(dbName: dbName).hardDelete(item, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Permanently removes a record from the database by its primary key, bypassing any soft-delete mechanisms.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// final int deletedCount = await FluentDb.hardDeleteById<User>(101);
   /// ```
-  static Future<int> hardDeleteById<T extends FluentStorable>(dynamic id, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().hardDeleteById(id, policy: policy.withTag(tag));
+  static Future<int> hardDeleteById<T extends FluentStorable>(dynamic id, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:hardDeleteById');
+    }
+    return providerByType<T>(dbName: dbName).hardDeleteById(id, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Permanently removes records matching a specific field value, bypassing any soft-delete mechanisms.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// // Permanently delete all users with a specific status
   /// await FluentDb.hardDeleteBy<User>( 'inactive', key: 'status');
   /// ```
-  static Future<int> hardDeleteBy<T extends FluentStorable>(dynamic value, {Object? tag, String? key, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().hardDeleteBy(value, key: key, policy: policy.withTag(tag));
+  static Future<int> hardDeleteBy<T extends FluentStorable>(dynamic value, {Object? tag, String? key, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:hardDeleteBy');
+    }
+    return providerByType<T>(dbName: dbName).hardDeleteBy(value, key: key, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Permanently removes a collection of records from the database by their primary keys.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// // Permanently delete multiple products by their IDs
   /// await FluentDb.hardDeleteItemsByIds<Product>({10, 25, 42});
   /// ```
-  static Future<int> hardDeleteItemsByIds<T extends FluentStorable>(Set<dynamic> ids, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().hardDeleteItemsByIds(ids, policy: policy.withTag(tag));
+  static Future<int> hardDeleteItemsByIds<T extends FluentStorable>(Set<dynamic> ids, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:hardDeleteItemsByIds');
+    }
+    return providerByType<T>(dbName: dbName).hardDeleteItemsByIds(ids, policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Retrieves all records of type [T] that have been marked as soft-deleted.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// // Fetch the last 20 deleted items for potential recovery
   /// final List<User> deletedUsers = await FluentDb.findDeletedItems<User>(limit: 20);
   /// ```
-  static Future<List<T>> findDeletedItems<T extends FluentStorable>({int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().findDeletedItems(limit: limit, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy);
+  static Future<List<T>> findDeletedItems<T extends FluentStorable>({int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:findDeletedItems');
+    }
+    return providerByType<T>(dbName: dbName).findDeletedItems(limit: limit, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy, dbName: dbName);
+  }
 
   /// Permanently deletes all soft-deleted records of type [T] that have exceeded their retention period.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// **Example:**
   /// ```dart
   /// // Run a cleanup task to permanently remove expired deleted records
   /// await FluentDb.purgeSoftDeleted<User>();
   /// ```
-  static Future<int> purgeSoftDeleted<T extends FluentStorable>({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) => providerByType<T>().purgeSoftDeleted(policy: policy.withTag(tag));
+  static Future<int> purgeSoftDeleted<T extends FluentStorable>({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:purgeSoftDeleted');
+    }
+    return providerByType<T>(dbName: dbName).purgeSoftDeleted(policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Permanently and immediately removes all soft-deleted records of type [T].
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// Unlike [purgeSoftDeleted], which respects the retention period, this method
   /// acts as an "Empty Trash" function, forcefully deleting all records currently
@@ -825,10 +1244,18 @@ class FluentDb {
   /// // Manual "forcePurgeSoftDeleted" functionality initiated by the user
   /// final int clearedItems = await FluentDb.forcePurgeSoftDeleted<User>();
   /// ```
-  static Future<int> forcePurgeSoftDeleted<T extends FluentStorable>({Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
-      providerByType<T>().forcePurgeSoftDeleted(policy: policy.withTag(tag));
+  static Future<int> forcePurgeSoftDeleted<T extends FluentStorable>({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:forcePurgeSoftDeleted');
+    }
+    return providerByType<T>(dbName: dbName).forcePurgeSoftDeleted(policy: policy.withTag(tag), dbName: dbName);
+  }
 
   /// Performs a transactional batch restoration, safely handling mixed-type collections.
+  ///
+  /// If [dbName] is provided, the operation is scoped to that specific database.
+  /// If omitted, the system will attempt to auto-resolve the database via
+  /// the model type [T].
   ///
   /// Saves a list of items of type [T] atomically.
   ///
@@ -842,10 +1269,14 @@ class FluentDb {
     FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert,
     Object? tag,
     ExecutionPolicy policy = const ExecutionPolicy(),
+    String? dbName,
   }) async => await _executeMixedBatch<T>(itemsToSave, (provider, typedItems) async {
-    await provider.saveItems(typedItems, saveStrategy: saveStrategy, policy: policy.withTag(tag));
+    if (dbName == null) {
+      FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:saveItems');
+    }
+    await provider.saveItems(typedItems, saveStrategy: saveStrategy, policy: policy.withTag(tag), dbName: dbName);
     return 0;
-  });
+  }, dbName: dbName);
 
   /// Orchestrates a data synchronization cycle between the local database and a remote backend.
   ///
@@ -873,7 +1304,8 @@ class FluentDb {
     Map<String, dynamic>? markAsSyncedFields,
     Object? tag,
     ExecutionPolicy policy = const ExecutionPolicy(),
-  }) => providerByType<T>().syncWithServer(
+    String? dbName,
+  }) => providerByType<T>(dbName: dbName).syncWithServer(
     strategy: strategy,
     onPush: onPush,
     onPull: onPull,
@@ -882,6 +1314,7 @@ class FluentDb {
     markAsSyncedFields: markAsSyncedFields,
     tag: tag,
     policy: policy,
+    dbName: dbName,
   );
 
   /// Initiates a reactive synchronization pipeline for the entity type [T].
@@ -993,8 +1426,9 @@ class FluentDb {
     FluentSyncOptions<T> options = const FluentSyncOptions(),
     String? localWhere,
     List<Object?>? localWhereArgs,
+    String? dbName,
     ExecutionPolicy policy = const ExecutionPolicy(),
-  }) => providerByType<T>().reactiveSync(fetchFromApi: fetchFromApi, options: options, localWhere: localWhere, localWhereArgs: localWhereArgs, policy: policy);
+  }) => providerByType<T>(dbName: dbName).reactiveSync(fetchFromApi: fetchFromApi, options: options, localWhere: localWhere, localWhereArgs: localWhereArgs, policy: policy, dbName: dbName);
 
   /// Dispatches a database task to the background `FluentEngine` for execution.
   ///
@@ -1018,7 +1452,7 @@ class FluentDb {
         provider = providerByModel(task.data as FluentStorable);
       }
 
-      provider ??= providerForType(T);
+      provider ??= providerForType(T, dbName: task.dbName);
       effectiveData = task.copyWith(table: provider.tableName, dbName: provider.dbName);
     }
 
@@ -1075,7 +1509,11 @@ class FluentDb {
   /// [items] The collection of models to process.
   /// [action] The operation to perform (e.g., provider.deleteAll).
   /// Returns the sum of affected rows across all executed batches.
-  static Future<int> _executeMixedBatch<T extends FluentStorable>(Iterable<T>? items, Future<int> Function(FluentProvider provider, List<FluentStorable> typedItems) action) async {
+  static Future<int> _executeMixedBatch<T extends FluentStorable>(
+    Iterable<T>? items,
+    Future<int> Function(FluentProvider provider, List<FluentStorable> typedItems) action, {
+    required String? dbName,
+  }) async {
     if (items == null || items.isEmpty) return 0;
 
     final Map<Type, List<FluentStorable>> groupedItems = {};
@@ -1087,7 +1525,7 @@ class FluentDb {
       final Type targetType = entry.key;
       final List<FluentStorable> typedItems = entry.value;
 
-      final FluentProvider provider = providerForType(targetType);
+      final FluentProvider provider = providerForType(targetType, dbName: dbName);
 
       return action(provider, typedItems);
     }).toList();

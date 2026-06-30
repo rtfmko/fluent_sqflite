@@ -74,7 +74,7 @@ extension FluentDbMaintenance on FluentDb {
         for (final FluentProvider dao in group.providerList) {
           // 1. TTL Cleanup
           try {
-            await dao.clearExpiredItems(executor: txn);
+            await dao.clearExpiredItems(executor: txn, dbName: group.dbName);
             expiredCleaned++;
           } catch (e, st) {
             FluentLog.error('Failed to clear expired items in "${dao.tableName}"', e, st, tag: 'FluentDb:maintenance', hint: 'Check if the TTL column is indexed properly for performance.');
@@ -116,12 +116,14 @@ extension FluentDbMaintenance on FluentDb {
   Future<void> _purgeSoftDeletedGlobal() async {
     FluentLog.debug('Starting global soft-delete purge procedure', tag: 'FluentDb:purge');
 
-    for (final FluentProvider provider in _providers.values) {
-      if (provider.modelSample is FluentSoftDeletable) {
-        try {
-          await provider.purgeSoftDeleted(policy: ExecutionPolicy.background);
-        } catch (e) {
-          FluentLog.warning('Auto-purge failed for ${provider.tableName}', tag: 'FluentDb:purge', context: {'error': e.toString()});
+    for (final Map<Type, FluentProvider> providersInGroup in _groupedRegistry.values) {
+      for (final FluentProvider provider in providersInGroup.values) {
+        if (provider.modelSample is FluentSoftDeletable) {
+          try {
+            await provider.purgeSoftDeleted(policy: ExecutionPolicy.background, dbName: provider.dbName);
+          } catch (e) {
+            FluentLog.warning('Auto-purge failed for ${provider.tableName}', tag: 'FluentDb:purge', context: {'error': e.toString()});
+          }
         }
       }
     }

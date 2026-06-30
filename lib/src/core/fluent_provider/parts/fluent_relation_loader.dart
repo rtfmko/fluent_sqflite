@@ -46,7 +46,7 @@ extension FluentRelationsLoader<T extends FluentStorable> on FluentRelationsMixi
   ///
   /// Returns a [Future<T>] completing with the fully hydrated, structurally rich object model graph.
   Future<T> loadAllRelations(T model, Map<String, dynamic> rawJson) async {
-    final relations = resolvedRelations;
+    final Map<Type, FluentDbRelation<FluentStorable, FluentStorable>> relations = resolvedRelations;
     if (relations.isEmpty) return model;
 
     final List<Future<void>> futures = [];
@@ -57,7 +57,7 @@ extension FluentRelationsLoader<T extends FluentStorable> on FluentRelationsMixi
 
       if (!relation.autoLoad) continue;
 
-      final targetProvider = FluentDb.providerForType(entry.key);
+      final FluentProvider<FluentStorable> targetProvider = relatedProvider(entry.key);
       final String key = relation.mapToKey;
 
       // Evaluate relational maps to orchestrate targeted index queries against child tables
@@ -67,7 +67,7 @@ extension FluentRelationsLoader<T extends FluentStorable> on FluentRelationsMixi
           final dynamic keyValue = rawJson[relation.localKey];
           if (keyValue != null) {
             futures.add(
-              targetProvider.findById(keyValue).then((relatedObject) {
+              targetProvider.findById(keyValue, dbName: targetProvider.dbName).then((relatedObject) {
                 if (relatedObject != null) {
                   model.setRelation(key, relatedObject);
                 }
@@ -85,7 +85,7 @@ extension FluentRelationsLoader<T extends FluentStorable> on FluentRelationsMixi
             final String remoteKey = relation.remoteKey ?? targetProvider.defaultForeignKey;
 
             futures.add(
-              targetProvider.find(where: '$remoteKey = ?', whereArgs: [keyValue]).then((relatedList) {
+              targetProvider.find(where: '$remoteKey = ?', whereArgs: [keyValue], dbName: targetProvider.dbName).then((relatedList) {
                 if (relatedList.isNotEmpty) {
                   model.setRelation(key, relatedList);
                 }

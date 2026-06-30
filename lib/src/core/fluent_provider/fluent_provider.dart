@@ -477,6 +477,25 @@ abstract class FluentProvider<T extends FluentStorable> {
     FluentLog.debug('Database name set to "$dbName"', tag: '$runtimeType:init', context: {'hashCode': hashCode, 'modelType': modelType});
   }
 
+  /// Retrieves a provider for a related model within the same database context.
+  ///
+  /// This method is designed for [FluentRelationsMixin] to resolve child or
+  /// pivot providers while strictly adhering to the current database instance
+  /// (`dbName`).
+  ///
+  /// By using [relatedProvider], you ensure that relations are never resolved
+  /// across different databases (e.g., trying to join a 'core_app' Wishlist
+  /// with a 'history' GoodsCard), which prevents "no such table" runtime errors.
+  ///
+  /// [R] is the type of the model the related provider manages.
+  /// [type] is the [Type] of the model (usually `TargetModel.runtimeType`).
+  ///
+  /// Returns a [FluentProvider] instance scoped to the current [dbName].
+  /// Throws [ProviderNotFoundException] if the provider for the given type
+  /// is not registered in this specific database group.
+  @internal
+  FluentProvider<T> relatedProvider(Type type) => FluentDb.providerForType(type, dbName: dbName) as FluentProvider<T>;
+
   /// Self-registers this provider instance with the central system registry.
   ///
   /// This allows the [FluentDb] to discover this provider dynamically
@@ -485,9 +504,9 @@ abstract class FluentProvider<T extends FluentStorable> {
   /// [registerFn] The callback provided by the registry to handle
   /// type-safe registration of the [FluentProvider].
   @internal
-  void registerSelf(void Function<M extends FluentStorable>(FluentProvider<M>) registerFn) {
+  void registerSelf(void Function<M extends FluentStorable>(FluentProvider<M>, String) registerFn) {
     FluentLog.debug('Registering provider instance', tag: '$runtimeType:init');
-    registerFn<T>(this);
+    registerFn<T>(this, dbName);
   }
 
   /// Overrides the table name for testing purposes.

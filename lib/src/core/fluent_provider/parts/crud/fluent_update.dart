@@ -64,7 +64,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<int> update(T item, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> update(T item, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     final String pkName = _cachedPrimaryKey?.name ?? 'id';
 
     final Map<String, dynamic> preparedData = _prepareSqlJson(item);
@@ -94,7 +94,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.update,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       data: item,
       helper: TableHelper(id: id, dataMap: preparedData, multiple: false),
       policy: policy,
@@ -127,7 +127,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<int> updateByKey(dynamic id, String updateKey, dynamic updateValue, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> updateByKey(dynamic id, String updateKey, dynamic updateValue, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     final String pkName = _cachedPrimaryKey?.name ?? 'id';
 
     if (!tableColumns.contains(updateKey)) {
@@ -150,7 +150,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
       action: FluentDbAction.updateSingleField,
 
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(id: id, key: updateKey, value: updateValue, multiple: false),
       policy: policy,
     );
@@ -184,7 +184,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<int> updateFieldsMultiple(dynamic id, Map<String, dynamic> fields, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> updateFieldsMultiple(dynamic id, Map<String, dynamic> fields, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (fields.isEmpty) {
       return Future<int>.value(0);
     }
@@ -200,7 +200,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.updateMultipleFields,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(id: id, dataMap: fields, multiple: false),
       policy: policy,
     );
@@ -238,7 +238,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
   ///
   /// Returns a [Future<int>] representing the number of rows affected by the update.
   /// Throws a [FluentSchemaException] if the entity lacks a valid primary key.
-  Future<int> updateWithRelations(T item, {FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> updateWithRelations(T item, {FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     // Transform model entity into a flattened SQL-compatible map structure
     final Map<String, dynamic> preparedData = _prepareSqlJson(item);
 
@@ -266,7 +266,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.updateWithRelations,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       data: item,
       relations: [preparedData],
       helper: TableHelper(id: id, dataMap: preparedData, syncMode: syncMode),
@@ -293,7 +293,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
   /// [syncMode] Determines how nested relations are merged (e.g., preserving local children or replacing them).
   /// [policy] The [ExecutionPolicy] defining task priority and concurrency constraints.
   @internal
-  Future<int> updateAllWithRelations(Iterable<T> items, {FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> updateAllWithRelations(Iterable<T> items, {FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (items.isEmpty) {
       FluentLog.warning('Batch relational update aborted: input collection is empty', tag: '$tableName:updateAllWithRelations', context: {'tableName': tableName});
       return Future.value(0);
@@ -308,7 +308,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.updateAllWithRelations,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       data: itemList,
       relations: preparedJsons,
       helper: TableHelper(multiple: true, syncMode: syncMode),
@@ -350,7 +350,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
   /// Returns a [Future<T?>] resolving to the fresh entity instance or `null` if the
   /// operation could not be completed.
   @internal
-  Future<T?> updateAndFetch(T item, {ExecutionPolicy policy = const ExecutionPolicy()}) async {
+  Future<T?> updateAndFetch(T item, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async {
     final dynamic id = item.primaryKeyValue;
 
     if (id == null) {
@@ -365,11 +365,11 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
 
     FluentLog.debug('Initiating update-and-fetch sequence', tag: '$tableName:updateAndFetch', context: {'tableName': tableName, 'targetRecordId': id.toString()});
 
-    final int rowsAffected = await update(item, policy: policy);
+    final int rowsAffected = await update(item, policy: policy, dbName: dbName);
 
     if (rowsAffected > 0) {
       FluentLog.debug('Update successful, fetching refreshed entity state', tag: '$tableName:updateAndFetch', context: {'tableName': tableName, 'targetRecordId': id.toString()});
-      return await findById(id, policy: policy);
+      return await findById(id, policy: policy, dbName: dbName);
     }
 
     FluentLog.debug('Update-and-fetch aborted: no rows were affected by update', tag: '$tableName:updateAndFetch', context: {'tableName': tableName, 'targetRecordId': id.toString()});
@@ -405,7 +405,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
   ///
   /// Returns a [Future<int>] representing the total count of rows affected by the batch operation.
   @internal
-  Future<int> updateAll(Iterable<T> items, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> updateAll(Iterable<T> items, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (items.isEmpty) {
       FluentLog.warning(
         'Batch update aborted: input collection is empty',
@@ -425,7 +425,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.updateAll,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(arguments: items.toList(), multiple: true),
       policy: policy,
     );
@@ -462,7 +462,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
   ///
   /// Returns a [Future<int>] representing the number of records affected by the update.
   @internal
-  Future<int> updateFieldsMultipleByIds(Set<dynamic> ids, Map<String, dynamic> fields, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> updateFieldsMultipleByIds(Set<dynamic> ids, Map<String, dynamic> fields, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (ids.isEmpty || fields.isEmpty) {
       FluentLog.warning(
         'Batch field update aborted: empty identifiers or fields map',
@@ -484,7 +484,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.updateMultipleFieldsByIds,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(dataMap: fields, where: '$pkName IN (...)', arguments: ids.toList(), multiple: true),
       policy: policy,
     );

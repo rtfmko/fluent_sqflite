@@ -77,6 +77,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     List<Object?>? additionalWhereArgs,
     Map<String, dynamic>? markAsSyncedFields,
     Object? tag,
+    String? dbName,
     ExecutionPolicy policy = const ExecutionPolicy(),
   }) async {
     final bool isSoftDeletable = modelSample is FluentSoftDeletable;
@@ -101,7 +102,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
         }
 
         FluentLog.debug('Saving ${serverItems.length} items to database', tag: 'sync_$tableName');
-        await saveItems(serverItems, saveStrategy: FluentSaveStrategy.upsert, policy: policy.withTag('${'sync_$tableName'}_pull'));
+        await saveItems(serverItems, saveStrategy: FluentSaveStrategy.upsert, policy: policy.withTag('${'sync_$tableName'}_pull'), dbName: dbName);
 
         FluentLog.debug('Successfully pulled and saved ${serverItems.length} items', tag: 'sync_$tableName');
         return FluentSyncResult(strategy: strategy, isSuccess: true, itemsProcessed: serverItems.length);
@@ -132,7 +133,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       }
 
       FluentLog.debug('Reading local items with condition: $syncWhere', tag: 'sync_$tableName');
-      final List<T> localItems = await find(where: syncWhere, whereArgs: additionalWhereArgs, policy: policy.withTag('${'sync_$tableName'}_read'));
+      final List<T> localItems = await find(where: syncWhere, whereArgs: additionalWhereArgs, policy: policy.withTag('${'sync_$tableName'}_read'), dbName: dbName);
 
       if (localItems.isEmpty) {
         FluentLog.debug('No local items found to process', tag: 'sync_$tableName');
@@ -151,12 +152,12 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       // 4. POST-SYNC CLEANUP
       if (strategy == FluentSyncStrategy.purgeDeleted) {
         FluentLog.debug('Purging ${localItems.length} items from database', tag: 'sync_$tableName');
-        await hardDeleteAll(localItems, policy: policy.withTag('${'sync_$tableName'}_purge'));
+        await hardDeleteAll(localItems, policy: policy.withTag('${'sync_$tableName'}_purge'), dbName: dbName);
       } else if (strategy == FluentSyncStrategy.pushActive && markAsSyncedFields != null) {
         final Set<dynamic> ids = localItems.map((e) => e.primaryKeyValue).where((id) => id != null).toSet();
         if (ids.isNotEmpty) {
           FluentLog.debug('Marking ${ids.length} items as synced', tag: 'sync_$tableName');
-          await updateFieldsMultipleByIds(ids, markAsSyncedFields, policy: policy.withTag('${'sync_$tableName'}_mark_synced'));
+          await updateFieldsMultipleByIds(ids, markAsSyncedFields, policy: policy.withTag('${'sync_$tableName'}_mark_synced'), dbName: dbName);
         }
       }
 
@@ -231,6 +232,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     FluentSyncOptions<T> options = const FluentSyncOptions(),
     String? localWhere,
     List<Object?>? localWhereArgs,
+    String? dbName,
     ExecutionPolicy policy = const ExecutionPolicy(),
   }) async* {
     final Stopwatch pipelineTimer = Stopwatch()..start();
@@ -252,9 +254,10 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
           sortDirection: options.sortDirection,
           policy: policy,
           ignoreLazy: options.ignoreLazy,
+          dbName: dbName,
         );
       } else {
-        localData = await find(where: localWhere, whereArgs: localWhereArgs, limit: options.limit, maxDepth: options.maxDepth, policy: policy, ignoreLazy: options.ignoreLazy);
+        localData = await find(where: localWhere, whereArgs: localWhereArgs, limit: options.limit, maxDepth: options.maxDepth, policy: policy, ignoreLazy: options.ignoreLazy, dbName: dbName);
       }
       FluentLog.debug('Cache loaded', tag: 'sync:cache', context: {'count': localData.length, 'model': T.toString(), 'ms': pipelineTimer.elapsedMilliseconds});
       yield FluentDataEvent(phase: FluentPipelinePhase.cacheReady, data: localData, executionMs: pipelineTimer.elapsedMilliseconds);
@@ -308,7 +311,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
         case FluentApiErrorBehavior.clearCacheAndYieldError:
           FluentLog.info('Clearing cache due to error', tag: 'sync:error');
           yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb, executionMs: pipelineTimer.elapsedMilliseconds);
-          await _handleClearCache(localWhere, localWhereArgs, policy);
+          await _handleClearCache(localWhere, localWhereArgs, policy, dbName);
           yield FluentDataEvent(phase: FluentPipelinePhase.error, error: lastError, executionMs: pipelineTimer.elapsedMilliseconds);
           break;
 
@@ -330,7 +333,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       FluentLog.info('Empty API response', tag: 'sync:api');
       if (options.emptyApiBehavior == FluentEmptyApiBehavior.clearCache) {
         yield FluentDataEvent(phase: FluentPipelinePhase.savingToDb, executionMs: pipelineTimer.elapsedMilliseconds);
-        await _handleClearCache(localWhere, localWhereArgs, policy);
+        await _handleClearCache(localWhere, localWhereArgs, policy, dbName);
       }
       yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: [], executionMs: pipelineTimer.elapsedMilliseconds);
       return;
@@ -355,6 +358,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
             localWhere: localWhere,
             localWhereArgs: localWhereArgs,
             policy: policy,
+            dbName: dbName,
           ).catchError((Object e, StackTrace st) {
             FluentLog.error('Background DB persistence failed', e, st, tag: 'sync:persistence:error');
           });
@@ -394,13 +398,13 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
   /// * [localWhere]: The SQL WHERE clause condition.
   /// * [localWhereArgs]: The arguments for the WHERE clause.
   /// * [policy]: The [ExecutionPolicy] governing the database transaction.
-  Future<void> _handleClearCache(String? localWhere, List<Object?>? localWhereArgs, ExecutionPolicy policy) async {
+  Future<void> _handleClearCache(String? localWhere, List<Object?>? localWhereArgs, ExecutionPolicy policy, String? dbName) async {
     if (localWhere != null && localWhere.trim().isNotEmpty) {
       FluentLog.debug('Performing scoped cache cleanup', tag: 'sync:cache:clear', context: {'model': T.toString(), 'where': localWhere, 'args': localWhereArgs});
-      await deleteWhere(where: localWhere, whereArgs: localWhereArgs, isHardDelete: false, policy: policy);
+      await deleteWhere(where: localWhere, whereArgs: localWhereArgs, isHardDelete: false, policy: policy, dbName: dbName);
     } else {
       FluentLog.warning('Performing full table truncation', tag: 'sync:cache:clear', hint: 'All local records for ${T.toString()} have been purged.', context: {'model': T.toString()});
-      await clearTable(policy: policy);
+      await clearTable(policy: policy, dbName: dbName);
     }
   }
 
@@ -428,10 +432,11 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     String? localWhere,
     List<Object?>? localWhereArgs,
     required ExecutionPolicy policy,
+    required String? dbName,
   }) async {
     if (strategy == FluentMergeStrategy.none) return;
 
-    final List<T> localData = await find(where: localWhere, whereArgs: localWhereArgs, policy: policy);
+    final List<T> localData = await find(where: localWhere, whereArgs: localWhereArgs, policy: policy, dbName: dbName);
     final Set<dynamic> localIds = localData.map((e) => e.primaryKeyValue).where((id) => id != null).toSet();
 
     final List<T> itemsToInsert = [];
@@ -451,11 +456,11 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       case FluentMergeStrategy.upsert:
       case FluentMergeStrategy.syncDeletions:
         if (itemsToInsert.isNotEmpty) {
-          await saveItems(itemsToInsert, saveStrategy: FluentSaveStrategy.insertOnly, policy: policy);
+          await saveItems(itemsToInsert, saveStrategy: FluentSaveStrategy.insertOnly, policy: policy, dbName: dbName);
         }
 
         if (itemsToUpdate.isNotEmpty) {
-          await updateAllWithRelations(itemsToUpdate, syncMode: relationSyncMode, policy: policy);
+          await updateAllWithRelations(itemsToUpdate, syncMode: relationSyncMode, policy: policy, dbName: dbName);
         }
 
         if (strategy == FluentMergeStrategy.syncDeletions) {
@@ -474,18 +479,18 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
 
             if (isSoftDeletable) {
               FluentLog.debug('Soft-deleting ${itemsToDelete.length} obsolete items', tag: 'PipelineSync');
-              await deleteAll(itemsToDelete, policy: policy);
+              await deleteAll(itemsToDelete, policy: policy, dbName: dbName);
             } else {
               FluentLog.debug('Hard-deleting ${itemsToDelete.length} obsolete items', tag: 'PipelineSync');
-              await hardDeleteAll(itemsToDelete, policy: policy);
+              await hardDeleteAll(itemsToDelete, policy: policy, dbName: dbName);
             }
           }
         }
         break;
       case FluentMergeStrategy.replace:
         FluentLog.info('Executing replace strategy for ${T.toString()}', tag: 'sync:merge');
-        await _handleClearCache(localWhere, localWhereArgs, policy);
-        await saveItems(apiData, saveStrategy: FluentSaveStrategy.insertOnly, policy: policy);
+        await _handleClearCache(localWhere, localWhereArgs, policy, dbName);
+        await saveItems(apiData, saveStrategy: FluentSaveStrategy.insertOnly, policy: policy, dbName: dbName);
         break;
       case FluentMergeStrategy.none:
         return;

@@ -64,14 +64,14 @@ extension FluentSave<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<void> saveItem(T item, {FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert, ExecutionPolicy policy = const ExecutionPolicy()}) async {
+  Future<void> saveItem(T item, {FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async {
     FluentLog.debug(
       'Request to add single item into data layer pipeline',
       tag: '$tableName:saveItem',
       context: {'tableName': tableName, 'saveStrategy': saveStrategy.name, 'hasCustomPolicy': policy != const ExecutionPolicy()},
     );
 
-    await saveItems([item], saveStrategy: saveStrategy, policy: policy);
+    await saveItems([item], saveStrategy: saveStrategy, policy: policy, dbName: dbName);
   }
 
   /// Saves a collection of objects [items] into the table [$tableName].
@@ -103,7 +103,14 @@ extension FluentSave<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<void> saveItems(List<T> items, {FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert, Batch? sharedBatch, List<Map<String, dynamic>>? cachedJsons, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<void> saveItems(
+    List<T> items, {
+    FluentSaveStrategy saveStrategy = FluentSaveStrategy.upsert,
+    Batch? sharedBatch,
+    List<Map<String, dynamic>>? cachedJsons,
+    ExecutionPolicy policy = const ExecutionPolicy(),
+    String? dbName,
+  }) {
     final int itemsLength = items.length;
     if (itemsLength == 0) return Future.value();
 
@@ -121,7 +128,7 @@ extension FluentSave<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.save,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       ignoreLazy: true,
       maxDepth: 0,
       data: items,

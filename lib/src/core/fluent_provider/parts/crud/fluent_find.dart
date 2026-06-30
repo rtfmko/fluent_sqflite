@@ -58,14 +58,14 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<T?> findOne({int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) async {
+  Future<T?> findOne({int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async {
     FluentLog.debug(
       'Evaluating operational pipeline constraints for single-row entity lookup',
       tag: '$tableName:findOne',
       context: {'tableName': tableName, 'maxDepth': maxDepth, 'ignoreLazy': ignoreLazy, 'hasCustomPolicy': policy != const ExecutionPolicy()},
     );
 
-    final List<T> results = await findAll(maxDepth: maxDepth, ignoreLazy: ignoreLazy, limit: 1, policy: policy);
+    final List<T> results = await findAll(maxDepth: maxDepth, ignoreLazy: ignoreLazy, limit: 1, policy: policy, dbName: dbName);
 
     return results.isNotEmpty ? results.first : null;
   }
@@ -92,7 +92,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<List<T>> findAll({int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<List<T>> findAll({int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     FluentLog.debug(
       'Initiating global operational query pipeline for batch row selection',
       tag: '$tableName:findAll',
@@ -102,7 +102,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.findAll,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       maxDepth: maxDepth,
       ignoreLazy: ignoreLazy,
       helper: TableHelper(limit: limit, multiple: true, where: _injectSoftDelete(null)),
@@ -143,6 +143,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
     int maxDepth = 1,
     bool ignoreLazy = false,
     ExecutionPolicy policy = const ExecutionPolicy(),
+    String? dbName,
   }) {
     FluentLog.debug(
       'Initiating localized query pipeline for unexpired validation row selection',
@@ -162,7 +163,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.findValidItems,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       maxDepth: maxDepth,
       ignoreLazy: ignoreLazy,
       helper: TableHelper(limit: limit, multiple: true, sortDirection: sortDirection, where: _injectSoftDelete(where), whereArgs: whereArgs),
@@ -198,7 +199,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<List<T>> findItemsBy(dynamic value, {String? key, int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<List<T>> findItemsBy(dynamic value, {String? key, int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     // Fall back to the inferred primary key identifier if no custom attribute key is passed
     final String searchKey = key ?? (_cachedPrimaryKey?.name ?? 'id');
 
@@ -219,7 +220,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.findItemsBy,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       maxDepth: maxDepth,
       ignoreLazy: ignoreLazy,
       helper: TableHelper(limit: limit, key: searchKey, value: value, where: _injectSoftDelete('$searchKey = ?'), whereArgs: [value], multiple: true),
@@ -252,7 +253,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<T?> findById(dynamic id, {int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<T?> findById(dynamic id, {int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     FluentLog.debug(
       'Initiating localized query pipeline for primary key row selection',
       tag: '$tableName:findById',
@@ -262,7 +263,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.findById,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       maxDepth: maxDepth,
       ignoreLazy: ignoreLazy,
       helper: TableHelper(id: id, limit: 1, multiple: false, where: _injectSoftDelete(null)),
@@ -309,6 +310,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
     int maxDepth = 1,
     bool ignoreLazy = false,
     ExecutionPolicy policy = const ExecutionPolicy(),
+    String? dbName,
   }) {
     FluentLog.debug(
       'Initiating global operational query pipeline for structured condition row selection',
@@ -328,7 +330,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
 
     final FluentTask task = FluentTask(
       action: FluentDbAction.find,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       table: tableName,
       maxDepth: maxDepth,
       ignoreLazy: ignoreLazy,
@@ -371,7 +373,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   /// print('Found ${deletedUsers.length} deleted items.');
   /// ```
   @internal
-  Future<List<T>> findDeletedItems({int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<List<T>> findDeletedItems({int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (modelSample is! FluentSoftDeletable) {
       FluentLog.warning(
         'Find-deleted items aborted: model does not support soft-deletion',
@@ -391,7 +393,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.findDeletedItems,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       maxDepth: maxDepth,
       ignoreLazy: ignoreLazy,
       helper: TableHelper(where: _injectSoftDelete(null, requestDeletedOnly: true), limit: limit, multiple: true),

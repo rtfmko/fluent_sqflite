@@ -48,18 +48,35 @@ class MigrationFailedException extends FluentException {
 /// or `add` when a related model's DAO hasn't been registered.
 class ProviderNotFoundException extends FluentException {
   /// The type of the model that lacks a registered provider.
-  final Type modelType;
+  final String searchTarget;
 
   /// Creates a [ProviderNotFoundException].
   ///
   /// * [modelType]: The type of model (e.g., AddressModel) that is missing a DAO.
   /// * [stackTrace]: Helps pinpoint which relation caused the error.
-  ProviderNotFoundException(this.modelType, {StackTrace? stackTrace})
+  ProviderNotFoundException(this.searchTarget, {StackTrace? stackTrace})
     : super(
-        'No registered DAO found for model type "$modelType". '
+        'No registered DAO found for "$searchTarget". '
         'Check if you added it to the FluentGroup in your init() call.',
         stackTrace,
       );
+}
+
+class FluentConfigurationException extends FluentException {
+  FluentConfigurationException(String message, {StackTrace? stackTrace})
+      : super(message, stackTrace);
+}
+
+class AmbiguousProviderException extends FluentException {
+  final String searchTarget;
+  final List<String> availableGroups;
+
+  AmbiguousProviderException(this.searchTarget, this.availableGroups, {StackTrace? stackTrace})
+      : super(
+    'Ambiguous resolution: "$searchTarget" exists in multiple databases: ${availableGroups.join(', ')}. '
+        'You must explicitly provide the "dbName" parameter.',
+    stackTrace,
+  );
 }
 
 /// Exception thrown when a value in [buildJson] cannot be converted to a valid SQLite type.

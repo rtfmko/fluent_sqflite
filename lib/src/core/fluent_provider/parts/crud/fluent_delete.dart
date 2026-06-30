@@ -58,11 +58,11 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<int> delete(T item, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> delete(T item, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (modelSample is FluentSoftDeletable) {
       final FluentSoftDeletable sample = item as FluentSoftDeletable;
       sample.deletedAt = DateTime.now();
-      return update(item, policy: policy);
+      return update(item, policy: policy, dbName: dbName);
     }
 
     final String pkName = _cachedPrimaryKey?.name ?? 'id';
@@ -88,7 +88,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.delete,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       data: item,
       helper: TableHelper(id: id, multiple: false),
       policy: policy,
@@ -121,7 +121,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<int> deleteBy(dynamic value, {String? key, Batch? batch, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> deleteBy(dynamic value, {String? key, Batch? batch, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     final String searchKey = key ?? (_cachedPrimaryKey?.name ?? 'id');
 
     FluentLog.debug(
@@ -154,7 +154,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.deleteBy,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(key: searchKey, value: value, where: '$searchKey = ?', whereArgs: [value], multiple: true),
       policy: policy,
     );
@@ -189,7 +189,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<int> deleteItemsByIds(Set<dynamic> ids, {Batch? sharedBatch, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> deleteItemsByIds(Set<dynamic> ids, {Batch? sharedBatch, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     final int idsLength = ids.length;
     if (idsLength == 0) {
       FluentLog.debug('Batch primary identity multi-purge operation short-circuited due to empty parameters', tag: '$tableName:deleteItemsByIds', context: {'tableName': tableName});
@@ -227,7 +227,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.deleteItemsByIds,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(where: '$pkName IN (...)', arguments: ids.toList(), multiple: true),
       policy: policy,
     );
@@ -245,7 +245,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// [whereArgs] The arguments to bind to the placeholders in the [where] clause.
   /// [isHardDelete] If true, bypasses soft-delete mechanics and physically removes rows.
   @internal
-  Future<int> deleteWhere({required String where, List<Object?>? whereArgs, bool isHardDelete = false, Batch? batch, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> deleteWhere({required String where, List<Object?>? whereArgs, bool isHardDelete = false, Batch? batch, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (where.trim().isEmpty) {
       FluentLog.warning('Aborted deleteWhere: empty condition', tag: '$tableName:deleteWhere');
       return Future.value(0);
@@ -272,7 +272,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.deleteWhere,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(where: where, arguments: whereArgs, multiple: true, isHardDelete: isHardDelete),
       policy: policy,
     );
@@ -302,7 +302,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<int> purgeSoftDeleted({ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> purgeSoftDeleted({ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (modelSample is! FluentSoftDeletable) {
       FluentLog.warning(
         'Database soft-delete purge rejected: model does not implement FluentSoftDeletable',
@@ -319,7 +319,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
       context: {'tableName': tableName, 'policy': policy.toString(), 'hasCustomPolicy': policy != const ExecutionPolicy()},
     );
 
-    final FluentTask task = FluentTask(action: FluentDbAction.purgeSoftDeleted, table: tableName, dbName: dbName, isSystem: true, helper: TableHelper(multiple: true), policy: policy);
+    final FluentTask task = FluentTask(action: FluentDbAction.purgeSoftDeleted, table: tableName, dbName: dbName ?? this.dbName, isSystem: true, helper: TableHelper(multiple: true), policy: policy);
 
     return FluentDb.executeTask<T, int>(provider: this, task: task);
   }
@@ -347,7 +347,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<int> forcePurgeSoftDeleted({ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> forcePurgeSoftDeleted({ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (modelSample is! FluentSoftDeletable) {
       FluentLog.warning(
         'Database force-purge rejected: model does not implement FluentSoftDeletable',
@@ -364,7 +364,14 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
       context: {'tableName': tableName, 'policy': policy.toString(), 'bypassRetention': true, 'hasCustomPolicy': policy != const ExecutionPolicy()},
     );
 
-    final FluentTask task = FluentTask(action: FluentDbAction.forcePurgeSoftDeleted, table: tableName, dbName: dbName, isSystem: true, helper: TableHelper(multiple: true), policy: policy);
+    final FluentTask task = FluentTask(
+      action: FluentDbAction.forcePurgeSoftDeleted,
+      table: tableName,
+      dbName: dbName ?? this.dbName,
+      isSystem: true,
+      helper: TableHelper(multiple: true),
+      policy: policy,
+    );
 
     return FluentDb.executeTask<T, int>(provider: this, task: task);
   }
@@ -401,7 +408,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// print('Successfully deleted $count entries.');
   /// ```
   @internal
-  Future<int> deleteAll(Iterable<T> items, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> deleteAll(Iterable<T> items, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (items.isEmpty) {
       FluentLog.warning(
         'Batch delete aborted: input collection is empty',
@@ -430,7 +437,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
       context: {'tableName': tableName, 'uniqueIdsCount': ids.length, 'totalItemsProvided': items.length, 'hasCustomPolicy': policy != const ExecutionPolicy()},
     );
 
-    return deleteItemsByIds(ids, policy: policy);
+    return deleteItemsByIds(ids, policy: policy, dbName: dbName);
   }
 
   /// Permanently and completely removes a collection of domain entities from storage.
@@ -465,7 +472,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// print('Permanently erased $purgedCount sensitive records.');
   /// ```
   @internal
-  Future<int> hardDeleteAll(Iterable<T> items, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> hardDeleteAll(Iterable<T> items, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (items.isEmpty) {
       FluentLog.warning(
         'Hard-delete batch aborted: input collection is empty',
@@ -494,7 +501,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
       context: {'tableName': tableName, 'uniqueIdsCount': ids.length, 'totalItemsProvided': items.length, 'bypassSoftDelete': true, 'hasCustomPolicy': policy != const ExecutionPolicy()},
     );
 
-    return hardDeleteItemsByIds(ids, policy: policy);
+    return hardDeleteItemsByIds(ids, policy: policy, dbName: dbName);
   }
 
   /// Permanently removes the provided [item] from the database.
@@ -526,7 +533,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// }
   /// ```
   @internal
-  Future<int> hardDelete(T item, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> hardDelete(T item, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     final dynamic id = item.primaryKeyValue;
 
     if (id == null) {
@@ -548,7 +555,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.hardDelete,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       data: item,
       helper: TableHelper(id: id, multiple: false, isHardDelete: true),
       policy: policy,
@@ -585,12 +592,12 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// }
   /// ```
   @internal
-  Future<int> hardDeleteById(dynamic id, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> hardDeleteById(dynamic id, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (id == null) {
       FluentLog.warning(
         'Hard-delete-by-id operation rejected: invalid identity',
         tag: '$tableName:hardDeleteById',
-        hint: 'The provided primary key is null. A valid identity is required for physical removal.',
+        hint: 'The provided primary key is null. A valid identity is  for physical removal.',
         context: {'tableName': tableName},
       );
       return Future.value(0);
@@ -605,7 +612,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.hardDelete,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(id: id, multiple: false, isHardDelete: true),
       policy: policy,
     );
@@ -623,7 +630,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// [batch] Optional transaction batch to defer execution.
   /// [policy] Defines prioritization, concurrency, and task management configurations.
   @internal
-  Future<int> hardDeleteWhere({required String where, List<Object?>? whereArgs, Batch? batch, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> hardDeleteWhere({required String where, List<Object?>? whereArgs, Batch? batch, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (where.trim().isEmpty) {
       FluentLog.warning('Aborted hardDeleteWhere: empty condition', tag: '$tableName:hardDeleteWhere');
       return Future.value(0);
@@ -644,7 +651,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.hardDeleteWhere,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(where: where, arguments: whereArgs, multiple: true, isHardDelete: true),
       policy: policy,
     );
@@ -682,7 +689,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<int> hardDeleteBy(dynamic value, {String? key, Batch? batch, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> hardDeleteBy(dynamic value, {String? key, Batch? batch, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     final String searchKey = key ?? (_cachedPrimaryKey?.name ?? 'id');
 
     if (batch != null) {
@@ -705,7 +712,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.hardDeleteBy,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(key: searchKey, value: value, where: '$searchKey = ?', whereArgs: [value], multiple: true, isHardDelete: true),
       policy: policy,
     );
@@ -742,7 +749,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<int> hardDeleteItemsByIds(Set<dynamic> ids, {Batch? sharedBatch, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> hardDeleteItemsByIds(Set<dynamic> ids, {Batch? sharedBatch, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (ids.isEmpty) {
       FluentLog.warning(
         'Hard-delete-by-ids aborted: identity set is empty',
@@ -775,7 +782,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.hardDeleteItemsByIds,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(where: '$pkName IN (...)', arguments: ids.toList(), multiple: true, isHardDelete: true),
       policy: policy,
     );

@@ -23,7 +23,13 @@ part of '../fluent_db.dart';
 /// layer across your application's start-up, backgrounding, and testing phases.
 extension FluentDbLifecycle on FluentDb {
   /// Checks if a database file by [dbName] is currently open.
-  bool isDatabaseOpen(String dbName) => _providers.values.any((p) => p.db.path.endsWith(dbName) && p.db.isOpen);
+  // bool isDatabaseOpen(String dbName) => _providers.values.any((p) => p.db.path.endsWith(dbName) && p.db.isOpen);
+  bool isDatabaseOpen(String dbName) {
+    final Map<Type, FluentProvider<FluentStorable>>? group = _groupedRegistry[dbName];
+    if (group == null) return false;
+
+    return group.values.any((p) => p.db.isOpen);
+  }
 
   /// Initializes the database registry by processing [groups] of [FluentProvider] entities.
   ///
@@ -104,7 +110,7 @@ extension FluentDbLifecycle on FluentDb {
 
         for (final FluentProvider dao in group.providerList) {
           dao.refreshSchema();
-          _verifyAndFixIntegrity(dao);
+          _verifyAndFixIntegrity(dao, group.dbName);
 
           tableNames.add(dao.tableName);
 
@@ -173,26 +179,27 @@ extension FluentDbLifecycle on FluentDb {
       }
     }
 
-    for (final FluentRelationsMixin relDao in _providers.values.whereType<FluentRelationsMixin>()) {
-      final Map<Type, FluentDbRelation> syncRels = relDao.resolvedRelations;
-      if (syncRels.isEmpty) continue;
+    for (final Map<Type, FluentProvider<FluentStorable>> group in _groupedRegistry.values) {
+      for (final FluentRelationsMixin<FluentStorable> relDao in group.values.whereType<FluentRelationsMixin>()) {
+        final Map<Type, FluentDbRelation> syncRels = relDao.resolvedRelations;
+        if (syncRels.isEmpty) continue;
 
-      final List<Map<String, dynamic>> tableRelationsList = [];
+        final List<Map<String, dynamic>> tableRelationsList = [];
 
-      for (final entry in syncRels.entries) {
-        final childProvider = _providers[entry.key];
-        if (childProvider == null) continue;
+        for (final MapEntry<Type, FluentDbRelation<FluentStorable, FluentStorable>> entry in syncRels.entries) {
+          final FluentProvider<FluentStorable>? childProvider = group[entry.key];
+          if (childProvider == null) continue;
 
-        tableRelationsList.add({
-          'targetTable': childProvider.tableName,
-          'localKey': entry.value.localKey ?? '',
-          'remoteKey': entry.value.remoteKey ?? '',
-          'mapKey': entry.value.mapToKey,
-          'isList': entry.value.castType.isList,
-        });
+          tableRelationsList.add({
+            'targetTable': childProvider.tableName,
+            'localKey': entry.value.localKey ?? '',
+            'remoteKey': entry.value.remoteKey ?? '',
+            'mapKey': entry.value.mapToKey,
+            'isList': entry.value.castType.isList,
+          });
+        }
       }
     }
-
     FluentLog.info('Registry: Spawning FluentDb...', tag: 'FluentDb:init');
 
     await FluentEngine().initMultiple(configs: performanceConfigs, dbTables: dbTables, dbRelationsCount: dbRelationsCount, dbNameWithDb: dbNameWithDb);
@@ -263,7 +270,7 @@ extension FluentDbLifecycle on FluentDb {
   ///    it forces the property and refreshes the schema.
   /// 3. **Fault Isolation:** If correction is impossible or the model is missing,
   ///    it disables the relation to prevent runtime SQL failures.
-  void _verifyAndFixIntegrity(FluentProvider dao) {
+  void _verifyAndFixIntegrity(FluentProvider dao, String dbName) {
     if (dao is! FluentRelationsMixin) return;
 
     final Map<Type, FluentDbRelation> relations = dao.resolvedRelations;
@@ -272,7 +279,7 @@ extension FluentDbLifecycle on FluentDb {
 
     relations.forEach((targetType, relation) {
       try {
-        final FluentProvider<FluentStorable> targetProvider = FluentDb.providerForType(targetType);
+        final FluentProvider<FluentStorable> targetProvider = FluentDb.providerForType(targetType, dbName: dbName);
         final FluentDbColumn targetCol = targetProvider.primaryKeyColumn;
 
         FluentLog.debug('Verifying relation target', tag: 'FluentDb:verifyAndFix', context: {'source': dao.tableName, 'target': targetProvider.tableName, 'targetCol': targetCol.name});
@@ -344,8 +351,8 @@ extension FluentDbLifecycle on FluentDb {
   ///
   /// Note: Only dynamic settings are applied. Structural settings that require a
   /// fresh connection are ignored in this hot-swap.
-  Future<void> changeCurrentPerformanceConfig<T extends FluentProvider>(SQLitePerformanceConfig newConfig) async {
-    final Database db = FluentDb.provider<T>().db;
+  Future<void> changeCurrentPerformanceConfig<T extends FluentProvider>(SQLitePerformanceConfig newConfig, {String? dbName}) async {
+    final Database db = FluentDb.provider<T>(dbName: dbName).db;
 
     FluentLog.debug('Attempting hot-swap of performance config', tag: 'FluentDb:changePerformance', context: {'provider': T.toString()});
     await _applyPerformanceConfig(db, newConfig, isFullConfig: false);
@@ -364,7 +371,7 @@ extension FluentDbLifecycle on FluentDb {
   Future<void> closeAll({Set<Database>? dbs}) async {
     FluentLog.debug('Closing all database connections...', tag: 'FluentDb:close');
 
-    final Set<Database> uniqueDbs = dbs ?? _providers.values.map((p) => p.db).where((db) => db.isOpen).toSet();
+    final Set<Database> uniqueDbs = dbs ?? _groupedRegistry.values.expand((group) => group.values).map((p) => p.db).where((db) => db.isOpen).toSet();
 
     for (final Database db in uniqueDbs) {
       try {
@@ -375,8 +382,7 @@ extension FluentDbLifecycle on FluentDb {
         FluentLog.error('Error closing database', e, st, tag: 'FluentDb:close', hint: 'The database connection may have already been closed or became unresponsive during teardown.');
       }
     }
-    _providers.clear();
-    _tableToProviderIndex.clear();
+    _groupedRegistry.clear();
     _isInitialized = false;
     await FluentEngine().shutdown();
     FluentLog.info('Registry reset: All connections closed and providers cleared.', tag: 'FluentDb:close');
@@ -390,14 +396,16 @@ extension FluentDbLifecycle on FluentDb {
   Future<void> destroyAllDatabases() async {
     FluentLog.warning('Initiating total data wipe. All databases will be destroyed.', tag: 'FluentDb:destroyAll');
 
-    for (final Type modelType in _providers.keys) {
-      FluentEngine().broadcastSystemAction(FluentDbAction.wipeAll, modelType: modelType);
+    for (final Map<Type, FluentProvider<FluentStorable>> group in _groupedRegistry.values) {
+      for (final FluentProvider<FluentStorable> provider in group.values) {
+        FluentEngine().broadcastSystemAction(FluentDbAction.wipeAll, modelType: provider.runtimeType);
+      }
     }
 
     // Added delay for UI to render new states
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
-    final Set<Database> uniqueDbs = _providers.values.map((p) => p.db).where((db) => db.isOpen).toSet();
+    final Set<Database> uniqueDbs = _groupedRegistry.values.expand((group) => group.values).map((p) => p.db).where((db) => db.isOpen).toSet();
     final List<String> pathsToDelete = uniqueDbs.map((db) => db.path).toList();
 
     await closeAll(dbs: uniqueDbs);
@@ -476,20 +484,17 @@ extension FluentDbLifecycle on FluentDb {
   /// and performs a hard reset on the coordinator to clear stale tasks and connection states.
   @visibleForTesting
   Future<void> dropAll() async {
-    FluentLog.warning(
-      'Executing hard reset: Dropping all databases.',
-      tag: 'FluentDb:dropAll',
-      hint: 'This will irreversibly delete all local data. Ensure this is intentional.',
-      context: {'providerCount': _providers.length},
-    );
+    FluentLog.warning('Executing hard reset: Dropping all databases.', tag: 'FluentDb:dropAll', hint: 'This will irreversibly delete all local data. Ensure this is intentional.');
     await FluentEngine().hardReset();
-    for (FluentProvider dao in _providers.values) {
+
+    final Set<String> pathsToDelete = _groupedRegistry.values.expand((group) => group.values).map((p) => p.db.path).toSet();
+
+    for (final String path in pathsToDelete) {
       try {
-        final String path = dao.db.path;
         FluentLog.debug('Deleting database file', tag: 'FluentDb:dropAll', context: {'path': path});
         await databaseFactory.deleteDatabase(path);
       } catch (e, st) {
-        FluentLog.error('Failed to drop database file for ${dao.tableName}', e, st, tag: 'FluentDb:dropAll');
+        FluentLog.error('Failed to drop database file for $path', e, st, tag: 'FluentDb:dropAll');
       }
     }
     FluentLog.info('Resetting FluentDb...', tag: 'FluentDb:dropAll');

@@ -17,8 +17,8 @@ part of '../fluent_db.dart';
 /// * **State Inspection**: Checking the operational status of specific model storages.
 extension FluentDbLocator on FluentDb {
   /// Checks if the underlying database for a specific model [T] is open and ready.
-  bool isModelStorageReady<T extends FluentStorable>() {
-    final FluentProvider? provider = _providers[T];
+  bool isModelStorageReady<T extends FluentStorable>(String dbName) {
+    final FluentProvider? provider = _groupedRegistry[dbName]?[T];
     return provider?.db.isOpen ?? false;
   }
 
@@ -46,7 +46,7 @@ extension FluentDbLocator on FluentDb {
   ///   }
   /// );
   /// ```
-  Future<T> transaction<T>({required List<Type> modelTypes, required Future<T> Function() action}) async {
+  Future<T> transaction<T>({required List<Type> modelTypes, required Future<T> Function() action, String? dbName}) async {
     if (modelTypes.isEmpty) {
       final FluentArgumentException exception = FluentArgumentException('$modelTypes', 'The list cannot be empty. You must provide at least one model type for this transaction.', StackTrace.current);
       FluentLog.error(exception.message, exception, exception.stackTrace);
@@ -56,12 +56,7 @@ extension FluentDbLocator on FluentDb {
     // Resolve target providers for all models involved in the transaction
     final List<FluentProvider<FluentStorable>> targetProviders = [];
     for (final Type type in modelTypes) {
-      final FluentProvider? provider = _providers[type];
-      if (provider == null) {
-        final ProviderNotFoundException exception = ProviderNotFoundException(type, stackTrace: StackTrace.current);
-        FluentLog.error('Transaction failed: Provider for model "$type" is not registered.', exception, exception.stackTrace, tag: 'FluentDb.transaction', context: {'missingType': type.toString()});
-        throw exception;
-      }
+      final FluentProvider provider = FluentDb.providerForType(type, dbName: dbName);
       targetProviders.add(provider);
     }
 
@@ -117,7 +112,7 @@ extension FluentDbLocator on FluentDb {
   void reset() {
     FluentLog.debug('Resetting registry state: clearing providers and flags.', tag: 'FluentDb:reset');
 
-    _providers.clear();
+    _groupedRegistry.clear();
     FluentDb._lastConfig?.clear();
     _isInitialized = false;
 
@@ -131,14 +126,18 @@ extension FluentDbLocator on FluentDb {
   /// 2. **Provider-Based:** Provides direct access via the class type.
   /// 3. **Table-Based:** Creates an O(1) index using the table name for high-performance cross-reference
   ///    and inter-isolate communication.
-  void _register<T extends FluentStorable>(FluentProvider<T> provider) {
+  void _register<T extends FluentStorable>(FluentProvider<T> provider, String dbName) {
     final Type modelType = T;
     final Type providerType = provider.runtimeType;
 
-    _providers[modelType] = provider;
-    _providers[providerType] = provider;
-    _tableToProviderIndex[provider.tableName] = provider;
+    final Map<Type, FluentProvider<FluentStorable>> group = _groupedRegistry.putIfAbsent(dbName, () => <Type, FluentProvider>{});
+    group[modelType] = provider;
+    group[providerType] = provider;
 
-    FluentLog.debug('Provider registered successfully', tag: 'FluentDb:register', context: {'provider': providerType.toString(), 'table': provider.tableName, 'model': modelType.toString()});
+    FluentLog.debug(
+      'Provider registered successfully',
+      tag: 'FluentDb:register',
+      context: {'provider': providerType.toString(), 'table': provider.tableName, 'model': modelType.toString(), 'dbName': dbName},
+    );
   }
 }

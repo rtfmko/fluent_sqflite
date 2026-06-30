@@ -58,7 +58,7 @@ extension FluentQuery<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<bool> exists(dynamic id, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<bool> exists(dynamic id, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (id == null) {
       return Future<bool>.value(false);
     }
@@ -72,7 +72,7 @@ extension FluentQuery<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.exists,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(id: id, limit: 1, multiple: false, where: _injectSoftDelete(null)),
       policy: policy,
     );
@@ -103,7 +103,7 @@ extension FluentQuery<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<int> count({String? where, List<Object?>? whereArgs, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> count({String? where, List<Object?>? whereArgs, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     FluentLog.debug(
       'Initiating global operational query pipeline for storage layer record aggregation counting',
       tag: '$tableName:count',
@@ -113,7 +113,7 @@ extension FluentQuery<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.count,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(where: _injectSoftDelete(where), whereArgs: whereArgs, multiple: where == null),
       policy: policy,
     );

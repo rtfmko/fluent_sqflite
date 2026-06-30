@@ -69,7 +69,7 @@ extension FluentRestore<T extends FluentStorable> on FluentProvider<T> {
   /// }
   /// ```
   @internal
-  Future<int> restore(T item, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> restore(T item, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (modelSample is! FluentSoftDeletable) {
       FluentLog.warning(
         'Restore operation rejected: model does not implement FluentSoftDeletable',
@@ -94,7 +94,7 @@ extension FluentRestore<T extends FluentStorable> on FluentProvider<T> {
 
     FluentLog.debug('Redirecting restore request to internal identity-based pipeline', tag: '$tableName:restore', context: {'tableName': tableName, 'targetRecordId': id.toString()});
 
-    return restoreById(id, policy: policy);
+    return restoreById(id, policy: policy, dbName: dbName);
   }
 
   /// Restores a soft-deleted record identified by its primary key.
@@ -127,7 +127,7 @@ extension FluentRestore<T extends FluentStorable> on FluentProvider<T> {
   /// }
   /// ```
   @internal
-  Future<int> restoreById(dynamic id, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> restoreById(dynamic id, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (modelSample is! FluentSoftDeletable) {
       FluentLog.warning(
         'Restore operation rejected: model does not implement FluentSoftDeletable',
@@ -154,7 +154,7 @@ extension FluentRestore<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.restore,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(id: id, key: col, value: null, multiple: false),
       policy: policy,
     );
@@ -191,7 +191,7 @@ extension FluentRestore<T extends FluentStorable> on FluentProvider<T> {
   ///
   /// Returns a [Future<T?>] resolving to the restored entity or `null` on failure.
   @internal
-  Future<T?> restoreAndFetchById(dynamic id, {ExecutionPolicy policy = const ExecutionPolicy()}) async {
+  Future<T?> restoreAndFetchById(dynamic id, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async {
     if (modelSample is! FluentSoftDeletable) {
       FluentLog.warning(
         'Restore-and-fetch operation rejected: model does not implement FluentSoftDeletable',
@@ -214,11 +214,11 @@ extension FluentRestore<T extends FluentStorable> on FluentProvider<T> {
 
     FluentLog.debug('Initiating restore-and-fetch sequence', tag: '$tableName:restoreAndFetchById', context: {'tableName': tableName, 'targetRecordId': id.toString()});
 
-    final int rowsAffected = await restoreById(id, policy: policy);
+    final int rowsAffected = await restoreById(id, policy: policy, dbName: dbName);
 
     if (rowsAffected > 0) {
       FluentLog.debug('Restoration successful, fetching recovered entity', tag: '$tableName:restoreAndFetchById', context: {'tableName': tableName, 'targetRecordId': id.toString()});
-      return await findById(id, policy: policy);
+      return await findById(id, policy: policy, dbName: dbName);
     }
 
     FluentLog.debug('Restore-and-fetch aborted: no records were restored', tag: '$tableName:restoreAndFetchById', context: {'tableName': tableName, 'targetRecordId': id.toString()});
@@ -258,7 +258,7 @@ extension FluentRestore<T extends FluentStorable> on FluentProvider<T> {
   /// Returns a [Future<T?>] resolving to the fresh entity instance or `null` if the
   /// operation could not be completed.
   @internal
-  Future<T?> restoreAndFetch(T item, {ExecutionPolicy policy = const ExecutionPolicy()}) async {
+  Future<T?> restoreAndFetch(T item, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) async {
     if (modelSample is! FluentSoftDeletable) {
       FluentLog.warning(
         'Restore-and-fetch operation rejected: model does not implement FluentSoftDeletable',
@@ -282,11 +282,11 @@ extension FluentRestore<T extends FluentStorable> on FluentProvider<T> {
 
     FluentLog.debug('Initiating restore-and-fetch sequence for entity', tag: '$tableName:restoreAndFetch', context: {'tableName': tableName, 'targetRecordId': id.toString()});
 
-    final int rowsAffected = await restore(item, policy: policy);
+    final int rowsAffected = await restore(item, policy: policy, dbName: dbName);
 
     if (rowsAffected > 0) {
       FluentLog.debug('Restoration successful, fetching refreshed entity state', tag: '$tableName:restoreAndFetch', context: {'tableName': tableName, 'targetRecordId': id.toString()});
-      return await findById(id, policy: policy);
+      return await findById(id, policy: policy, dbName: dbName);
     }
 
     FluentLog.debug('Restore-and-fetch aborted: no rows were affected by restoration', tag: '$tableName:restoreAndFetch', context: {'tableName': tableName, 'targetRecordId': id.toString()});
@@ -321,7 +321,7 @@ extension FluentRestore<T extends FluentStorable> on FluentProvider<T> {
   /// Returns a [Future<int>] representing the number of batch operations performed
   /// (typically `1` for a successful batch dispatch, or `0` if aborted).
   @internal
-  Future<int> restoreAll(Iterable<T> items, {ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> restoreAll(Iterable<T> items, {ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (modelSample is! FluentSoftDeletable) {
       FluentLog.warning(
         'Batch restore rejected: model does not implement FluentSoftDeletable',
@@ -360,7 +360,7 @@ extension FluentRestore<T extends FluentStorable> on FluentProvider<T> {
       context: {'tableName': tableName, 'uniqueIdsCount': ids.length, 'totalItemsProvided': items.length, 'hasCustomPolicy': policy != const ExecutionPolicy()},
     );
 
-    return restoreItemsByIds(ids, policy: policy);
+    return restoreItemsByIds(ids, policy: policy, dbName: dbName);
   }
 
   /// Performs a batch restoration of soft-deleted entities identified by the provided set of [ids].
@@ -395,7 +395,7 @@ extension FluentRestore<T extends FluentStorable> on FluentProvider<T> {
   ///
   /// Returns a [Future<int>] representing the success status or the count of affected operations.
   @internal
-  Future<int> restoreItemsByIds(Set<dynamic> ids, {Batch? sharedBatch, ExecutionPolicy policy = const ExecutionPolicy()}) {
+  Future<int> restoreItemsByIds(Set<dynamic> ids, {Batch? sharedBatch, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (modelSample is! FluentSoftDeletable) {
       FluentLog.warning('Batch restore rejected: model does not implement FluentSoftDeletable', tag: '$tableName:restoreItemsByIds', context: {'tableName': tableName});
       return Future.value(0);
@@ -431,7 +431,7 @@ extension FluentRestore<T extends FluentStorable> on FluentProvider<T> {
     final FluentTask task = FluentTask(
       action: FluentDbAction.restoreItemsByIds,
       table: tableName,
-      dbName: dbName,
+      dbName: dbName ?? this.dbName,
       helper: TableHelper(key: col, where: '$pkName IN (...)', arguments: ids.toList(), multiple: true),
       policy: policy,
     );
