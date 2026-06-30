@@ -142,7 +142,7 @@ extension FluentDbLifecycle on FluentDb {
 
         for (final FluentProvider dao in group.providerList) {
           dao.setDb(db);
-          dao.setDbName(group.dbName);
+          dao.setDbName(dao.dbName);
         }
 
         FluentLog.info('Syncing schema and running maintenance for ${group.dbName}', tag: 'FluentDb:init');
