@@ -87,6 +87,7 @@ extension FluentDbLifecycle on FluentDb {
 
         // Registration & Relational Linkage
         for (final FluentProvider dao in group.providerList) {
+          dao.setDbName(group.dbName);
           dao.registerSelf(_register);
         }
 
@@ -148,7 +149,6 @@ extension FluentDbLifecycle on FluentDb {
 
         for (final FluentProvider dao in group.providerList) {
           dao.setDb(db);
-          dao.setDbName(group.dbName);
         }
 
         FluentLog.info('Syncing schema and running maintenance for ${group.dbName}', tag: 'FluentDb:init');

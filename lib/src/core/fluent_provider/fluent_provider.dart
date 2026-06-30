@@ -504,7 +504,7 @@ abstract class FluentProvider<T extends FluentStorable> {
   /// [registerFn] The callback provided by the registry to handle
   /// type-safe registration of the [FluentProvider].
   @internal
-  void registerSelf(void Function<M extends FluentStorable>(FluentProvider<M>, String) registerFn) {
+  void registerSelf(void Function<M extends FluentStorable>(FluentProvider<M>, String dbName) registerFn) {
     FluentLog.debug('Registering provider instance', tag: '$runtimeType:init');
     registerFn<T>(this, dbName);
   }
