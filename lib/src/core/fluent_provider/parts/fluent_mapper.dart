@@ -413,7 +413,7 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
     for (final MapEntry<Type, FluentDbRelation<FluentStorable, FluentStorable>> entry in relations.entries) {
       final FluentDbRelation rel = entry.value;
       final String key = rel.mapToKey;
-      final FluentProvider childDao = FluentDb.providerForType(entry.key);
+      final FluentProvider childDao = FluentDb.getProviderByTable(task.dbName);
 
       // Depth & Lazy Load Control
       if ((rel.isLazy && !ignoreLazy) || (maxDepth != 0 && nextDepth > maxDepth)) {
