@@ -474,7 +474,7 @@ abstract class FluentProvider<T extends FluentStorable> {
   @internal
   void setDbName(String dbName) {
     _dbName = dbName;
-    FluentLog.debug('Database name set to "$dbName"', tag: '$runtimeType:init');
+    FluentLog.debug('Database name set to "$dbName"', tag: '$runtimeType:init', context: {'hashCode': hashCode, 'modelType': modelType});
   }
 
   /// Self-registers this provider instance with the central system registry.
