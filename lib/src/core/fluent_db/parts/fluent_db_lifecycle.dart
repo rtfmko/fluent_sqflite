@@ -23,7 +23,6 @@ part of '../fluent_db.dart';
 /// layer across your application's start-up, backgrounding, and testing phases.
 extension FluentDbLifecycle on FluentDb {
   /// Checks if a database file by [dbName] is currently open.
-  // bool isDatabaseOpen(String dbName) => _providers.values.any((p) => p.db.path.endsWith(dbName) && p.db.isOpen);
   bool isDatabaseOpen(String dbName) {
     final Map<Type, FluentProvider<FluentStorable>>? group = _groupedRegistry[dbName];
     if (group == null) return false;
@@ -45,6 +44,7 @@ extension FluentDbLifecycle on FluentDb {
   Future<void> init(Iterable<FluentGroup> groups, {Duration? purgeDuration, bool isDev = false, bool isRetry = false}) async {
     if (_isInitialized) return;
 
+    final Stopwatch stopwatch = Stopwatch()..start();
     final Map<String, FluentGroup> uniqueGroupsMap = {};
     for (final FluentGroup g in groups) {
       if (g.providerList.isEmpty) continue;
@@ -82,6 +82,27 @@ extension FluentDbLifecycle on FluentDb {
     final String databasesPath = await getDatabasesPath();
 
     for (final FluentGroup group in activeGroups) {
+      if (!_isSafeDbName(group.dbName)) {
+        final FluentDatabaseNameException exception = FluentDatabaseNameException(
+          'Invalid database name: "${group.dbName}". '
+          'Database names must contain only alphanumeric characters and underscores (a-z, A-Z, 0-9, _).',
+          stackTrace: StackTrace.current,
+        );
+
+        FluentLog.error(
+          'Configuration error: Illegal database name detected.',
+          exception,
+          exception.stackTrace,
+          tag: 'FluentDb:init',
+          hint:
+              'Rename your FluentGroup to use only letters, numbers, or underscores. '
+              'Avoid using special characters, spaces, or path separators (/, \\).',
+          context: {'dbName': group.dbName},
+        );
+
+        throw exception;
+      }
+
       try {
         FluentLog.info('Initializing database group: ${group.dbName}', tag: 'FluentDb:init');
 
@@ -174,38 +195,19 @@ extension FluentDbLifecycle on FluentDb {
           reset();
           return await init(groups, isDev: isDev, isRetry: true);
         } else {
+          stopwatch.stop();
           rethrow;
         }
       }
-    }
-
-    for (final Map<Type, FluentProvider<FluentStorable>> group in _groupedRegistry.values) {
-      for (final FluentRelationsMixin<FluentStorable> relDao in group.values.whereType<FluentRelationsMixin>()) {
-        final Map<Type, FluentDbRelation> syncRels = relDao.resolvedRelations;
-        if (syncRels.isEmpty) continue;
-
-        final List<Map<String, dynamic>> tableRelationsList = [];
-
-        for (final MapEntry<Type, FluentDbRelation<FluentStorable, FluentStorable>> entry in syncRels.entries) {
-          final FluentProvider<FluentStorable>? childProvider = group[entry.key];
-          if (childProvider == null) continue;
-
-          tableRelationsList.add({
-            'targetTable': childProvider.tableName,
-            'localKey': entry.value.localKey ?? '',
-            'remoteKey': entry.value.remoteKey ?? '',
-            'mapKey': entry.value.mapToKey,
-            'isList': entry.value.castType.isList,
-          });
-        }
-      }
+      FluentLog.debug('Group "${group.dbName}" initialized successfully', tag: 'FluentDb:init', context: {'elapsed': stopwatch.elapsedMilliseconds});
     }
     FluentLog.info('Registry: Spawning FluentDb...', tag: 'FluentDb:init');
 
     await FluentEngine().initMultiple(configs: performanceConfigs, dbTables: dbTables, dbRelationsCount: dbRelationsCount, dbNameWithDb: dbNameWithDb);
 
     _isInitialized = true;
-    FluentLog.info('Registry: Initialization complete.', tag: 'FluentDb:init');
+    stopwatch.stop();
+    FluentLog.info('Registry: Initialization complete in ${stopwatch.elapsedMilliseconds}ms', tag: 'FluentDb:init', context: {'totalGroups': activeGroups.length});
 
     unawaited(_purgeSoftDeletedGlobal());
   }
@@ -525,5 +527,21 @@ extension FluentDbLifecycle on FluentDb {
 
       FluentLog.debug('Applied structural PRAGMAs (FKs and Journal Mode)', tag: 'FluentDb:cfg');
     }
+  }
+
+  /// Validates that the provided database name is safe for file system operations.
+  ///
+  /// Database names must be restricted to alphanumeric characters and underscores
+  /// to prevent:
+  /// * Path traversal vulnerabilities (e.g., using '/' or '..').
+  /// * Conflicts with reserved file system characters across different platforms (Android/iOS).
+  /// * Encoding issues in database file paths.
+  ///
+  /// **Constraints:**
+  /// * Allowed: `a-z`, `A-Z`, `0-9`, and `_`.
+  /// * Disallowed: Spaces, hyphens, dots, path separators, or any special characters.
+  bool _isSafeDbName(String name) {
+    final RegExp safeNameRegex = RegExp(r'^[a-zA-Z0-9_]+$');
+    return safeNameRegex.hasMatch(name);
   }
 }

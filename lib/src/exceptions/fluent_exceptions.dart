@@ -62,21 +62,63 @@ class ProviderNotFoundException extends FluentException {
       );
 }
 
+/// Exception thrown when [FluentDb] configuration is invalid or inconsistent.
+///
+/// This typically occurs during the `init()` phase if there are issues with
+/// database naming, duplicate groups, or misconfigured performance settings.
 class FluentConfigurationException extends FluentException {
-  FluentConfigurationException(String message, {StackTrace? stackTrace})
-      : super(message, stackTrace);
+  /// The specific reason for the configuration failure.
+  final String reason;
+
+  /// Creates a [FluentConfigurationException].
+  ///
+  /// * [reason]: A clear explanation of why the configuration failed.
+  /// * [stackTrace]: Useful for tracing back to the incorrect setup call.
+  FluentConfigurationException(this.reason, {StackTrace? stackTrace}) : super('FluentDb configuration error: $reason', stackTrace);
 }
 
+/// Exception thrown when a lookup operation results in multiple potential providers.
+///
+/// Occurs when a specific model type or table exists in multiple database groups
+/// simultaneously. To resolve this, the caller must specify a [dbName].
 class AmbiguousProviderException extends FluentException {
+  /// The model type or table name that was requested.
   final String searchTarget;
+
+  /// The list of database group names where this target was found.
   final List<String> availableGroups;
 
+  /// Creates an [AmbiguousProviderException].
+  ///
+  /// * [searchTarget]: The model type or table that caused the ambiguity.
+  /// * [availableGroups]: List of databases that contain this target.
+  /// * [stackTrace]: Helps track where the ambiguous lookup was performed.
   AmbiguousProviderException(this.searchTarget, this.availableGroups, {StackTrace? stackTrace})
-      : super(
-    'Ambiguous resolution: "$searchTarget" exists in multiple databases: ${availableGroups.join(', ')}. '
-        'You must explicitly provide the "dbName" parameter.',
-    stackTrace,
-  );
+    : super(
+        'Ambiguous resolution: "$searchTarget" exists in multiple databases: ${availableGroups.join(', ')}. '
+        'You must explicitly provide the "dbName" parameter to resolve this conflict.',
+        stackTrace,
+      );
+}
+
+/// Exception thrown when a [FluentGroup] is initialized with an invalid database name.
+///
+/// Database names must adhere to strict formatting rules to ensure compatibility
+/// across different file systems and prevent security issues like path traversal.
+class FluentDatabaseNameException extends FluentException {
+  /// The invalid name that caused the failure.
+  final String invalidName;
+
+  /// Creates a [FluentDatabaseNameException].
+  ///
+  /// * [invalidName]: The name that failed validation.
+  /// * [stackTrace]: Pinpoints where the invalid configuration was defined.
+  FluentDatabaseNameException(this.invalidName, {StackTrace? stackTrace})
+    : super(
+        'Invalid database name: "$invalidName". '
+        'Database names must contain only alphanumeric characters and underscores (a-z, A-Z, 0-9, _).',
+        stackTrace,
+      );
 }
 
 /// Exception thrown when a value in [buildJson] cannot be converted to a valid SQLite type.
