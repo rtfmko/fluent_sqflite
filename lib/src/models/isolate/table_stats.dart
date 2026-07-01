@@ -89,7 +89,7 @@ class TableStats extends FluentStorable {
     this.relationsCount = 0,
     this.avgReadTimeMs = 0.0,
     this.avgWriteTimeMs = 0.0,
-    this.avgExecutionWeight = 0.0,
+    this.avgExecutionWeight = 10.0,
     this.maxTimeMs = 0,
     this.minTimeMs,
     this.totalReads = 0,
@@ -209,18 +209,18 @@ class TableStats extends FluentStorable {
 
   /// Deserializes a [Map] back into a [TableStats] instance.
   factory TableStats.fromMap(Map<String, dynamic> map) => TableStats(
-    dbName: map['dbName'] as String? ?? '',
-    tableName: map['tableName'] as String? ?? '',
-    rowCount: map['rowCount'] as int? ?? 0,
-    relationsCount: map['relationsCount'] as int? ?? 0,
-    avgReadTimeMs: (map['avgReadTimeMs'] as num? ?? 0).toDouble(),
-    avgWriteTimeMs: (map['avgWriteTimeMs'] as num? ?? 0).toDouble(),
-    avgExecutionWeight: (map['avgExecutionWeight'] as num? ?? 0).toDouble(),
-    maxTimeMs: map['maxTimeMs'] as int? ?? 0,
-    minTimeMs: map['minTimeMs'] as int? ?? 0,
-    totalReads: map['totalReads'] as int? ?? 0,
-    totalWrites: map['totalWrites'] as int? ?? 0,
-    failedQueries: map['failedQueries'] as int? ?? 0,
+    dbName: map['dbName'] is String ? map['dbName'] as String? : '',
+    tableName: map['tableName'] is String ? map['tableName'] as String : '',
+    rowCount: map['rowCount'] is int ? map['rowCount'] as int : 0,
+    relationsCount: map['relationsCount'] is int ? map['relationsCount'] as int : 0,
+    avgReadTimeMs: (map['avgReadTimeMs'] is num ? map['avgReadTimeMs'] as num : 0).toDouble(),
+    avgWriteTimeMs: (map['avgWriteTimeMs'] is num ? map['avgWriteTimeMs'] as num : 0).toDouble(),
+    avgExecutionWeight: (map['avgExecutionWeight'] is num ? map['avgExecutionWeight'] as num : 10).toDouble(),
+    maxTimeMs: map['maxTimeMs'] is int ? map['maxTimeMs'] as int : 0,
+    minTimeMs: map['minTimeMs'] is int ? map['minTimeMs'] as int : null,
+    totalReads: map['totalReads'] is int ? map['totalReads'] as int : 0,
+    totalWrites: map['totalWrites'] is int ? map['totalWrites'] as int : 0,
+    failedQueries: map['failedQueries'] is int ? map['failedQueries'] as int : 0,
   );
 }
 
