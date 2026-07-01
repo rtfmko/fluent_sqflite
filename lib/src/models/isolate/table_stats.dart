@@ -31,7 +31,7 @@ class TableStats extends FluentStorable {
   int maxTimeMs;
 
   /// The shortest execution time recorded for a single operation on this table (ms).
-  int minTimeMs;
+  int? minTimeMs;
 
   /// Cumulative count of all read operations since tracking began.
   int totalReads;
@@ -91,7 +91,7 @@ class TableStats extends FluentStorable {
     this.avgWriteTimeMs = 0.0,
     this.avgExecutionWeight = 0.0,
     this.maxTimeMs = 0,
-    this.minTimeMs = 999999,
+    this.minTimeMs,
     this.totalReads = 0,
     this.totalWrites = 0,
     this.failedQueries = 0,
@@ -161,7 +161,7 @@ class TableStats extends FluentStorable {
   void recordMetrics({required int currentWeight, required int elapsedMs, required bool isWrite}) {
     // 1. Latency bounds
     if (elapsedMs > maxTimeMs) maxTimeMs = elapsedMs;
-    if (minTimeMs == 0 || elapsedMs < minTimeMs) minTimeMs = elapsedMs;
+    if (minTimeMs == null || elapsedMs < minTimeMs!) minTimeMs = elapsedMs;
 
     // 2. Adaptive Alpha Calculation
     final double weightDouble = currentWeight.toDouble();

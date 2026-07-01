@@ -74,7 +74,7 @@ class FluentTableStatsTracker {
       stats.rowCount = (stats.rowCount + delta).clamp(0, double.maxFinite.toInt());
     }
 
-    _isDirty = true;
+    markAsDirty();
 
     FluentLog.debug(
       'Task ${task.action} completed on ${task.table}',
@@ -88,6 +88,29 @@ class FluentTableStatsTracker {
     );
   }
 
+  /// Resets the performance statistics for the specified table to their default
+  /// baseline values.
+  ///
+  /// This method should be called when the table's underlying structure changes
+  /// (e.g., adding an index) or when historical metrics become invalid due to
+  /// significant data model refactoring. Resetting ensures that the adaptive
+  /// metrics (AEMA) do not carry over "toxic" latencies from previous
+  /// unoptimized state, allowing the engine to re-learn the table's performance
+  /// characteristics from a clean slate.
+  void resetPerformanceStats(String dbName, String tableName) {
+    final TableStats? stats = _statsMap[_makeKey(dbName, tableName)];
+    if (stats != null) {
+      stats.avgReadTimeMs = 0.0;
+      stats.avgWriteTimeMs = 0.0;
+      stats.avgExecutionWeight = 20.0;
+      stats.minTimeMs = null;
+      stats.maxTimeMs = 0;
+      stats.totalReads = 0;
+      stats.totalWrites = 0;
+      markAsDirty();
+    }
+  }
+
   /// Records a failed [FluentTask] execution, incrementing the error counter
   /// for the associated table and marking the tracker as 'dirty'.
   ///
@@ -98,7 +121,7 @@ class FluentTableStatsTracker {
     final TableStats stats = _statsMap.putIfAbsent(key, () => TableStats(task: task));
 
     stats.failedQueries++;
-    _isDirty = true;
+    markAsDirty();
 
     FluentLog.warning(
       'Task failed on table: ${task.table}',
@@ -118,7 +141,7 @@ class FluentTableStatsTracker {
     for (final TableStats stats in loadedStats) {
       _statsMap[_makeKey(stats.dbName, stats.tableName)] = stats;
     }
-    _isDirty = false;
+    clearDirtyFlag();
     FluentLog.info('Stats tracker hydrated with ${loadedStats.length} entries.', tag: 'FluentTableStats:import');
   }
 

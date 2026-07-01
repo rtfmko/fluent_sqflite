@@ -10,3 +10,5 @@ export 'sqlite_config/sqlite_performance_config.dart';
 export 'stream_pipeline/fluent_api_response.dart';
 export 'stream_pipeline/fluent_data_event.dart';
 export 'stream_pipeline/fluent_sync_options.dart';
+export 'summary/fluent_db_health_report.dart';
+export 'summary/fluent_db_summary.dart';

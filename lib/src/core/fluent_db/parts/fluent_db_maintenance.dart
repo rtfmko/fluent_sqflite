@@ -53,6 +53,28 @@ extension FluentDbMaintenance on FluentDb {
     }
   }
 
+  /// Resets the performance statistics for the specified table to their default baseline values.
+  ///
+  /// **WARNING:** This method performs a destructive operation by clearing all historical
+  /// performance metrics for the given table, including adaptive execution weight,
+  /// latency averages, and operation counts.
+  ///
+  /// Calling this method forces the engine to "forget" its learned performance profile
+  /// for this table, effectively resetting its priority to the base level.
+  ///
+  /// **When to use:**
+  /// - Only after significant schema changes (e.g., adding or removing database indexes).
+  /// - When historical metrics have become "toxic" or stale due to past performance
+  ///   bottlenecks that have since been resolved.
+  ///
+  /// **Caution:** Frequent invocation of this method will lead to unstable scheduling
+  /// behavior. The engine will be forced into a "cold start" (re-learning) phase
+  /// every time this method is called, preventing it from making optimal
+  /// priority decisions based on historical data.
+  void resetPerformanceStats(String dbName, String tableName) {
+    FluentTableStatsTracker().resetPerformanceStats(dbName, tableName);
+  }
+
   /// Executes automated storage hygiene for a [FluentGroup].
   ///
   /// This maintenance routine ensures database health by:
