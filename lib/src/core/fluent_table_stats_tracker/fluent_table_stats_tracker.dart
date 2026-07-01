@@ -67,7 +67,6 @@ class FluentTableStatsTracker {
     if (wasExecuted) {
       if (isWrite) {
         stats.totalWrites++;
-        stats.writesSession++;
         if (delta != null) {
           stats.rowCount = (stats.rowCount + delta).clamp(0, double.maxFinite.toInt());
         } else if (affectedRows > 0) {
@@ -75,12 +74,8 @@ class FluentTableStatsTracker {
         }
       } else {
         stats.totalReads++;
-        stats.readsSession++;
-
-        if (affectedRows > 0) {
-          stats.sessionPayload += affectedRows;
-        }
       }
+      stats.incrementSessionStats(isWrite: isWrite);
       _isDirty = true;
     }
 
@@ -126,16 +121,18 @@ class FluentTableStatsTracker {
     // Update throughput and calculate Exponential Moving Average (EMA)
     // Smoothing factor of 0.3 allows the system to adapt to new performance baselines
     final double targetTime = elapsedMs == 0 ? 0.1 : elapsedMs.toDouble();
+    final double currentWeight = task.executionWeight.toDouble();
+    stats.avgExecutionWeight = (stats.totalReads + stats.totalWrites) == 1 ? currentWeight : (stats.avgExecutionWeight * 0.7) + (currentWeight * 0.3);
 
     if (isWrite) {
       stats.totalWrites++;
-      stats.writesSession++;
       stats.avgWriteTimeMs = stats.totalWrites == 1 ? targetTime : (stats.avgWriteTimeMs * 0.7) + (targetTime * 0.3);
     } else {
       stats.totalReads++;
-      stats.readsSession++;
       stats.avgReadTimeMs = stats.totalReads == 1 ? targetTime : (stats.avgReadTimeMs * 0.7) + (targetTime * 0.3);
     }
+
+    stats.incrementSessionStats(isWrite: isWrite);
 
     // Maintain row count state via absolute sets (rows) or relative changes (delta)
     if (rows != null && rows > 0) {
@@ -241,7 +238,6 @@ class FluentTableStatsTracker {
     buffer.writeln('│ 📈 LIVE PERFORMANCE METRICS:');
     if (stats != null) {
       buffer.writeln('│   • Rows count (Disk):   ${stats.rowCount.toString().padRight(42)} │');
-      buffer.writeln('│   • Session Payload:     ${stats.sessionPayload.toString().padRight(42)} │');
       buffer.writeln('│   • Table Complexity:    ${stats.complexity.toString().split('.').last.toUpperCase().padRight(42)} │');
       buffer.writeln('│   • Active Relations:    ${stats.relationsCount.toString().padRight(42)} │');
       buffer.writeln('│   • Avg Read Speed:      ${'${stats.avgReadTimeMs.toStringAsFixed(2)} ms'.padRight(42)} │');
@@ -319,16 +315,15 @@ class FluentTableStatsTracker {
     }
 
     final buffer = StringBuffer()
-      ..writeln('┌─────────────────┬─────────────┬─────────────┬─────────────┬─────────────┬─────────────────┬──────────────────────┐')
-      ..writeln('│ Table (DB)      │ Row Count   │ Payload (S) │ Active (S)  │ Avg Read    │ Avg Write       │ Weight (Complexity)  │')
-      ..writeln('├─────────────────┼─────────────┼─────────────┼─────────────┼─────────────┼─────────────────┼──────────────────────┤');
+      ..writeln('┌─────────────────┬─────────────┬─────────────┬─────────────┬─────────────────┬──────────────────────┐')
+      ..writeln('│ Table (DB)      │ Row Count   │ Active (S)  │ Avg Read    │ Avg Write       │ Weight (Complexity)  │')
+      ..writeln('├─────────────────┼─────────────┼─────────────┼─────────────┼─────────────────┼──────────────────────┤');
 
     _statsMap.forEach((_, s) {
       final String displayTitle = '${s.tableName} (${s.dbName})';
       final String tableInfo = displayTitle.length > 15 ? '${displayTitle.substring(0, 12)}...' : displayTitle.padRight(15);
 
       final String rows = s.rowCount.toString().padLeft(11);
-      final String payload = s.sessionPayload.toString().padLeft(11);
       final String active = 'R:${s.readsSession}/W:${s.writesSession}'.padLeft(11);
       final String avgRead = '${s.avgReadTimeMs.toStringAsFixed(1)} ms'.padLeft(11);
       final String avgWrite = '${s.avgWriteTimeMs.toStringAsFixed(1)} ms'.padLeft(15);
@@ -341,10 +336,10 @@ class FluentTableStatsTracker {
         TableComplexity.extreme => '🔴 $complexityName 🔥',
       }.padRight(20);
 
-      buffer.writeln('│ $tableInfo │ $rows │ $payload │ $active │ $avgRead │ $avgWrite │ $levelBadge │');
+      buffer.writeln('│ $tableInfo │ $rows │ $active │ $avgRead │ $avgWrite │ $levelBadge │');
     });
 
-    buffer.write('└─────────────────┴─────────────┴─────────────┴─────────────┴─────────────┴─────────────────┴──────────────────────┘');
+    buffer.write('└────────────────┴─────────────┴─────────────┴─────────────┴─────────────────┴──────────────────────┘');
 
     FluentLog.info(buffer.toString(), tag: 'FluentTableStats:ui', linesBefore: 1);
   }

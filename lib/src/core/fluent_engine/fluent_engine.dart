@@ -1220,10 +1220,6 @@ class FluentEngine {
     final int safeRowCount = stats.rowCount < 0 ? 0 : stats.rowCount;
     final double rowMultiplier = 1.0 + (safeRowCount / 5000);
 
-    // Session Payload: Accounts for RAM serialization overhead
-    final int safePayload = stats.sessionPayload < 0 ? 0 : stats.sessionPayload;
-    final double payloadMultiplier = 1.0 + (safePayload / 2500);
-
     // Complexity Multiplier: Adjusts priority for heavy schema operations
     final double complexityMultiplier = switch (stats.complexity) {
       TableComplexity.low => 0.8,
@@ -1243,7 +1239,7 @@ class FluentEngine {
     final double timeMultiplier = 1.0 + (avgTimeMs > 50.0 ? (avgTimeMs / 100.0) : 0.0);
 
     // Calculate final product of all factors
-    final double finalCalculated = staticWeight * rowMultiplier * payloadMultiplier * complexityMultiplier * relationsMultiplier * timeMultiplier;
+    final double finalCalculated = staticWeight * rowMultiplier * complexityMultiplier * relationsMultiplier * timeMultiplier;
 
     final int finalWeight = finalCalculated.round().clamp(0, 100000);
 

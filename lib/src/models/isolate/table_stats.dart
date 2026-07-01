@@ -4,10 +4,7 @@
 
 part of '../../core/fluent_sqlite_internal.dart';
 
-/// Represents a telemetry snapshot of a database table's performance and usage statistics.
-///
-/// This class stores metrics collected during the application lifecycle, allowing
-/// the system to analyze query efficiency, workload balance, and error rates per table.
+/// Represents an aggregated telemetry snapshot of a database table's performance.
 class TableStats extends FluentStorable {
   /// The identifier of the database containing the table.
   final String dbName;
@@ -18,9 +15,6 @@ class TableStats extends FluentStorable {
   /// Current number of rows in the table.
   int rowCount;
 
-  /// Aggregate size of data payloads processed in the current session.
-  int sessionPayload;
-
   /// Total count of established relations mapped to this table.
   int relationsCount;
 
@@ -29,6 +23,9 @@ class TableStats extends FluentStorable {
 
   /// Moving average of time taken for write operations (in milliseconds).
   double avgWriteTimeMs;
+
+  /// The average execution weight calculated from [FluentTask.executionWeight].
+  double avgExecutionWeight;
 
   /// The longest execution time recorded for a single operation on this table (ms).
   int maxTimeMs;
@@ -42,14 +39,38 @@ class TableStats extends FluentStorable {
   /// Cumulative count of all write operations since tracking began.
   int totalWrites;
 
-  /// Number of read operations performed in the current runtime session.
-  int readsSession;
-
-  /// Number of write operations performed in the current runtime session.
-  int writesSession;
-
   /// Count of operations that resulted in an SQLite exception or transaction failure.
   int failedQueries;
+
+  /// Count of read operations performed during the current application session.
+  ///
+  /// This value is transient, resets upon application restart, and is not
+  /// persisted to the database. Used for real-time performance monitoring.
+  int _readsSession = 0;
+
+  /// Count of write operations performed during the current application session.
+  ///
+  /// This value is transient, resets upon application restart, and is not
+  /// persisted to the database. Used for real-time performance monitoring.
+  int _writesSession = 0;
+
+  /// Count of read operations performed during the current application session.
+  ///
+  /// This value is transient, resets upon application restart, and is not
+  /// persisted to the database. Used for real-time performance monitoring.
+  int get readsSession => _readsSession;
+
+  /// Count of write operations performed during the current application session.
+  ///
+  /// This value is transient, resets upon application restart, and is not
+  /// persisted to the database. Used for real-time performance monitoring.
+  int get writesSession => _writesSession;
+
+  /// A synthetic unique identifier for this record in the telemetry database.
+  ///
+  /// Combines [dbName] and [tableName] to ensure database-level uniqueness,
+  /// enabling the use of [ConflictAlgorithm.replace] during batch persistence.
+  String get _statKey => '$dbName:$tableName';
 
   /// Creates a [TableStats] instance, optionally initialized from an active [FluentTask].
   ///
@@ -65,16 +86,14 @@ class TableStats extends FluentStorable {
     String? dbName,
     String? tableName,
     this.rowCount = 0,
-    this.sessionPayload = 0,
     this.relationsCount = 0,
     this.avgReadTimeMs = 0.0,
     this.avgWriteTimeMs = 0.0,
+    this.avgExecutionWeight = 0.0,
     this.maxTimeMs = 0,
     this.minTimeMs = 999999,
     this.totalReads = 0,
     this.totalWrites = 0,
-    this.readsSession = 0,
-    this.writesSession = 0,
     this.failedQueries = 0,
   }) : dbName = dbName ?? task?.dbName ?? '',
        tableName = tableName ?? task?.table ?? '';
@@ -101,39 +120,63 @@ class TableStats extends FluentStorable {
   }
 
   @override
+  List<FluentDbColumn> get tableSchema => [
+    primaryKey,
+    FluentDbColumn(name: 'statKey', type: FluentDbDataType.text, isUnique: true),
+    FluentDbColumn(name: 'dbName', type: FluentDbDataType.text),
+    FluentDbColumn(name: 'tableName', type: FluentDbDataType.text),
+    FluentDbColumn(name: 'rowCount', type: FluentDbDataType.integer),
+    FluentDbColumn(name: 'relationsCount', type: FluentDbDataType.integer),
+    FluentDbColumn(name: 'avgReadTimeMs', type: FluentDbDataType.real),
+    FluentDbColumn(name: 'avgWriteTimeMs', type: FluentDbDataType.real),
+    FluentDbColumn(name: 'avgExecutionWeight', type: FluentDbDataType.real),
+    FluentDbColumn(name: 'maxTimeMs', type: FluentDbDataType.integer),
+    FluentDbColumn(name: 'minTimeMs', type: FluentDbDataType.integer),
+    FluentDbColumn(name: 'totalReads', type: FluentDbDataType.integer),
+    FluentDbColumn(name: 'totalWrites', type: FluentDbDataType.integer),
+    FluentDbColumn(name: 'failedQueries', type: FluentDbDataType.integer),
+  ];
+
+  /// Increments in-memory session counters (call this from Tracker)
+  void incrementSessionStats({required bool isWrite}) {
+    if (isWrite) {
+      _writesSession++;
+    } else {
+      _readsSession++;
+    }
+  }
+
+  @override
   Map<String, dynamic> buildJson() => {
+    'statKey': _statKey,
     'dbName': dbName,
     'tableName': tableName,
     'rowCount': rowCount,
-    'sessionPayload': sessionPayload,
     'relationsCount': relationsCount,
-    'avgReadTime': avgReadTimeMs,
+    'avgReadTimeMs': avgReadTimeMs,
     'avgWriteTimeMs': avgWriteTimeMs,
+    'avgExecutionWeight': avgExecutionWeight,
     'maxTimeMs': maxTimeMs,
     'minTimeMs': minTimeMs,
     'totalReads': totalReads,
     'totalWrites': totalWrites,
-    'readsSession': readsSession,
-    'writesSession': writesSession,
     'failedQueries': failedQueries,
   };
 
   /// Deserializes a [Map] back into a [TableStats] instance.
   factory TableStats.fromMap(Map<String, dynamic> map) => TableStats(
-    dbName: map['dbName'] is String ? map['dbName'] as String : '',
-    tableName: map['tableName'] is String ? map['tableName'] as String : '',
-    rowCount: map['rowCount'] is int ? map['rowCount'] as int : 0,
-    sessionPayload: map['sessionPayload'] is int ? map['sessionPayload'] as int : 0,
-    relationsCount: map['relationsCount'] is int ? map['relationsCount'] as int : 0,
-    avgReadTimeMs: (map['avgReadTime'] is num ? map['avgReadTime'] as num : 0).toDouble(),
-    avgWriteTimeMs: (map['avgWriteTimeMs'] is num ? map['avgWriteTimeMs'] as num : 0).toDouble(),
-    maxTimeMs: map['maxTimeMs'] is int ? map['maxTimeMs'] as int : 0,
-    minTimeMs: map['minTimeMs'] is int ? map['minTimeMs'] as int : 0,
-    totalReads: map['totalReads'] is int ? map['totalReads'] as int : 0,
-    totalWrites: map['totalWrites'] is int ? map['totalWrites'] as int : 0,
-    readsSession: map['readsSession'] is int ? map['readsSession'] as int : 0,
-    writesSession: map['writesSession'] is int ? map['writesSession'] as int : 0,
-    failedQueries: map['failedQueries'] is int ? map['failedQueries'] as int : 0,
+    dbName: map['dbName'] as String? ?? '',
+    tableName: map['tableName'] as String? ?? '',
+    rowCount: map['rowCount'] as int? ?? 0,
+    relationsCount: map['relationsCount'] as int? ?? 0,
+    avgReadTimeMs: (map['avgReadTimeMs'] as num? ?? 0).toDouble(),
+    avgWriteTimeMs: (map['avgWriteTimeMs'] as num? ?? 0).toDouble(),
+    avgExecutionWeight: (map['avgExecutionWeight'] as num? ?? 0).toDouble(),
+    maxTimeMs: map['maxTimeMs'] as int? ?? 0,
+    minTimeMs: map['minTimeMs'] as int? ?? 0,
+    totalReads: map['totalReads'] as int? ?? 0,
+    totalWrites: map['totalWrites'] as int? ?? 0,
+    failedQueries: map['failedQueries'] as int? ?? 0,
   );
 }
 
