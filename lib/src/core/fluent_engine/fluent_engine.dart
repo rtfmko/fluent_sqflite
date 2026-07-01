@@ -1130,48 +1130,33 @@ class FluentEngine {
       }
 
       // Performance Telemetry: Flag heavy operations
-      if (task.isWriteOp) {
-        if (task.action == FluentDbAction.clearTable) {
-          FluentTableStatsTracker().resetTableRows(task.dbName, tableName);
-        } else {
-          int rowDelta = 0;
+      if (elapsedMs > 300) {
+        FluentLog.warning(
+          'Heavy mutation/query detected in Main thread',
+          tag: 'FluentEngine:main_track',
+          hint: 'Consider offloading this operation to the isolate worker or optimizing the transaction/query logic to keep main-thread execution below 300ms.',
+          context: {'tableName': tableName, 'action': task.action.name, 'duration': '${elapsedMs}ms'},
+        );
+      }
 
-          if (task.action == FluentDbAction.save) {
-            rowDelta = (task.data is List) ? (task.data as List).length : 1;
-          } else if (task.action == FluentDbAction.delete) {
-            rowDelta = -1;
-          } else if (task.action == FluentDbAction.deleteBy || task.action == FluentDbAction.deleteItemsByIds || task.action == FluentDbAction.clearExpired) {
-            rowDelta = (result is int) ? -result : 0;
-          }
+      if (task.action == FluentDbAction.clearTable) {
+        FluentTableStatsTracker().resetTableRows(task.dbName, tableName);
 
-          if (elapsedMs > 300) {
-            FluentLog.warning(
-              'Heavy mutation detected in Main thread',
-              tag: 'FluentEngine:main_track',
-              hint: 'Consider offloading this write operation to the isolate worker or optimizing the transaction batch size to keep main-thread execution below 300ms.',
-              context: {'tableName': tableName, 'duration': '${elapsedMs}ms'},
-            );
+        FluentTableStatsTracker().registerSuccess(task: task, elapsedMs: elapsedMs, isWrite: true);
+      } else if (task.isWriteOp) {
+        int rowDelta = 0;
 
-            FluentTableStatsTracker().registerCascadeSuccess(
-              dbName: task.dbName,
-              tableName: tableName,
-              elapsedMs: elapsedMs,
-              isWrite: true,
-              affectedRows: (result is int) ? result : 1,
-              delta: rowDelta,
-              wasExecuted: true,
-            );
-          } else {
-            FluentTableStatsTracker().registerSuccess(task: task, elapsedMs: elapsedMs, isWrite: true, delta: rowDelta);
-          }
+        if (task.action == FluentDbAction.save) {
+          rowDelta = (task.data is List) ? (task.data as List).length : 1;
+        } else if (task.action == FluentDbAction.delete) {
+          rowDelta = -1;
+        } else if (task.action == FluentDbAction.deleteBy || task.action == FluentDbAction.deleteItemsByIds || task.action == FluentDbAction.clearExpired) {
+          rowDelta = (result is int) ? -result : 0;
         }
+
+        FluentTableStatsTracker().registerSuccess(task: task, elapsedMs: elapsedMs, isWrite: true, delta: rowDelta);
       } else {
-        int finalRows = 0;
-        if (result is List) {
-          finalRows = result.length;
-        }
-
-        FluentTableStatsTracker().registerCascadeSuccess(dbName: task.dbName, tableName: tableName, elapsedMs: elapsedMs, isWrite: false, affectedRows: finalRows, wasExecuted: true);
+        FluentTableStatsTracker().registerSuccess(task: task, elapsedMs: elapsedMs, isWrite: false);
       }
       _pendingRequests.remove(task.id)?.complete(result);
 
@@ -1216,11 +1201,11 @@ class FluentEngine {
     final TableStats? stats = FluentTableStatsTracker()._statsMap[key];
     if (stats == null) return staticWeight;
 
-    // Physical table size multiplier
+    // 1. Physical table size multiplier
     final int safeRowCount = stats.rowCount < 0 ? 0 : stats.rowCount;
     final double rowMultiplier = 1.0 + (safeRowCount / 5000);
 
-    // Complexity Multiplier: Adjusts priority for heavy schema operations
+    // 2. Complexity Multiplier: Adjusts priority for heavy schema operations (derived from latency)
     final double complexityMultiplier = switch (stats.complexity) {
       TableComplexity.low => 0.8,
       TableComplexity.medium => 1.2,
@@ -1228,25 +1213,45 @@ class FluentEngine {
       TableComplexity.extreme => 6.0,
     };
 
-    // Relational Multiplier: Accounts for schema cascade depth
+    // 3. Relational Multiplier: Accounts for schema cascade depth
     final double relationsMultiplier = 1.0 + (stats.relationsCount * 0.25);
 
-    // Performance degradation factor: Adjusts weight for high-latency operations
+    // 4. Historical Weight Multiplier: Adjusts priority based on the table's typical workload
+    final double historicalWeightMultiplier = 1.0 + (stats.avgExecutionWeight / 200.0).clamp(0.0, 2.0);
 
-    final double avgTimeMs = task.isWriteOp ? stats.avgWriteTimeMs : stats.avgReadTimeMs;
+    // 5. Safety Multiplier: Penalizes tables with a high error rate
+    final double totalOps = (stats.totalReads + stats.totalWrites).toDouble();
+    final double errorRate = totalOps > 0 ? stats.failedQueries / totalOps : 0.0;
+    final double safetyMultiplier = errorRate > 0.05 ? 1.5 : 1.0;
 
-    // Gradual weight increase if avg time exceeds 50ms to prevent FluentEngine flooding
-    final double timeMultiplier = 1.0 + (avgTimeMs > 50.0 ? (avgTimeMs / 100.0) : 0.0);
+    // --- DIAGNOSTIC LOGS ---
+    if (errorRate > 0.05) {
+      FluentLog.warning(
+        'High error rate detected for table: ${task.table}',
+        tag: 'FluentEngine:weight',
+        context: {'errorRate': '${(errorRate * 100).toStringAsFixed(1)}%', 'failedQueries': stats.failedQueries},
+        hint: 'Check schema consistency or database constraints.',
+      );
+    }
+
+    if (stats.complexity == TableComplexity.extreme) {
+      FluentLog.warning(
+        'Extreme latency bottleneck detected for table: ${task.table}',
+        tag: 'FluentEngine:weight',
+        context: {'avgRead': '${stats.avgReadTimeMs.round()}ms', 'avgWrite': '${stats.avgWriteTimeMs.round()}ms'},
+        hint: 'Consider adding SQL indexes or reducing query depth.',
+      );
+    }
 
     // Calculate final product of all factors
-    final double finalCalculated = staticWeight * rowMultiplier * complexityMultiplier * relationsMultiplier * timeMultiplier;
+    final double finalCalculated = staticWeight * rowMultiplier * complexityMultiplier * relationsMultiplier * historicalWeightMultiplier * safetyMultiplier;
 
     final int finalWeight = finalCalculated.round().clamp(0, 100000);
 
     FluentLog.debug(
       'Calculated task weight',
       tag: 'FluentEngine:weight',
-      context: {'taskId': task.id, 'static': staticWeight, 'final': finalWeight, 'complexity': stats.complexity.name, 'avgTime': '${avgTimeMs.round()}ms'},
+      context: {'taskId': task.id, 'static': staticWeight, 'final': finalWeight, 'complexity': stats.complexity.name, 'errorRate': errorRate.toStringAsFixed(3)},
     );
 
     return finalWeight;

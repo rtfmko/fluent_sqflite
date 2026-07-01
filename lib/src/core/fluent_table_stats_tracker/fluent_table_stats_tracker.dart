@@ -53,57 +53,6 @@ class FluentTableStatsTracker {
     }
   }
 
-  /// Records the performance metrics and success state of a database operation,
-  /// updating the internal statistics registry and flagging the tracker as 'dirty'.
-  ///
-  /// This method implements a **moving average** calculation for read and write
-  /// performance, ensuring that recent latency trends are prioritized over
-  /// historical data without requiring the storage of every single execution time.
-  void registerCascadeSuccess({required String dbName, required String tableName, required int elapsedMs, required bool isWrite, required int affectedRows, int? delta, bool wasExecuted = false}) {
-    final String key = _makeKey(dbName, tableName);
-    final TableStats stats = _statsMap.putIfAbsent(key, () => TableStats(dbName: dbName, tableName: tableName));
-
-    // Update session/total counters if the operation actually performed work
-    if (wasExecuted) {
-      if (isWrite) {
-        stats.totalWrites++;
-        if (delta != null) {
-          stats.rowCount = (stats.rowCount + delta).clamp(0, double.maxFinite.toInt());
-        } else if (affectedRows > 0) {
-          stats.rowCount = math.max(stats.rowCount, affectedRows);
-        }
-      } else {
-        stats.totalReads++;
-      }
-      stats.incrementSessionStats(isWrite: isWrite);
-      _isDirty = true;
-    }
-
-    // Performance metrics update (skipping if elapsedMs is invalid/zero)
-    if (elapsedMs <= 0) return;
-
-    if (elapsedMs > stats.maxTimeMs) stats.maxTimeMs = elapsedMs;
-    if (stats.minTimeMs == 0 || elapsedMs < stats.minTimeMs) {
-      stats.minTimeMs = elapsedMs;
-    }
-
-    // Exponential moving average: 70% historical, 30% current.
-    // This allows the stats to adapt to evolving performance characteristics.
-    if (isWrite) {
-      stats.avgWriteTimeMs = stats.avgWriteTimeMs == 0.0 ? elapsedMs.toDouble() : (stats.avgWriteTimeMs * 0.7) + (elapsedMs * 0.3);
-    } else {
-      stats.avgReadTimeMs = stats.avgReadTimeMs == 0.0 ? elapsedMs.toDouble() : (stats.avgReadTimeMs * 0.7) + (elapsedMs * 0.3);
-    }
-
-    _isDirty = true;
-
-    FluentLog.debug(
-      'Stats updated for $tableName: ${isWrite ? 'Write' : 'Read'} | Time: ${elapsedMs}ms | Avg: ${isWrite ? stats.avgWriteTimeMs.toStringAsFixed(2) : stats.avgReadTimeMs.toStringAsFixed(2)}ms',
-      tag: 'FluentTableStats',
-      context: {'db': dbName, 'table': tableName, 'totalWrites': stats.totalWrites, 'totalReads': stats.totalReads},
-    );
-  }
-
   /// Registers a successful [FluentTask] execution, updating the table's telemetry
   /// metrics such as latency averages, throughput counts, and row-count state.
   ///
@@ -111,30 +60,14 @@ class FluentTableStatsTracker {
   /// report task completion, facilitating real-time performance monitoring.
   void registerSuccess({required FluentTask task, required int elapsedMs, required bool isWrite, int? rows, int? delta}) {
     if (task.isSystem) return;
+
     final String key = _makeKeyFromTask(task);
     final TableStats stats = _statsMap.putIfAbsent(key, () => TableStats(task: task));
 
-    // Track latency bounds
-    if (elapsedMs > stats.maxTimeMs) stats.maxTimeMs = elapsedMs;
-    if (stats.minTimeMs == 0 || elapsedMs < stats.minTimeMs) stats.minTimeMs = elapsedMs;
-
-    // Update throughput and calculate Exponential Moving Average (EMA)
-    // Smoothing factor of 0.3 allows the system to adapt to new performance baselines
-    final double targetTime = elapsedMs == 0 ? 0.1 : elapsedMs.toDouble();
-    final double currentWeight = task.executionWeight.toDouble();
-    stats.avgExecutionWeight = (stats.totalReads + stats.totalWrites) == 1 ? currentWeight : (stats.avgExecutionWeight * 0.7) + (currentWeight * 0.3);
-
-    if (isWrite) {
-      stats.totalWrites++;
-      stats.avgWriteTimeMs = stats.totalWrites == 1 ? targetTime : (stats.avgWriteTimeMs * 0.7) + (targetTime * 0.3);
-    } else {
-      stats.totalReads++;
-      stats.avgReadTimeMs = stats.totalReads == 1 ? targetTime : (stats.avgReadTimeMs * 0.7) + (targetTime * 0.3);
-    }
-
+    stats.recordMetrics(currentWeight: task.executionWeight, elapsedMs: elapsedMs, isWrite: isWrite);
     stats.incrementSessionStats(isWrite: isWrite);
 
-    // Maintain row count state via absolute sets (rows) or relative changes (delta)
+    // Maintain row count state
     if (rows != null && rows > 0) {
       stats.rowCount = math.max(stats.rowCount, rows);
     } else if (delta != null) {
@@ -146,7 +79,12 @@ class FluentTableStatsTracker {
     FluentLog.debug(
       'Task ${task.action} completed on ${task.table}',
       tag: 'FluentTableStats:register',
-      context: {'elapsed': '${elapsedMs}ms', 'isWrite': isWrite, 'new_avg': isWrite ? stats.avgWriteTimeMs : stats.avgReadTimeMs, 'current_row_count': stats.rowCount},
+      context: {
+        'elapsed': '${elapsedMs}ms',
+        'isWrite': isWrite,
+        'new_avg': isWrite ? stats.avgWriteTimeMs.toStringAsFixed(1) : stats.avgReadTimeMs.toStringAsFixed(1),
+        'current_row_count': stats.rowCount,
+      },
     );
   }
 

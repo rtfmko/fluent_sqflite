@@ -146,6 +146,43 @@ class TableStats extends FluentStorable {
     }
   }
 
+  /// Records performance metrics for the table, updating latency bounds,
+  /// average read/write times, and the adaptive execution weight.
+  ///
+  /// Uses an Adaptive Exponential Moving Average (AEMA) to calculate metrics:
+  /// - [sensitivity] is derived from the deviation of the current weight from
+  ///   the historical average, providing a "trigger" for rapid adaptation.
+  /// - [alpha] (smoothing factor) dynamically scales between 0.07 and 0.3:
+  ///     - 0.07 ensures baseline stability during normal operation.
+  ///     - 0.3 allows the system to react quickly to performance bottlenecks
+  ///       or "storm" conditions.
+  /// - Metrics are clamped to prevent outliers from distorting the engine's
+  ///   decision-making process (20ms - 300ms for weights).
+  void recordMetrics({required int currentWeight, required int elapsedMs, required bool isWrite}) {
+    // 1. Latency bounds
+    if (elapsedMs > maxTimeMs) maxTimeMs = elapsedMs;
+    if (minTimeMs == 0 || elapsedMs < minTimeMs) minTimeMs = elapsedMs;
+
+    // 2. Adaptive Alpha Calculation
+    final double weightDouble = currentWeight.toDouble();
+    final double diff = (weightDouble - avgExecutionWeight).abs();
+    final double sensitivity = diff / (avgExecutionWeight + 20.0);
+    final double alpha = sensitivity.clamp(0.07, 0.3);
+
+    // 3. Update Adaptive Execution Weight
+    avgExecutionWeight = ((avgExecutionWeight * (1 - alpha)) + (weightDouble * alpha)).clamp(20.0, 300.0);
+
+    // 4. Update Latency Averages
+    final double targetTime = (elapsedMs == 0) ? 0.1 : elapsedMs.toDouble();
+    if (isWrite) {
+      totalWrites++;
+      avgWriteTimeMs = (totalWrites == 1) ? targetTime : (avgWriteTimeMs * (1 - alpha)) + (targetTime * alpha);
+    } else {
+      totalReads++;
+      avgReadTimeMs = (totalReads == 1) ? targetTime : (avgReadTimeMs * (1 - alpha)) + (targetTime * alpha);
+    }
+  }
+
   @override
   Map<String, dynamic> buildJson() => {
     'statKey': _statKey,
