@@ -205,10 +205,13 @@ class FluentTask {
       case FluentDbAction.updateSingleField:
       case FluentDbAction.rawGetItem:
       case FluentDbAction.restore:
-        w += 15; // O(1) or O(log N) index lookups
+      case FluentDbAction.readSchema:
+        w += 10;
         break;
 
       case FluentDbAction.update:
+      case FluentDbAction.save:
+      case FluentDbAction.saveStats:
         w += 25;
         break;
 
@@ -218,23 +221,18 @@ class FluentTask {
       case FluentDbAction.deleteBy:
       case FluentDbAction.hardDelete:
       case FluentDbAction.hardDeleteBy:
-        w += 35;
-        break;
-
       case FluentDbAction.find:
       case FluentDbAction.findItemsBy:
       case FluentDbAction.findValidItems:
       case FluentDbAction.rawGetItems:
-      case FluentDbAction.save:
-      case FluentDbAction.saveStats:
       case FluentDbAction.findDeletedItems:
-        w += 60; // Heavier I/O or multi-step CRUD pipelines
+        w += 40;
         break;
 
       case FluentDbAction.findAll:
       case FluentDbAction.analyzeStats:
       case FluentDbAction.updateWithRelations:
-        w += 80; // Potential Full Table Scan or cascaded graph updates
+        w += 60;
         break;
 
       case FluentDbAction.deleteWhere:
@@ -249,43 +247,51 @@ class FluentTask {
       case FluentDbAction.updateAll:
       case FluentDbAction.updateAllWithRelations:
       case FluentDbAction.updateMultipleFieldsByIds:
-        w += 100; // Bulk modifications and mass table sweeps
+      case FluentDbAction.wipeAll:
+        w += 100;
         break;
 
       case FluentDbAction.execute:
-        w += 150; // Unbounded execution complexity
+        w += 150;
         break;
 
       default:
-        w += 40;
+        w += 30;
     }
+
     // 2. Query Refinement: Adjust weight based on query builder constraints
     if (h != null) {
+      // 1. Limit optimization:
       if (h.limit != null) {
-        // Small limits significantly reduce I/O overhead
-        w = (w * (h.limit! > 100 ? 1.2 : 0.7)).round();
+        if (h.limit! <= 100) {
+          w -= 15;
+        } else {
+          w += 10;
+        }
       } else if (action == FluentDbAction.find || action == FluentDbAction.findItemsBy) {
-        w += 80; // Penalty for lacking LIMIT: High risk of large result sets
+        w += 40;
       }
 
+      // 2. Sorting overhead (Temp tables)
       if (h.sortDirection != null || h.orderBy != null) {
-        w += 30; // Sort operations require extra memory/CPU (temp tables)
+        w += 20;
       }
 
+      // 3. Index usage (Efficient lookup)
       if (h.key != null && h.value != null) {
-        w -= 10; // Indexed lookups are highly efficient
+        w -= 15;
       }
     }
 
     // 3. Relational Recursion: Penalize deep object graphs (N+1 query risk)
     if (maxDepth == 0) {
-      w += 200; // Severe penalty for unbounded recursion
+      w += 150; // Severe penalty for unbounded recursion
     } else if (maxDepth > 1) {
-      w += (maxDepth * 40);
+      w += (maxDepth * 30);
     }
 
     // 4. Data Fetching Policy: Eager loading (ignoreLazy) increases memory pressure
-    if (ignoreLazy) w += 30;
+    if (ignoreLazy) w += 20;
 
     FluentLog.debug('Weight calculated for task $id: $w (Action: ${action.name})', tag: 'FluentTask:weighting');
 

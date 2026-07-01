@@ -170,10 +170,17 @@ class TableStats extends FluentStorable {
     final double alpha = sensitivity.clamp(0.07, 0.3);
 
     // 3. Update Adaptive Execution Weight
-    avgExecutionWeight = ((avgExecutionWeight * (1 - alpha)) + (weightDouble * alpha)).clamp(20.0, 300.0);
+    double newWeight = ((avgExecutionWeight * (1 - alpha)) + (weightDouble * alpha));
+
+    if (currentWeight < avgExecutionWeight) {
+      final double coolingFactor = (avgExecutionWeight / 400.0) * 0.03;
+      newWeight -= (avgExecutionWeight - currentWeight) * coolingFactor;
+    }
+
+    avgExecutionWeight = newWeight.clamp(10.0, 400.0);
 
     // 4. Update Latency Averages
-    final double targetTime = (elapsedMs == 0) ? 0.1 : elapsedMs.toDouble();
+    final double targetTime = (elapsedMs <= 0) ? 0.1 : elapsedMs.toDouble();
     if (isWrite) {
       totalWrites++;
       avgWriteTimeMs = (totalWrites == 1) ? targetTime : (avgWriteTimeMs * (1 - alpha)) + (targetTime * alpha);

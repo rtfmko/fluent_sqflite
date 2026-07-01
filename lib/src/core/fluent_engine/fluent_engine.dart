@@ -1201,57 +1201,47 @@ class FluentEngine {
     final TableStats? stats = FluentTableStatsTracker()._statsMap[key];
     if (stats == null) return staticWeight;
 
-    // 1. Physical table size multiplier
-    final int safeRowCount = stats.rowCount < 0 ? 0 : stats.rowCount;
-    final double rowMultiplier = 1.0 + (safeRowCount / 5000);
-
-    // 2. Complexity Multiplier: Adjusts priority for heavy schema operations (derived from latency)
+    // 1. Fundamental Complexity (Multiplicative)
     final double complexityMultiplier = switch (stats.complexity) {
       TableComplexity.low => 0.8,
       TableComplexity.medium => 1.2,
-      TableComplexity.high => 2.5,
-      TableComplexity.extreme => 6.0,
+      TableComplexity.high => 2.0,
+      TableComplexity.extreme => 3.0,
     };
 
-    // 3. Relational Multiplier: Accounts for schema cascade depth
-    final double relationsMultiplier = 1.0 + (stats.relationsCount * 0.25);
+    double finalCalculated = staticWeight * complexityMultiplier;
 
-    // 4. Historical Weight Multiplier: Adjusts priority based on the table's typical workload
-    final double historicalWeightMultiplier = 1.0 + (stats.avgExecutionWeight / 200.0).clamp(0.0, 2.0);
+    // 2. Additive Bonuses (Sum of impacts)
+    final double rowBonus = (stats.rowCount / 5000).clamp(0.0, 1.0);
+    final double relationsBonus = (stats.relationsCount * 0.25).clamp(0.0, 1.0);
 
-    // 5. Safety Multiplier: Penalizes tables with a high error rate
+    final double historicalBonus = (stats.avgExecutionWeight / 200.0).clamp(0.0, 1.0);
+
+    final double totalBonus = rowBonus + relationsBonus + historicalBonus;
+
+    finalCalculated += (staticWeight * totalBonus);
+
+    // 3. Safety Multiplier (Final Penalties)
     final double totalOps = (stats.totalReads + stats.totalWrites).toDouble();
     final double errorRate = totalOps > 0 ? stats.failedQueries / totalOps : 0.0;
     final double safetyMultiplier = errorRate > 0.05 ? 1.5 : 1.0;
 
-    // --- DIAGNOSTIC LOGS ---
-    if (errorRate > 0.05) {
-      FluentLog.warning(
-        'High error rate detected for table: ${task.table}',
-        tag: 'FluentEngine:weight',
-        context: {'errorRate': '${(errorRate * 100).toStringAsFixed(1)}%', 'failedQueries': stats.failedQueries},
-        hint: 'Check schema consistency or database constraints.',
-      );
-    }
+    finalCalculated *= safetyMultiplier;
 
-    if (stats.complexity == TableComplexity.extreme) {
-      FluentLog.warning(
-        'Extreme latency bottleneck detected for table: ${task.table}',
-        tag: 'FluentEngine:weight',
-        context: {'avgRead': '${stats.avgReadTimeMs.round()}ms', 'avgWrite': '${stats.avgWriteTimeMs.round()}ms'},
-        hint: 'Consider adding SQL indexes or reducing query depth.',
-      );
-    }
-
-    // Calculate final product of all factors
-    final double finalCalculated = staticWeight * rowMultiplier * complexityMultiplier * relationsMultiplier * historicalWeightMultiplier * safetyMultiplier;
-
-    final int finalWeight = finalCalculated.round().clamp(0, 100000);
+    // 4. Hard Ceiling
+    final int finalWeight = finalCalculated.round().clamp(10, 2000);
 
     FluentLog.debug(
       'Calculated task weight',
       tag: 'FluentEngine:weight',
-      context: {'taskId': task.id, 'static': staticWeight, 'final': finalWeight, 'complexity': stats.complexity.name, 'errorRate': errorRate.toStringAsFixed(3)},
+      context: {
+        'taskId': task.id,
+        'static': staticWeight,
+        'final': finalWeight,
+        'complexity': stats.complexity.name,
+        'bonuses': [rowBonus, relationsBonus, historicalBonus].map((e) => e.toStringAsFixed(2)).toList().toString(),
+        'safety': safetyMultiplier,
+      },
     );
 
     return finalWeight;

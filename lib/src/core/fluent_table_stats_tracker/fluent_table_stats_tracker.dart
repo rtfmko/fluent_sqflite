@@ -64,7 +64,7 @@ class FluentTableStatsTracker {
     final String key = _makeKeyFromTask(task);
     final TableStats stats = _statsMap.putIfAbsent(key, () => TableStats(task: task));
 
-    stats.recordMetrics(currentWeight: task.executionWeight, elapsedMs: elapsedMs, isWrite: isWrite);
+    stats.recordMetrics(currentWeight: task.staticWeight, elapsedMs: elapsedMs, isWrite: isWrite);
     stats.incrementSessionStats(isWrite: isWrite);
 
     // Maintain row count state
