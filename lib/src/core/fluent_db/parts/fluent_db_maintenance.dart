@@ -71,8 +71,8 @@ extension FluentDbMaintenance on FluentDb {
   /// behavior. The engine will be forced into a "cold start" (re-learning) phase
   /// every time this method is called, preventing it from making optimal
   /// priority decisions based on historical data.
-  void resetPerformanceStats(String dbName, String tableName) {
-    FluentTableStatsTracker().resetPerformanceStats(dbName, tableName);
+  void resetPerformanceStats({required FluentDbKey dbKey, required String tableName}) {
+    FluentTableStatsTracker().resetPerformanceStats(dbKey.dbName, tableName);
   }
 
   /// Executes automated storage hygiene for a [FluentGroup].

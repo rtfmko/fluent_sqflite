@@ -37,42 +37,19 @@ class FluentTableStatsTracker {
   /// Creates a unique composite key for indexing [TableStats] or schema data.
   String _makeKey(String dbName, String tableName) => '$dbName:$tableName';
 
-  /// Helper to generate a key directly from a [FluentTask] for streamlined lookups.
-  String _makeKeyFromTask(FluentTask task) => '${task.dbName}:${task.table}';
-
-  /// Forcefully resets the row count for a table to zero.
-  /// Used after truncation (clearTable) to keep memory stats accurate.
-  void resetTableRows(String dbName, String tableName) {
-    final String key = _makeKey(dbName, tableName);
-    final TableStats? existingStats = _statsMap[key];
-
-    if (existingStats != null && existingStats.rowCount != 0) {
-      existingStats.rowCount = 0;
-      markAsDirty();
-      FluentLog.debug('Row count manually reset to 0 after table truncation.', tag: 'FluentTableStats:reset', context: {'table': tableName});
-    }
-  }
-
   /// Registers a successful [FluentTask] execution, updating the table's telemetry
   /// metrics such as latency averages, throughput counts, and row-count state.
   ///
   /// This method serves as the primary hook for the [FluentEngine] to
   /// report task completion, facilitating real-time performance monitoring.
-  void registerSuccess({required FluentTask task, required int elapsedMs, required bool isWrite, int? rows, int? delta}) {
+  void registerSuccess({required FluentTask task, required int elapsedMs, required bool isWrite}) {
     if (task.isSystem) return;
 
-    final String key = _makeKeyFromTask(task);
+    final String key = task.statsKey;
     final TableStats stats = _statsMap.putIfAbsent(key, () => TableStats(task: task));
 
     stats.recordMetrics(currentWeight: task.staticWeight, elapsedMs: elapsedMs, isWrite: isWrite);
     stats.incrementSessionStats(isWrite: isWrite);
-
-    // Maintain row count state
-    if (rows != null && rows > 0) {
-      stats.rowCount = math.max(stats.rowCount, rows);
-    } else if (delta != null) {
-      stats.rowCount = (stats.rowCount + delta).clamp(0, double.maxFinite.toInt());
-    }
 
     markAsDirty();
 
@@ -100,15 +77,51 @@ class FluentTableStatsTracker {
   void resetPerformanceStats(String dbName, String tableName) {
     final TableStats? stats = _statsMap[_makeKey(dbName, tableName)];
     if (stats != null) {
-      stats.avgReadTimeMs = 0.0;
-      stats.avgWriteTimeMs = 0.0;
-      stats.avgExecutionWeight = 20.0;
-      stats.minTimeMs = null;
-      stats.maxTimeMs = 0;
-      stats.totalReads = 0;
-      stats.totalWrites = 0;
+      stats.resetPerformanceStats();
       markAsDirty();
     }
+  }
+
+  /// Resets all performance statistics for every table associated with the
+  /// specified database to their default baseline values.
+  ///
+  /// This operation performs a cascading reset of all metrics (row counts,
+  /// latency averages, execution weights) within the given database.
+  ///
+  /// **When to use:**
+  /// - During a full database wipe ([FluentDbAction.clearDatabase]).
+  /// - After major schema migrations that invalidate historical performance data.
+  /// - When resetting the application state to ensure the engine re-evaluates
+  ///   the database's performance characteristics from a fresh, unbiased state.
+  ///
+  /// If any stats were modified, this method automatically triggers [markAsDirty]
+  /// to ensure the changes are persisted to the system telemetry storage.
+  void resetDatabaseStats(String dbName) {
+    bool hasChanges = false;
+    for (final TableStats stats in _statsMap.values) {
+      if (stats.dbName == dbName) {
+        stats.resetAllStats();
+        hasChanges = true;
+      }
+    }
+    if (hasChanges) markAsDirty();
+  }
+
+  /// Resets the performance statistics and structural metadata for all tracked
+  /// database tables to their default baseline values.
+  ///
+  /// This is a global "hard reset" operation that should be invoked during
+  /// maintenance events such as a full database wipe or schema re-initialization.
+  /// By clearing all metrics—including row counts, relational depth, and
+  /// accumulated execution latencies—it ensures that the [FluentEngine] starts
+  /// with a completely clean slate, preventing stale or inconsistent telemetry
+  /// from influencing task scheduling and priority calculations after a
+  /// structural data reset.
+  void resetAllPerformanceStats() {
+    for (final TableStats stats in _statsMap.values) {
+      stats.resetAllStats();
+    }
+    markAsDirty();
   }
 
   /// Records a failed [FluentTask] execution, incrementing the error counter
@@ -117,7 +130,7 @@ class FluentTableStatsTracker {
   /// Tracking failures is critical for identifying unstable database operations,
   /// such as schema mismatches, transaction rollbacks, or constraint violations.
   void registerFailure(FluentTask task) {
-    final String key = _makeKeyFromTask(task);
+    final String key = task.statsKey;
     final TableStats stats = _statsMap.putIfAbsent(key, () => TableStats(task: task));
 
     stats.failedQueries++;

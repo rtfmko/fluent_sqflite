@@ -17,8 +17,8 @@ part of '../fluent_db.dart';
 /// * **State Inspection**: Checking the operational status of specific model storages.
 extension FluentDbLocator on FluentDb {
   /// Checks if the underlying database for a specific model [T] is open and ready.
-  bool isModelStorageReady<T extends FluentStorable>(String dbName) {
-    final FluentProvider? provider = _groupedRegistry[dbName]?[T];
+  bool isModelStorageReady<T extends FluentStorable>({required FluentDbKey dbKey}) {
+    final FluentProvider? provider = _groupedRegistry[dbKey.dbName]?[T];
     return provider?.db.isOpen ?? false;
   }
 
@@ -46,7 +46,7 @@ extension FluentDbLocator on FluentDb {
   ///   }
   /// );
   /// ```
-  Future<T> transaction<T>({required List<Type> modelTypes, required Future<T> Function() action, String? dbName}) async {
+  Future<T> transaction<T>({required List<Type> modelTypes, required Future<T> Function() action, FluentDbKey? dbKey}) async {
     if (modelTypes.isEmpty) {
       final FluentArgumentException exception = FluentArgumentException('$modelTypes', 'The list cannot be empty. You must provide at least one model type for this transaction.', StackTrace.current);
       FluentLog.error(exception.message, exception, exception.stackTrace);
@@ -56,7 +56,7 @@ extension FluentDbLocator on FluentDb {
     // Resolve target providers for all models involved in the transaction
     final List<FluentProvider<FluentStorable>> targetProviders = [];
     for (final Type type in modelTypes) {
-      final FluentProvider provider = FluentDb.providerForType(type, dbName: dbName);
+      final FluentProvider provider = FluentDb.providerForType(type, dbName: dbKey?.dbName);
       targetProviders.add(provider);
     }
 

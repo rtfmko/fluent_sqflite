@@ -96,7 +96,7 @@ extension FluentDbLifecycle on FluentDb {
     final String databasesPath = await getDatabasesPath();
 
     for (final FluentGroup group in activeGroups) {
-      if (!_isSafeDbName(group.dbKey.dbName)) {
+      if (!_isSafeDbName(group.dbKey)) {
         final FluentDatabaseNameException exception = FluentDatabaseNameException(
           'Invalid database name: "${group.dbKey.dbName}". '
           'Database names must contain only alphanumeric characters and underscores (a-z, A-Z, 0-9, _).',
@@ -367,8 +367,8 @@ extension FluentDbLifecycle on FluentDb {
   ///
   /// Note: Only dynamic settings are applied. Structural settings that require a
   /// fresh connection are ignored in this hot-swap.
-  Future<void> changeCurrentPerformanceConfig<T extends FluentProvider>(SQLitePerformanceConfig newConfig, {String? dbName}) async {
-    final Database db = FluentDb.provider<T>(dbName: dbName).db;
+  Future<void> changeCurrentPerformanceConfig<T extends FluentProvider>(SQLitePerformanceConfig newConfig, {FluentDbKey? dbKey}) async {
+    final Database db = FluentDb.provider<T>(dbName: dbKey?.dbName).db;
 
     FluentLog.debug('Attempting hot-swap of performance config', tag: 'FluentDb:changePerformance', context: {'provider': T.toString()});
     await _applyPerformanceConfig(db, newConfig, isFullConfig: false);
@@ -411,6 +411,8 @@ extension FluentDbLifecycle on FluentDb {
   /// It ensures that no file locks remain before attempting deletion.
   Future<void> destroyAllDatabases() async {
     FluentLog.warning('Initiating total data wipe. All databases will be destroyed.', tag: 'FluentDb:destroyAll');
+
+    await FluentEngine().pauseQueue();
 
     for (final Map<Type, FluentProvider<FluentStorable>> group in _groupedRegistry.values) {
       for (final FluentProvider<FluentStorable> provider in group.values) {
@@ -464,27 +466,27 @@ extension FluentDbLifecycle on FluentDb {
   ///
   /// [dbName] The identifier of the database to be dropped.
   @visibleForTesting
-  Future<void> dropDatabase(String dbName) async {
+  Future<void> dropDatabase(FluentDbKey dbKey) async {
     FluentLog.warning(
-      'Dropping database: "$dbName". All data will be permanently deleted.',
+      'Dropping database: "${dbKey.dbName}". All data will be permanently deleted.',
       tag: 'FluentDb:drop',
       hint: 'This operation is destructive and cannot be undone.',
-      context: {'dbName': dbName},
+      context: {'dbName': dbKey.dbName},
     );
 
     try {
       final String databasesPath = await getDatabasesPath();
-      final String path = '$databasesPath/$dbName';
+      final String path = '$databasesPath/${dbKey.dbName}';
 
       await FluentEngine().hardReset();
 
       FluentLog.debug('Deleting database file', tag: 'FluentDb:drop', context: {'path': path});
       await databaseFactory.deleteDatabase(path);
 
-      FluentLog.info('Database file successfully removed', tag: 'FluentDb:drop', context: {'dbName': dbName});
+      FluentLog.info('Database file successfully removed', tag: 'FluentDb:drop', context: {'dbName': dbKey.dbName});
     } catch (e, st) {
       FluentLog.error(
-        'Failed to drop database: "$dbName"',
+        'Failed to drop database: "${dbKey.dbName}"',
         e,
         st,
         tag: 'FluentDb:drop',
@@ -554,8 +556,8 @@ extension FluentDbLifecycle on FluentDb {
   /// **Constraints:**
   /// * Allowed: `a-z`, `A-Z`, `0-9`, and `_`.
   /// * Disallowed: Spaces, hyphens, dots, path separators, or any special characters.
-  bool _isSafeDbName(String name) {
+  bool _isSafeDbName(FluentDbKey dbKey) {
     final RegExp safeNameRegex = RegExp(r'^[a-zA-Z0-9_]+$');
-    return safeNameRegex.hasMatch(name);
+    return safeNameRegex.hasMatch(dbKey.dbName);
   }
 }

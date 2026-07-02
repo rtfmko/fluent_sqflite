@@ -38,9 +38,25 @@
 /// FluentDb.saveItem(model, dbKey: UserDatabase('user_123'));
 /// ```
 abstract class FluentDbKey {
+  /// Creates a [FluentDbKey] used to identify and target a specific database
+  /// instance within the FluentDb ecosystem.
+  ///
+  /// Use this to perform database-specific operations like [FluentDb.clearAllDatabases].
+  factory FluentDbKey(String dbName) = _FluentDbKeyImpl;
+
   /// The physical file name (or unique key) associated with this database.
   String get dbName;
 
   @override
   String toString() => dbName;
+}
+
+/// Internal concrete implementation of [FluentDbKey].
+class _FluentDbKeyImpl implements FluentDbKey {
+  /// The underlying database identifier.
+  @override
+  final String dbName;
+
+  /// Creates a new instance of the database key.
+  _FluentDbKeyImpl(this.dbName);
 }

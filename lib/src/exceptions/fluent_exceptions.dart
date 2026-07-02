@@ -350,3 +350,20 @@ class FluentApiException extends FluentException {
   @override
   String toString() => 'FluentApiException: [StatusCode: $statusCode] $message';
 }
+
+/// Exception thrown when an operation is performed on a database key
+/// that has not been registered in the [FluentDb] registry.
+class FluentDatabaseNotFoundException extends FluentException {
+  /// The identifier of the database that was not found.
+  final String dbName;
+
+  /// Creates a [FluentDatabaseNotFoundException].
+  ///
+  /// * [dbName]: The name of the database that was not found.
+  /// * [stackTrace]: Execution path leading to this error.
+  FluentDatabaseNotFoundException(this.dbName, [StackTrace? stackTrace])
+      : super(
+    'Database "$dbName" is not registered. Ensure that it was initialized in FluentDb.init() or FluentEngine.',
+    stackTrace,
+  );
+}

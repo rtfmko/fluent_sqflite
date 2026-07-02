@@ -55,6 +55,9 @@ class FluentTask {
   /// A unique hash representing the task's parameters, used for task deduplication.
   late final String fingerprint;
 
+  /// Generate a key directly from a [FluentTask] for streamlined lookups.
+  String get statsKey => '$dbName:$table';
+
   /// Constructs a [FluentTask] and automatically computes its scheduling metadata.
   ///
   /// The constructor immediately processes the [action], [helper], and [policy]

@@ -137,6 +137,36 @@ class TableStats extends FluentStorable {
     FluentDbColumn(name: 'failedQueries', type: FluentDbDataType.integer),
   ];
 
+  /// Fully resets the table's statistics to their initial state.
+  /// Used during operations like [clearTable] or [wipeAll] when accumulated
+  /// row counts and performance metrics are no longer relevant.
+  void resetAllStats() {
+    rowCount = 0;
+    relationsCount = 0;
+    avgReadTimeMs = 0.0;
+    avgWriteTimeMs = 0.0;
+    avgExecutionWeight = 10.0;
+    maxTimeMs = 0;
+    minTimeMs = null;
+    totalReads = 0;
+    totalWrites = 0;
+    failedQueries = 0;
+  }
+
+  /// Resets only the performance metrics (latencies, execution weight).
+  /// Structural data (rowCount, relationsCount, failedQueries) remains intact.
+  /// Useful for periodic recalibration or when clearing cumulative averages
+  /// without invalidating the actual data row counts.
+  void resetPerformanceStats() {
+    avgReadTimeMs = 0.0;
+    avgWriteTimeMs = 0.0;
+    avgExecutionWeight = 10.0;
+    minTimeMs = null;
+    maxTimeMs = 0;
+    totalReads = 0;
+    totalWrites = 0;
+  }
+
   /// Increments in-memory session counters (call this from Tracker)
   void incrementSessionStats({required bool isWrite}) {
     if (isWrite) {

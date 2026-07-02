@@ -1096,6 +1096,16 @@ class FluentEngine {
       }
     }
 
+    if (task.action == FluentDbAction.clearDatabase) {
+      _purgePendingTasks(dbName: task.dbName);
+
+      FluentTableStatsTracker().resetDatabaseStats(task.dbName);
+
+      await _clearDatabase(task);
+      _pendingRequests.remove(task.id)?.complete(true);
+      return true;
+    }
+
     try {
       final FluentProvider provider = FluentDb.getProviderByTable(tableName, dbName: task.dbName);
 
@@ -1140,23 +1150,14 @@ class FluentEngine {
       }
 
       if (task.action == FluentDbAction.clearTable) {
-        FluentTableStatsTracker().resetTableRows(task.dbName, tableName);
+        _purgePendingTasks(dbName: task.dbName, tableName: tableName);
+        FluentTableStatsTracker().resetPerformanceStats(task.dbName, tableName);
 
         FluentTableStatsTracker().registerSuccess(task: task, elapsedMs: elapsedMs, isWrite: true);
-      } else if (task.isWriteOp) {
-        int rowDelta = 0;
-
-        if (task.action == FluentDbAction.save) {
-          rowDelta = (task.data is List) ? (task.data as List).length : 1;
-        } else if (task.action == FluentDbAction.delete) {
-          rowDelta = -1;
-        } else if (task.action == FluentDbAction.deleteBy || task.action == FluentDbAction.deleteItemsByIds || task.action == FluentDbAction.clearExpired) {
-          rowDelta = (result is int) ? -result : 0;
-        }
-
-        FluentTableStatsTracker().registerSuccess(task: task, elapsedMs: elapsedMs, isWrite: true, delta: rowDelta);
+      } else if (task.action == FluentDbAction.wipeAll) {
+        FluentTableStatsTracker().resetAllPerformanceStats();
       } else {
-        FluentTableStatsTracker().registerSuccess(task: task, elapsedMs: elapsedMs, isWrite: false);
+        FluentTableStatsTracker().registerSuccess(task: task, elapsedMs: elapsedMs, isWrite: task.isWriteOp);
       }
       _pendingRequests.remove(task.id)?.complete(result);
 
@@ -1179,6 +1180,40 @@ class FluentEngine {
       _pendingRequests.remove(task.id)?.completeError(e);
       rethrow;
     }
+  }
+
+  /// Performs an atomic, high-performance wipe of all user-defined tables
+  /// within a specific database.
+  ///
+  /// **Mechanism:**
+  /// 1. Uses [sqlite_master] to dynamically discover all user tables,
+  ///    automatically excluding SQLite system tables and internal Fluent
+  ///    telemetry/metadata tables.
+  /// 2. Executes all `DELETE` operations within a single [Batch] inside a
+  ///    [Transaction]. This ensures atomicity: if any part fails, the
+  ///    database state is automatically rolled back.
+  /// 3. Bypasses individual [FluentProvider] triggers to minimize overhead
+  ///    during massive structural resets.
+  ///
+  /// Returns `true` if the database was successfully purged, `false` if the
+  /// database handle was unavailable or closed.
+  Future<bool> _clearDatabase(FluentTask task) async {
+    final Database? db = _systemDb._databases[task.dbName];
+
+    if (db != null && db.isOpen) {
+      await db.transaction((txn) async {
+        final List<Map<String, dynamic>> tables = await txn.rawQuery("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '__fluent_%'");
+
+        final Batch batch = txn.batch();
+        for (final table in tables) {
+          batch.delete(table['name'] as String);
+        }
+
+        await batch.commit(noResult: true);
+      });
+      return true;
+    }
+    return false;
   }
 
   /// Dynamically calculates the execution priority (weight) of a [FluentTask].
@@ -1415,4 +1450,33 @@ class FluentEngine {
   ///    the current database state and locking mechanisms, preventing
   ///    race conditions during background maintenance cycles.
   Future<dynamic> _executeSystemTask(FluentTask task) async => _executeTaskInPipeline(task);
+
+  /// Atomically purges pending operations from the execution queue for a specific
+  /// database or table.
+  ///
+  /// **Why this is critical:**
+  /// When performing structural destructive operations (like [FluentDbAction.clearTable]
+  /// or [FluentDbAction.clearDatabase]), it is inefficient and potentially dangerous
+  /// to execute pending queued tasks that refer to data about to be destroyed.
+  ///
+  /// **Mechanism:**
+  /// 1. Iterates through the [_queue] to identify tasks matching the target [dbName]
+  ///    (and optionally the specific [tableName]).
+  /// 2. Invokes [cancelTask] for each identified task, which ensures that:
+  ///    - Associated [Completer] objects are resolved with an error.
+  ///    - Resources (memory, stream buffers) are immediately reclaimed.
+  ///    - Race conditions against non-existent data are prevented.
+  ///
+  /// Note: This method only affects the queue and does not impact currently
+  /// executing tasks or the physical database state.
+  void _purgePendingTasks({required String dbName, String? tableName}) {
+    // Identify all pending tasks destined for the affected database/table.
+    final List<int> tasksToCancel = _queue.where((t) => t.dbName == dbName && (tableName == null || t.table == tableName)).map((t) => t.id).toList();
+
+    tasksToCancel.forEach(cancelTask);
+
+    if (tasksToCancel.isNotEmpty) {
+      FluentLog.warning('Purged ${tasksToCancel.length} pending tasks due to structural clear', tag: 'FluentEngine:purge');
+    }
+  }
 }

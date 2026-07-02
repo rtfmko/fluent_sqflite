@@ -124,7 +124,7 @@ extension FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
       sqlData = {};
       final List<String> strippedFields = [];
 
-      for (final entry in map.entries) {
+      for (final MapEntry<String, dynamic> entry in map.entries) {
         if (allowedColumns.contains(entry.key)) {
           sqlData[entry.key] = entry.value;
         } else {

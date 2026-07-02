@@ -22,6 +22,10 @@
 - [x] **Streaming**
     - [x] Implement stream-based data fetching.
 
+- [x] **Refactor**
+    - [ ] Fluent engine
+    - [ ] Fluent system db
+
 ---
 
 ## 🛠 In Progress

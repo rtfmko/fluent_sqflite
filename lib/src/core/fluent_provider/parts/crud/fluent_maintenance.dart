@@ -138,7 +138,7 @@ extension FluentMaintenance<T extends FluentStorable> on FluentProvider<T> {
 
     // SCENARIO B: STANDARD TASK PIPELINE — Encapsulate table truncation parameters into a uniform framework task.
     // TableHelper configures multiple: true to signal a comprehensive dataset evacuation.
-    final FluentTask task = FluentTask(action: FluentDbAction.clearTable, table: tableName, dbName: dbName ?? this.dbName, helper: TableHelper(multiple: true), policy: policy);
+    final FluentTask task = FluentTask(action: FluentDbAction.clearTable, table: tableName, dbName: dbName ?? this.dbName, helper: TableHelper(multiple: true), policy: policy, force: true);
 
     return FluentDb.executeTask<T, int>(provider: this, task: task);
   }

@@ -1524,6 +1524,91 @@ class FluentDb {
     return providerByType<T>(dbName: dbKey?.dbName).ensureLoaded(item, maxDepth: maxDepth);
   }
 
+  /// Performs an immediate, atomic wipe of all data within the specified database.
+  ///
+  /// **Behavior:**
+  /// 1. **Queue Purge:** Instantly cancels all pending tasks associated with this
+  ///    [dbKey] to prevent race conditions during the wipe.
+  /// 2. **Atomic Wipe:** Triggers a high-performance [Batch] deletion within a
+  ///    single SQLite transaction, clearing all user-defined tables.
+  /// 3. **Reactivity:** Broadcasts a [FluentDbAction.clearTable] signal for every
+  ///    registered provider within this database, ensuring UI components
+  ///    (StreamBuilders) reflect the empty state immediately.
+  ///
+  /// This operation is executed with [FluentTask.force = true], bypassing standard
+  /// weight-based scheduling.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Wipe all data from the 'cache_db' to free up disk space
+  /// await FluentDb.clearSelectedDatabase(AppDatabases.cache);
+  ///
+  /// // Reset user data upon logout
+  /// await FluentDb.clearSelectedDatabase(FluentDbKey('user_session_db'));
+  /// ```
+  static Future<void> clearSelectedDatabase(FluentDbKey dbKey) async {
+    final String targetDb = dbKey.dbName;
+
+    if (!_instance._groupedRegistry.containsKey(targetDb)) {
+      final FluentDatabaseNotFoundException exception = FluentDatabaseNotFoundException(targetDb, StackTrace.current);
+      FluentLog.error(
+        'Attempted to clear unregistered database: "$targetDb"',
+        exception,
+        exception.stackTrace,
+        tag: 'FluentDb:clear',
+        hint: 'Ensure that the database is correctly initialized via FluentDb.init() or that the dbKey is correct.',
+      );
+      throw exception;
+    }
+
+    FluentLog.info('Initiating wipe for database: "$targetDb"', tag: 'FluentDb:clear');
+
+    final FluentTask task = FluentTask(action: FluentDbAction.clearDatabase, dbName: targetDb, force: true);
+
+    await FluentEngine().dispatch(task);
+
+    FluentLog.debug('Database "$targetDb" successfully wiped on disk.', tag: 'FluentDb:clear');
+
+    final Iterable<FluentProvider<FluentStorable>>? providersInDb = _instance._groupedRegistry[targetDb]?.values;
+
+    if (providersInDb != null) {
+      for (final FluentProvider<FluentStorable> provider in providersInDb) {
+        FluentEngine().broadcastSystemAction(FluentDbAction.clearTable, modelType: provider.modelSample.runtimeType);
+      }
+    }
+
+    FluentLog.info('Wipe operation completed for database: "$targetDb"', tag: 'FluentDb:clear');
+  }
+
+  /// Performs a cascading wipe across all registered database instances.
+  ///
+  /// Effectively iterates through the entire registry and invokes
+  /// [clearSelectedDatabase] for each database.
+  ///
+  /// **Usage Note:**
+  /// This is a destructive operation and should be used for full application
+  /// data resets (e.g., "Factory Reset" features or complete user sign-outs).
+  ///
+  /// **Example:**
+  /// ```dart
+  /// try {
+  ///   await FluentDb.clearAllDatabases();
+  ///   print("All databases have been wiped successfully.");
+  /// } catch (e) {
+  ///   print("Failed to perform a full reset: $e");
+  /// }
+  /// ```
+  ///
+  /// The wipe is performed sequentially for each database to maintain stability
+  /// and avoid overwhelming the database engine's I/O pipeline.
+  static Future<void> clearAllDatabases() async {
+    for (final String dbName in _instance._groupedRegistry.keys) {
+      await clearSelectedDatabase(FluentDbKey(dbName));
+    }
+
+    FluentLog.info('Wipe operation completed for all registered database', tag: 'FluentDb:clearAllDatabases');
+  }
+
   /// Orchestrates a data synchronization cycle between the local database and a remote backend.
   ///
   /// This method provides a centralized way to execute synchronization strategies,

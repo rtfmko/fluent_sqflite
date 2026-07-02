@@ -346,6 +346,9 @@ enum FluentDbAction {
   /// Completely truncates the table (removes all records).
   clearTable,
 
+  /// Performs an atomic wipe of all user-defined tables in the database.
+  clearDatabase,
+
   /// Fetches a single raw item (no model mapping applied).
   rawGetItem,
 
