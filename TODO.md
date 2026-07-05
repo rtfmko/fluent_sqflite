@@ -23,16 +23,21 @@
     - [x] Implement stream-based data fetching.
 
 - [x] **Refactor**
-    - [ ] Fluent engine
-    - [ ] Fluent system db
+    - [x] Fluent engine
+    - [x] Fluent system db
+    - [ ] Fluent Table Stats Tracker
 
 ---
 
 ## 🛠 In Progress
+
 *No tasks currently in progress.*
 
 ## ✅ Completed
+
 - [x] Initial project setup.
 - [x] Implement stream-based data fetching.
 - [x] Added SoftDelete.
 - [x] Added syncWithServer.
+- [x] Fluent engine
+- [x] Fluent system db

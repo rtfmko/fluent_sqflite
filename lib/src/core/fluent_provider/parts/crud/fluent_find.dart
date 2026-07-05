@@ -87,8 +87,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   /// final standardOrders = await orderRepository.findAll(
   ///   limit: 50,
   ///   maxDepth: 3,
-  ///   ignoreLazy: false,
-  ///   policy: const ExecutionPolicy(useIsolate: true), // Offload heavy hydration task to background thread
+  ///   ignoreLazy: false
   /// );
   /// ```
   @internal
@@ -297,7 +296,6 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   ///   orderBy: 'settled_at DESC',
   ///   limit: 20,
   ///   offset: 40, // Useful for multi-tier pagination screens
-  ///   policy: const ExecutionPolicy(useIsolate: true), // Offload heavy cascading mapping to background thread
   /// );
   /// ```
   @internal

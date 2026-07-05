@@ -51,8 +51,7 @@ extension FluentRaw<T extends FluentStorable> on FluentProvider<T> {
   /// ```dart
   /// final rawDataMap = await userRepository.rawGetItemBy(
   ///   'usr_0192a3',
-  ///   column: 'uuid',
-  ///   policy: const ExecutionPolicy(useIsolate: false), // Run instantly on the Main thread thread-pool
+  ///   column: 'uuid'
   /// );
   ///
   /// if (rawDataMap != null) {
@@ -96,8 +95,7 @@ extension FluentRaw<T extends FluentStorable> on FluentProvider<T> {
   /// ```dart
   /// final rawLogsBatch = await auditRepository.rawGetItemsBy(
   ///   'ERROR',
-  ///   column: 'log_level',
-  ///   policy: const ExecutionPolicy(useIsolate: true), // Offload parsing overhead of large sets from Main
+  ///   column: 'log_level'
   /// );
   /// ```
   @internal

@@ -2,9 +2,9 @@
 // Use of this source code is governed by an Apache-2.0 license that can be
 // found in the LICENSE file.
 
-import '../core/fluent_sqlite_internal.dart';
-import '../exceptions/exceptions.dart';
-import '../utils/utils.dart';
+import '../../core/fluent_sqlite_internal.dart';
+import '../../exceptions/exceptions.dart';
+import '../../utils/utils.dart';
 
 /// Represents a structural definition of a database column.
 ///

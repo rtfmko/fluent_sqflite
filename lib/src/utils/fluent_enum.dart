@@ -152,6 +152,21 @@ enum SQLiteSynchronous {
   String get value => name.toUpperCase();
 }
 
+/// Defines how the internal queue sorts and groups incoming database tasks.
+enum FluentQueueStrategy {
+  /// Strict First-In, First-Out. Tasks are executed in the exact order they were requested.
+  /// Ignores priority and execution weight. Best for financial data or strict logs.
+  fifo,
+
+  /// Sorts tasks based on 'force' flags, developer-defined priorities, and dynamic weight
+  /// (row count, memory payload). Best for UI responsiveness.
+  smartPriority,
+
+  /// The ultimate optimization. Uses smart sorting AND actively looks ahead in the queue
+  /// to merge identical adjacent operations (e.g., multiple single INSERTS into one BATCH).
+  smartBatching,
+}
+
 /// Defines the concurrency model and locking behavior utilized by the
 /// database layer for task scheduling.
 ///
@@ -364,6 +379,9 @@ enum FluentDbAction {
   /// Analyze system stats
   analyzeStats,
 
+  /// Analyze table count
+  analyzeTable,
+
   /// Save system stats
   saveStats,
 
@@ -419,68 +437,6 @@ enum TableComplexity {
   /// heavy join requirements, or massive historical datasets.
   /// Operations here require prioritized queueing and strict resource management.
   extreme,
-}
-
-/// Defines the specific control-plane commands used to communicate between
-/// the main isolate and the background database worker isolate.
-///
-/// This enum acts as the "protocol" for the [IsolateRequest], ensuring
-/// type-safe dispatching of operations to the background engine.
-enum IsolateCmd {
-  /// No action specified; used as a default or empty command state.
-  none,
-
-  /// Performs initial setup of the background isolate, such as opening SQLite
-  /// connections, registering schemas, and initializing local caches.
-  init,
-
-  /// Triggers the execution of a [FluentTask], such as a query, mutation, or batch operation.
-  execute,
-
-  /// Signals the worker to halt a currently processing [FluentTask] identified by its ID.
-  cancel,
-
-  /// Signals the worker to perform an orderly shutdown, closing database
-  /// handles and flushing buffers before the isolate is destroyed.
-  terminate,
-}
-
-/// Represents the lifecycle states and communication signals reported by
-/// the background worker isolate back to the main application.
-///
-/// This enum serves as the "handshake protocol" for [IsolateResponse],
-/// allowing the [FluentEngine] to track worker health, progress
-/// updates, and operational results in real-time.
-enum IsolateStatus {
-  /// Default state; indicates no specific status update is being reported.
-  none,
-
-  /// Confirms that a task was executed successfully with no errors.
-  ok,
-
-  /// Signals that the worker isolate has completed its initialization
-  /// (e.g., SQLite connection established, schemas verified).
-  warmupDone,
-
-  /// Used for long-running tasks to report partial completion percentage
-  /// or intermediate results to the UI thread.
-  progress,
-
-  /// Confirms that the diagnostic analysis command ([IsolateCmd.analyzeStats])
-  /// has been successfully completed.
-  analyzeDone,
-
-  /// Confirms that performance metrics ([IsolateCmd.saveStats]) have been
-  /// persisted successfully to disk.
-  saveDone,
-
-  /// Indicates that the worker encountered a failure during execution;
-  /// requires inspection of the `errorCode` field.
-  error,
-
-  /// Confirms that the worker isolate has successfully processed the
-  /// [IsolateCmd.terminate] command and released system resources.
-  terminated,
 }
 
 /// Defines the directional order for sorting database query results.

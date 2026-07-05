@@ -211,14 +211,14 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
   }
 
   /// Asynchronously transforms a list of raw database rows into a list of hydrated
-  /// domain models [T], delegating processing to a batched compute isolate.
+  /// domain models [T].
   ///
   /// This method enables high-performance bulk data retrieval:
-  /// * Compute Isolation: Offloads the transformation and relational hydration logic
-  ///   to a background computation pool, preventing main-thread blocking during
-  ///   heavy object-graph assembly.
+  /// * Efficiency: Processes row-to-model hydration asynchronously, preventing
+  ///   the accumulation of heavy synchronous tasks that could stall the event loop.
   /// * Batch Execution: Uses the internal `_computeBatched` utility to manage
-  ///   concurrency and resource limits during large data set processing.
+  ///   the workload, ensuring that large data sets are processed without
+  ///   negatively impacting system responsiveness.
   ///
   /// [rows] The raw list of database records (maps) to be transformed.
   ///
@@ -408,7 +408,7 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
     final int nextDepth = currentDepth + 1;
     final int maxDepth = task.maxDepth;
     final bool ignoreLazy = task.ignoreLazy;
-    final int chunkSize = task.policy.chunkSize ?? 950;
+    final int chunkSize = task.policy.effectiveChunkSize;
 
     for (final MapEntry<Type, FluentDbRelation<FluentStorable, FluentStorable>> entry in relations.entries) {
       final FluentDbRelation rel = entry.value;

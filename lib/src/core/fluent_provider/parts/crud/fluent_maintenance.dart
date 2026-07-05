@@ -54,7 +54,6 @@ extension FluentMaintenance<T extends FluentStorable> on FluentProvider<T> {
   /// await sessionRepository.clearExpiredItems(
   ///   policy: const ExecutionPolicy(
   ///     priority: TaskPriority.low, // Run as background task to ensure main interactions are prioritized
-  ///     useIsolate: false,          // Execute locally on main if internal payload size remains light
   ///   ),
   /// );
   /// ```

@@ -375,7 +375,7 @@ extension FluentExecuteDelete<T extends FluentStorable> on FluentProvider<T> {
     final Batch batch = activeExecutor.batch();
 
     // Delegate identity arrays into parameterized raw chunks to conform to SQLite variable limits
-    _executeDeleteChunks(batch, idList, policy.chunkSize!, pkName, isHardDelete: isHardDelete);
+    _executeDeleteChunks(batch, idList, policy.effectiveChunkSize, pkName, isHardDelete: isHardDelete);
 
     final List<dynamic> results = await batch.commit();
 
@@ -387,7 +387,7 @@ extension FluentExecuteDelete<T extends FluentStorable> on FluentProvider<T> {
     FluentLog.debug(
       'Physical batch identity deletion query successfully committed to the database storage engine',
       tag: '$tableName:batchDeleteExecutor',
-      context: {'tableName': tableName, 'primaryKeyColumn': pkName, 'totalPurgedIdsCount': idList.length, 'configuredChunkSize': policy.chunkSize},
+      context: {'tableName': tableName, 'primaryKeyColumn': pkName, 'totalPurgedIdsCount': idList.length, 'configuredChunkSize': policy.effectiveChunkSize},
     );
 
     if (totalDeleted > 0 && _hasRelations && _relationsMixin != null) {
@@ -471,8 +471,8 @@ extension FluentExecuteDelete<T extends FluentStorable> on FluentProvider<T> {
     }
   }
 
-  /// Executes a hard-purge operation on the main thread to permanently remove
-  /// soft-deleted records from the storage engine.
+  /// Executes a hard-purge operation to permanently remove soft-deleted records
+  /// from the storage engine.
   ///
   /// This method performs an irreversible data deletion for all records where the
   /// [FluentSoftDeletable.softDeleteColumn] is not null. Following the purge,
@@ -483,13 +483,12 @@ extension FluentExecuteDelete<T extends FluentStorable> on FluentProvider<T> {
   /// * **Relational Integrity:** If the model supports relations, it invokes
   ///   [cleanupOrphans] to ensure that purged records do not leave dangling
   ///   references in linked tables.
-  /// * **Main-Thread Execution:** As the name implies, this operation runs on the
-  ///   main execution thread, intended for low-latency maintenance tasks where
-  ///   offloading to a background isolate is either unnecessary or contraindicated.
+  /// * **Execution Context:** This method is optimized for direct, synchronous-style
+  ///   execution within the current pipeline, suitable for immediate maintenance
+  ///   tasks where the overhead of scheduling is unnecessary.
   ///
   /// Returns the number of records permanently removed from the database.
   /// Throws an exception if the underlying database deletion fails.
-
   Future<int> _executeForcePurgeSoftDeletedTaskOnMain(FluentTask task) async {
     if (modelSample is! FluentSoftDeletable) return 0;
 

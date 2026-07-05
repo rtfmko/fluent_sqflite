@@ -27,7 +27,7 @@ extension FluentDbLocator on FluentDb {
   ///
   /// **Strategic Workflow:**
   /// 1. **Coordination Lock:** Pauses the [FluentEngine] to ensure no
-  ///    asynchronous background isolates attempt write operations on the database
+  ///    asynchronous background worker attempt write operations on the database
   ///    during the transaction, preventing `database is locked` errors.
   /// 2. **Execution Injection:** Temporarily intercepts the `DatabaseExecutor` of
   ///    all involved [FluentProvider] instances, routing all operations through the
@@ -125,7 +125,7 @@ extension FluentDbLocator on FluentDb {
   /// 1. **Model-Based:** Allows resolving providers via the [FluentStorable] type (essential for relationship mapping).
   /// 2. **Provider-Based:** Provides direct access via the class type.
   /// 3. **Table-Based:** Creates an O(1) index using the table name for high-performance cross-reference
-  ///    and inter-isolate communication.
+  ///    and inter communication.
   void _register<T extends FluentStorable>(FluentProvider<T> provider, String dbName) {
     final Type modelType = T;
     final Type providerType = provider.runtimeType;

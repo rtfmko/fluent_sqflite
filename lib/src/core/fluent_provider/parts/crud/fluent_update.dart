@@ -122,8 +122,7 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
   /// await userRepository.updateByKey(
   ///   'usr_772x11',
   ///   'is_verified',
-  ///   true,
-  ///   policy: const ExecutionPolicy(useIsolate: false), // Run instantly on Main thread thread-pool
+  ///   true
   /// );
   /// ```
   @internal
@@ -180,7 +179,6 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
   ///     'last_authenticated_at': DateTime.now().millisecondsSinceEpoch,
   ///     'account_status': 'ACTIVE',
   ///   },
-  ///   policy: const ExecutionPolicy(useIsolate: true), // Offload tracking schema merge logic to thread worker
   /// );
   /// ```
   @internal

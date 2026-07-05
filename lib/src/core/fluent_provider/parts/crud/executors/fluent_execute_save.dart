@@ -63,7 +63,7 @@ extension FluentExecuteSave<T extends FluentStorable> on FluentProvider<T> {
     if (task.data is List<T>) {
       items = task.data as List<T>;
     } else if (task.data is List) {
-      items = (task.data as List).cast<T>();
+      items = (task.data as List).whereType<T>().toList();
     } else {
       items = <T>[task.data as T];
     }

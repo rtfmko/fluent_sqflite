@@ -10,10 +10,6 @@
 /// resource allocation, concurrency, and task-level behavior within the
 /// [FluentEngine] pipeline.
 class ExecutionPolicy {
-  /// If true, forces the task to run in a background isolate (the standard behavior).
-  /// If false, allows the operation to run on the main thread (for simple, latency-sensitive reads).
-  final bool? useIsolate;
-
   /// Determines task importance. Higher values move the task to the front
   /// of the [FluentEngine] queue.
   final int? priority;
@@ -42,7 +38,7 @@ class ExecutionPolicy {
   final Object? customTag;
 
   /// The [ExecutionPolicy] constructor initializes.
-  const ExecutionPolicy({this.useIsolate = false, this.priority, this.chunkSize, this.timeout, this.cancelIfDuplicate, this.customTag});
+  const ExecutionPolicy({this.priority, this.chunkSize, this.timeout, this.cancelIfDuplicate, this.customTag});
 
   /// Calculates the optimized batch size for database operations based on the
   /// configured [chunkSize].
@@ -65,19 +61,15 @@ class ExecutionPolicy {
     return chunkSize!.clamp(10, 950);
   }
 
+  /// Returns the priority value. Defaults to 0 if not specified.
+  /// Higher values indicate higher importance.
+  int get effectivePriority => priority ?? 0;
+
   /// Serializes the [ExecutionPolicy] instance into a JSON-compatible map.
-  Map<String, dynamic> toMap() => {
-    'useIsolate': useIsolate,
-    'priority': priority,
-    'chunkSize': chunkSize,
-    'timeoutMs': timeout?.inMilliseconds,
-    'cancelIfDuplicate': cancelIfDuplicate,
-    'customTag': customTag,
-  };
+  Map<String, dynamic> toMap() => {'priority': priority, 'chunkSize': chunkSize, 'timeoutMs': timeout?.inMilliseconds, 'cancelIfDuplicate': cancelIfDuplicate, 'customTag': customTag};
 
   /// Deserializes a [Map] back into a [ExecutionPolicy] instance.
   factory ExecutionPolicy.fromMap(Map<String, dynamic> map) => ExecutionPolicy(
-    useIsolate: map['useIsolate'] is bool ? map['useIsolate'] as bool : null,
     priority: map['priority'] is int ? map['priority'] as int : null,
     chunkSize: map['chunkSize'] is int ? map['chunkSize'] as int : null,
     timeout: map['timeoutMs'] is int ? Duration(milliseconds: map['timeoutMs'] as int) : null,
@@ -92,24 +84,29 @@ class ExecutionPolicy {
   /// tune [chunkSize], [timeout], or [priority] for standard operations.
 
   /// Standard policy for most CRUD operations.
-  /// Uses isolate offloading, a 30s timeout, and prevents duplicate task queuing.
-  factory ExecutionPolicy.rootDefault() => const ExecutionPolicy(useIsolate: false, priority: 0, chunkSize: 200, timeout: Duration(seconds: 30), cancelIfDuplicate: true);
+  /// Uses a 30s timeout, and prevents duplicate task queuing.
+  factory ExecutionPolicy.rootDefault() => const ExecutionPolicy(priority: 0, chunkSize: 200, timeout: Duration(seconds: 30), cancelIfDuplicate: true);
 
   /// Optimized for rapid, lightweight read/writes.
-  /// Bypasses the isolate to eliminate message-passing overhead for low-latency needs.
-  static const fast = ExecutionPolicy(priority: 10, useIsolate: false);
+  /// Eliminate message-passing overhead for low-latency needs.
+  static const fast = ExecutionPolicy(priority: 10);
 
   /// Designed for non-critical, long-running tasks.
   /// Lowered priority and small chunk sizes minimize impact on the main UI thread.
-  static const background = ExecutionPolicy(priority: -10, useIsolate: false, chunkSize: 50);
+  static const background = ExecutionPolicy(priority: -10, chunkSize: 50);
 
   /// Optimized for massive data synchronization.
   /// Maximizes [chunkSize] for throughput and grants a generous 5-minute timeout.
-  static const bulkUpload = ExecutionPolicy(priority: 5, useIsolate: false, chunkSize: 950, timeout: Duration(minutes: 5));
+  static const bulkUpload = ExecutionPolicy(priority: -5, chunkSize: 950, timeout: Duration(minutes: 5));
+
+  /// Optimized for reactive UI streams and real-time data observation.
+  /// High priority ensures data updates reach the UI as fast as possible,
+  /// while [cancelIfDuplicate] prevents redundant subscription tasks.
+  static const streamOnly = ExecutionPolicy(priority: 5, cancelIfDuplicate: true);
 
   /// Targeted at complex relational lookups.
   /// Includes deduplication to prevent slamming the database with repeated heavy queries.
-  static const heavyQuery = ExecutionPolicy(priority: 2, useIsolate: false, cancelIfDuplicate: true, timeout: Duration(seconds: 15));
+  static const heavyQuery = ExecutionPolicy(priority: 2, cancelIfDuplicate: true, timeout: Duration(seconds: 15));
 
   /// Policy for data that must be processed every time (e.g., force-refresh events).
   /// Disables [cancelIfDuplicate] to guarantee execution.
@@ -124,7 +121,6 @@ class ExecutionPolicy {
   ExecutionPolicy flatten() {
     final ExecutionPolicy def = ExecutionPolicy.rootDefault();
     return ExecutionPolicy(
-      useIsolate: useIsolate ?? def.useIsolate,
       priority: priority ?? def.priority,
       chunkSize: effectiveChunkSize,
       timeout: timeout ?? def.timeout,
@@ -145,7 +141,6 @@ class ExecutionPolicy {
   ExecutionPolicy merge(ExecutionPolicy? parent) {
     if (parent == null) return this;
     return ExecutionPolicy(
-      useIsolate: useIsolate ?? parent.useIsolate,
       priority: priority ?? parent.priority,
       chunkSize: chunkSize ?? parent.chunkSize,
       timeout: timeout ?? parent.timeout,
@@ -155,18 +150,16 @@ class ExecutionPolicy {
   }
 
   /// Creates a copy of this [ExecutionPolicy] with the specified fields replaced.
-  ExecutionPolicy copyWith({bool? useIsolate, int? priority, int? chunkSize, Duration? timeout, bool? spawnDedicatedIsolate, bool? cancelIfDuplicate, int? memoryLimitMb, Object? customTag}) =>
-      ExecutionPolicy(
-        useIsolate: useIsolate ?? this.useIsolate,
-        priority: priority ?? this.priority,
-        chunkSize: chunkSize ?? this.chunkSize,
-        timeout: timeout ?? this.timeout,
-        cancelIfDuplicate: cancelIfDuplicate ?? this.cancelIfDuplicate,
-        customTag: customTag ?? this.customTag,
-      );
+  ExecutionPolicy copyWith({int? priority, int? chunkSize, Duration? timeout, bool? cancelIfDuplicate, Object? customTag}) => ExecutionPolicy(
+    priority: priority ?? this.priority,
+    chunkSize: chunkSize ?? this.chunkSize,
+    timeout: timeout ?? this.timeout,
+    cancelIfDuplicate: cancelIfDuplicate ?? this.cancelIfDuplicate,
+    customTag: customTag ?? this.customTag,
+  );
 
   @override
   String toString() {
-    return 'ExecutionPolicy{useIsolate: $useIsolate, priority: $priority, chunkSize: $chunkSize, timeout: $timeout, cancelIfDuplicate: $cancelIfDuplicate}';
+    return 'ExecutionPolicy{priority: $priority, chunkSize: $chunkSize, timeout: $timeout, cancelIfDuplicate: $cancelIfDuplicate}';
   }
 }

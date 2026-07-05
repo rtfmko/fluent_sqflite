@@ -26,9 +26,10 @@ part of '../../fluent_provider.dart';
 ///   sweeps, forwarding requests to relationship mixins to invalidate foreign keys and purge
 ///   orphaned records.
 /// * **Atomic Consistency:** All operations are routed through the [FluentProvider] connection
-///   pool, ensuring transactional integrity.
+///   pipeline, ensuring transactional integrity.
 /// * **Execution Policy Enforcement:** Hard-delete operations respect [ExecutionPolicy]
-///   configurations, enabling efficient offloading to background isolates for massive purges.
+///   configurations, enabling efficient offloading of large-scale purges to background
+///   task processing without blocking the event loop.
 ///
 /// See also:
 /// * [FluentSoftDeletable], which these operations bypass.
@@ -184,7 +185,6 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   ///   obsoleteSessionIds,
   ///   policy: const ExecutionPolicy(
   ///     chunkSize: 500, // Segment parameters to avoid exceeding SQLite max variable limits
-  ///     useIsolate: true, // Offload array parsing and parameter formatting down to an isolate worker
   ///   ),
   /// );
   /// ```
@@ -402,7 +402,6 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// final List<CacheEntry> staleEntries = await cacheRepository.findItemsBy({'status': 'expired'});
   /// final int count = await cacheRepository.deleteAll(
   ///   staleEntries,
-  ///   policy: const ExecutionPolicy(useIsolate: true),
   /// );
   ///
   /// print('Successfully deleted $count entries.');
@@ -466,7 +465,7 @@ extension FluentDelete<T extends FluentStorable> on FluentProvider<T> {
   /// final List<SensitiveLog> logs = await logRepository.findItemsBy({'user_id': userId});
   /// final int purgedCount = await logRepository.hardDeleteAll(
   ///   logs,
-  ///   policy: const ExecutionPolicy(useIsolate: true),
+  ///   policy: const ExecutionPolicy.background,
   /// );
   ///
   /// print('Permanently erased $purgedCount sensitive records.');

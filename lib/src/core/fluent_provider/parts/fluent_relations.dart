@@ -250,7 +250,11 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
               if (sqlJsonCache[i].isNotEmpty) {
                 sqlJsonCache[i][pkName] = res;
               }
-            } else {}
+            } else {
+              if (modelItems != null && i < modelItems.length) {
+                modelItems[i].injectRelationId(pkName, res);
+              }
+            }
           }
         }
       }

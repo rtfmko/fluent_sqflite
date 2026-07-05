@@ -2,7 +2,7 @@
 // Use of this source code is governed by an Apache-2.0 license that can be
 // found in the LICENSE file.
 
-import 'models.dart';
+import '../models.dart';
 
 /// Defines a schema evolution step for a [FluentStorable] model.
 ///

@@ -1,27 +1,93 @@
 part of '../fluent_sqlite_internal.dart';
 
+/// The [ _FluentSystemDb ] acts as a dedicated repository for FluentSQFLite's internal state.
+///
+/// It encapsulates the lifecycle and persistence of the telemetry database, ensuring
+/// that performance metrics, row counts, and table metadata are physically isolated
+/// from the user's operational data.
 class _FluentSystemDb {
-  /// Low-level raw SQL queries provider for managing table metadata and counts.
+  /// Provides the SQL abstraction layer for telemetry-specific operations.
+  ///
+  /// This separates the concerns of data manipulation (DML) from the
+  /// orchestrator's state management logic.
   final SystemStatsProvider _systemStatsProvider = SystemStatsProvider();
 
-  /// Dedicated database handle used exclusively for storing and reading internal metrics and table telemetry.
+  /// A private, dedicated database instance for storing performance snapshots.
+  ///
+  /// This handle is managed exclusively by the [FluentEngine] to ensure
+  /// consistent APM (Application Performance Monitoring) metrics across sessions.
+  ///
+  /// **Lifecycle:**
+  /// * Initialized: On [FluentEngine] startup.
+  /// * Destroyed: Upon [FluentDb] shutdown or registry reset.
   Database? _systemDb;
 
-  /// Dynamic hardware/software configuration overrides for each registered database.
-  Map<String, Map<String, dynamic>> _dbConfigs = {};
-
-  /// Cache of active SQLite database instances, mapped by their unique database name.
-  Map<String, Database> _databases = {};
-
-  Future<List<Map<String, dynamic>>?> analyzeStats() async => await _handleAnalyzeStatsCommand();
-
-  Future<void> saveStats(List<dynamic>? stats) async => await _handleSaveStatsCommand(stats);
-
-  Future<void> init({required Map<String, Map<String, dynamic>> dbConfigs, required Map<String, Database> databases}) async {
-    _dbConfigs = dbConfigs;
-    _databases = databases;
+  /// Retrieves all historical performance statistics from the persistent system storage.
+  ///
+  /// This method performs a safe hydration of the in-memory tracker by reading
+  /// existing metrics from the telemetry database.
+  ///
+  /// **Failure Handling:**
+  /// * If the database is closed or uninitialized, returns an empty list and logs a warning.
+  /// * If a query error occurs, logs the error with diagnostic hints and returns an empty list.
+  Future<List<TableStats>> loadAllHistoricalStats() async {
     await _ensureSystemDbOpen();
+    if (_systemDb == null || !_systemDb!.isOpen) {
+      FluentLog.warning('System database is not available for reading stats.', tag: 'FluentSystemDb:load', hint: 'Ensure that FluentEngine has been properly initialized before accessing stats.');
+      return [];
+    }
+    try {
+      final List<TableStats> stats = await _systemStatsProvider.readAllStats(_systemDb!);
+      FluentLog.debug('Loaded ${stats.length} stats records.', tag: 'FluentSystemDb:load');
+      return stats;
+    } catch (e, st) {
+      FluentLog.error('Failed to load historical statistics.', e, st, tag: 'FluentSystemDb:load', hint: 'Check if the telemetry database file is locked or corrupted.');
+      return [];
+    }
   }
+
+  /// Persists a batch of table statistics to the system telemetry database.
+  ///
+  /// This method is typically invoked by the [FluentEngine] during the
+  /// periodic auto-save cycle or upon system shutdown.
+  ///
+  /// **Exceptions:**
+  /// * Throws [FluentBaseException] if the disk write fails, allowing the caller
+  ///   to decide whether to retry the batch or clear the operation.
+  Future<void> saveStats(List<TableStats> statsList) async {
+    if (statsList.isEmpty) return;
+
+    await _ensureSystemDbOpen();
+    if (_systemDb == null || !_systemDb!.isOpen) {
+      FluentLog.error(
+        'System database unavailable for saving stats.',
+        FluentBaseException('System database unavailable for saving stats.'),
+        StackTrace.current,
+        tag: 'FluentSystemDb:save',
+        hint: 'Telemetry data loss imminent. Check if FluentEngine was destroyed before saving operations.',
+      );
+      return;
+    }
+
+    try {
+      await _systemStatsProvider.saveStatsBatch(_systemDb!, statsList);
+    } catch (e, st) {
+      final FluentBaseException exception = FluentBaseException('Critical failure while persisting telemetry batch.', st, e);
+      FluentLog.error(exception.message, exception, exception.stackTrace, tag: 'FluentSystemDb:save', hint: 'Ensure disk space is available and database permissions are granted.');
+      rethrow;
+    }
+  }
+
+  /// Initializes the system telemetry database connection.
+  ///
+  /// This method ensures that the dedicated system database is mounted and ready for
+  /// recording internal performance metrics. It is a safe, idempotent operation
+  /// that can be called multiple times without side effects.
+  ///
+  /// **Internal Logic:**
+  /// * Triggers [_ensureSystemDbOpen] to lazily mount the storage file.
+  /// * Validates connection integrity before allowing further telemetry operations.
+  Future<void> init() async => await _ensureSystemDbOpen();
 
   /// Gracefully closes the system telemetry connection and permanently deletes
   /// its physical file from the disk.
@@ -40,8 +106,6 @@ class _FluentSystemDb {
       await databaseFactory.deleteDatabase(path);
 
       _systemDb = null;
-      _dbConfigs.clear();
-      _databases.clear();
 
       FluentLog.info('System telemetry database successfully deleted.', tag: 'FluentSystemDb:destroy');
     } catch (e, st) {
@@ -62,114 +126,37 @@ class _FluentSystemDb {
 
     FluentLog.info('Mounting permanent telemetry storage database connection...', tag: 'FluentSystemDb:open');
 
-    _systemDb = await openDatabase(
-      systemDbPath,
-      version: 1,
-      onCreate: (db, _) async {
-        FluentLog.warning('Telemetry system tables missing. Triggering schema initialization...', tag: 'FluentSystemDb:open');
-        await _systemStatsProvider.createTable(db);
-      },
-      onConfigure: (db) async {
-        // Apply high-performance WAL and light caching rules for background indexing
-        await db.execute('PRAGMA synchronous = FULL;');
-        await db.execute('PRAGMA cache_size = -2000;');
-        await db.execute('PRAGMA temp_store = MEMORY;');
-        // await db.rawQuery('PRAGMA journal_mode = WAL;');
-      },
-    );
+    try {
+      _systemDb = await openDatabase(
+        systemDbPath,
+        version: 1,
+        onCreate: (db, _) async {
+          FluentLog.warning('Telemetry system tables missing. Triggering schema initialization...', tag: 'FluentSystemDb:open');
+          await _systemStatsProvider.createTable(db);
+        },
+        onConfigure: (db) async {
+          // Apply high-performance WAL and light caching rules for background indexing
+          await db.execute('PRAGMA synchronous = FULL;');
+          await db.execute('PRAGMA cache_size = -2000;');
+          await db.execute('PRAGMA temp_store = MEMORY;');
+          await db.rawQuery('PRAGMA journal_mode = WAL;');
+        },
+      );
+    } catch (e, st) {
+      _systemDb = null;
+
+      FluentLog.error(
+        'Critical failure while mounting telemetry database.',
+        e,
+        st,
+        tag: 'FluentSystemDb:open',
+        hint:
+            'Verify disk space and application permissions for the database path: $systemDbPath. '
+            'If the file is corrupted, it may require manual deletion.',
+        context: {'path': systemDbPath},
+      );
+    }
 
     FluentLog.info('Permanent telemetry session connection to "$_systemDbName" successfully established.', tag: 'FluentSystemDb:open');
-  }
-
-  /// Flushes live runtime weight telemetry from Main isolate to the system database.
-  Future<void> _handleSaveStatsCommand(List<dynamic>? data) async {
-    try {
-      await _ensureSystemDbOpen();
-      final List<dynamic> rawStats = data ?? const [];
-
-      if (rawStats.isNotEmpty) {
-        final List<TableStats> statsToSave = rawStats.map((rawRow) {
-          final Map<String, dynamic> rowMap = rawRow is Map ? rawRow.cast<String, dynamic>() : const <String, dynamic>{};
-          return TableStats.fromMap(rowMap);
-        }).toList();
-
-        await _systemStatsProvider.saveStatsBatch(_systemDb!, statsToSave);
-        FluentLog.debug('Synchronized ${statsToSave.length} table telemetry matrix profiles to system disk.', tag: 'FluentSystemDb:saveStats');
-      }
-    } catch (e, st) {
-      FluentLog.error('ERROR: Synchronization of statistics to disk failed.', e, st);
-    }
-  }
-
-  /// Triggers internal structural diagnostics across all database registers.
-  ///
-  /// Computes rows metrics via physical SELECT COUNT calls if metadata cache is missed.
-  Future<List<Map<String, dynamic>>?> _handleAnalyzeStatsCommand() async {
-    FluentLog.debug('Running lazy database metrics analysis cascade...', tag: 'FluentSystemDb:analyzeStats');
-    try {
-      await _ensureSystemDbOpen();
-
-      final List<TableStats> cachedRows = await _systemStatsProvider.readAllStats(_systemDb!);
-      final List<Map<String, dynamic>> finalStatsPayload = [];
-
-      final Map<String, TableStats> statsCacheMap = {for (var s in cachedRows) '${s.dbName}:${s.tableName}': s};
-
-      FluentLog.debug('Executing live physical row scanning across active database configurations...', tag: 'FluentSystemDb:analyzeStats');
-      final List<TableStats> updatedStatsToCache = [];
-
-      for (final MapEntry<String, Database> dbEntry in _databases.entries) {
-        final String dbName = dbEntry.key;
-        final Database db = dbEntry.value;
-
-        if (dbName == _systemDbName) continue;
-
-        final Map<String, dynamic> currentCfg = _dbConfigs[dbName] ?? const {};
-        final List<dynamic> tableNames = currentCfg['tables'] as List<dynamic>? ?? [];
-        final Map<String, dynamic> relationsManifest = currentCfg['relationsManifest'] is Map ? (currentCfg['relationsManifest'] as Map).cast<String, dynamic>() : const {};
-
-        for (final dynamic tableName in tableNames) {
-          if (tableName is! String) continue;
-
-          try {
-            final int? count = Sqflite.firstIntValue(await db.rawQuery('SELECT COUNT(*) FROM $tableName').timeout(const Duration(milliseconds: 300)));
-            FluentLog.debug('Counted structural row limit for table "$tableName" -> $count', tag: 'FluentSystemDb:analyzeStats');
-
-            final String key = '$dbName:$tableName';
-            final int relationsCount = relationsManifest[tableName] as int? ?? 0;
-
-            final TableStats existingStats = statsCacheMap[key] ?? TableStats(dbName: dbName, tableName: tableName, relationsCount: relationsCount);
-
-            final int newCount = count ?? 0;
-
-            if (existingStats.rowCount != newCount) {
-              existingStats.rowCount = newCount;
-              updatedStatsToCache.add(existingStats);
-            }
-
-            if (!statsCacheMap.containsKey(key)) {
-              statsCacheMap[key] = existingStats;
-            }
-
-            updatedStatsToCache.add(existingStats);
-          } catch (e, st) {
-            FluentLog.error('WARNING: Diagnostics failure on table "$tableName" inside database "$dbName"', e, st, tag: 'FluentSystemDb:analyzeStats');
-          }
-        }
-      }
-
-      if (updatedStatsToCache.isNotEmpty) {
-        await _systemStatsProvider.saveStatsBatch(_systemDb!, updatedStatsToCache);
-        FluentLog.info('Telemetry profiles successfully refreshed and synchronized to system storage.', tag: 'FluentSystemDb:analyzeStats');
-      }
-
-      for (final TableStats stats in statsCacheMap.values) {
-        finalStatsPayload.add(stats.buildJson());
-      }
-
-      return finalStatsPayload;
-    } catch (e, st) {
-      FluentLog.error('Database Analysis failed', e, st, tag: 'FluentSystemDb:analyzeStats');
-      return null;
-    }
   }
 }

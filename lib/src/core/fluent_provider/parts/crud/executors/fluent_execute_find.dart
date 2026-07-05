@@ -92,14 +92,14 @@ extension FluentExecuteFind<T extends FluentStorable> on FluentProvider<T> {
 
       // SCENARIO B: RELATIONAL CASCADE — Table has complex child structures requiring hydration loops
       // Execute batched concurrent/chunked computation layers to safely process model graphs
-      final List<T> items = await _computeBatched<Map<String, dynamic>, T>(result, (row) => _rowEnrichmentAndAssembleWorker(row, task), batchSize: task.policy.chunkSize!);
+      final List<T> items = await _computeBatched<Map<String, dynamic>, T>(result, (row) => _rowEnrichmentAndAssembleWorker(row, task), batchSize: task.policy.effectiveChunkSize);
 
       final List<T> typedItems = _createTypedList(items);
 
       FluentLog.debug(
         'Relational hydration mapping sequence finalized safely',
         tag: '$tableName:findAllExecutor',
-        context: {'tableName': tableName, 'taskId': task.id, 'materializedInstances': typedItems.length, 'chunkSize': task.policy.chunkSize, 'optimizationApplied': 'batched_cascade_enrichment'},
+        context: {'tableName': tableName, 'taskId': task.id, 'materializedInstances': typedItems.length, 'chunkSize': task.policy.effectiveChunkSize, 'optimizationApplied': 'batched_cascade_enrichment'},
       );
       return typedItems;
     } catch (e, s) {
@@ -197,14 +197,14 @@ extension FluentExecuteFind<T extends FluentStorable> on FluentProvider<T> {
 
       // SCENARIO B: RELATIONAL CASCADE — Table has complex child structures requiring hydration loops
       // Execute batched concurrent/chunked computation layers to safely process model graphs
-      final List<T> items = await _computeBatched<Map<String, dynamic>, T>(result, (row) => _rowEnrichmentAndAssembleWorker(row, task), batchSize: task.policy.chunkSize!);
+      final List<T> items = await _computeBatched<Map<String, dynamic>, T>(result, (row) => _rowEnrichmentAndAssembleWorker(row, task), batchSize: task.policy.effectiveChunkSize);
 
       final List<T> typedItems = _createTypedList(items);
 
       FluentLog.debug(
         'Relational hydration mapping sequence for valid records finalized safely',
         tag: '$tableName:findValidItemsExecutor',
-        context: {'tableName': tableName, 'taskId': task.id, 'materializedInstances': typedItems.length, 'chunkSize': task.policy.chunkSize, 'optimizationApplied': 'batched_cascade_enrichment'},
+        context: {'tableName': tableName, 'taskId': task.id, 'materializedInstances': typedItems.length, 'chunkSize': task.policy.effectiveChunkSize, 'optimizationApplied': 'batched_cascade_enrichment'},
       );
       return typedItems;
     } catch (e, s) {
@@ -289,14 +289,14 @@ extension FluentExecuteFind<T extends FluentStorable> on FluentProvider<T> {
 
       // SCENARIO B: RELATIONAL CASCADE — Table has complex child structures requiring hydration loops
       // Execute batched concurrent/chunked computation layers to safely process model graphs via the unified row worker
-      final List<T> items = await _computeBatched<Map<String, dynamic>, T>(result, (row) => _rowEnrichmentAndAssembleWorker(row, task), batchSize: task.policy.chunkSize!);
+      final List<T> items = await _computeBatched<Map<String, dynamic>, T>(result, (row) => _rowEnrichmentAndAssembleWorker(row, task), batchSize: task.policy.effectiveChunkSize);
 
       final List<T> typedItems = _createTypedList(items);
 
       FluentLog.debug(
         'Relational hydration mapping sequence for conditional query finalized safely',
         tag: '$tableName:findItemsByExecutor',
-        context: {'tableName': tableName, 'taskId': task.id, 'materializedInstances': typedItems.length, 'chunkSize': task.policy.chunkSize, 'optimizationApplied': 'batched_cascade_enrichment'},
+        context: {'tableName': tableName, 'taskId': task.id, 'materializedInstances': typedItems.length, 'chunkSize': task.policy.effectiveChunkSize, 'optimizationApplied': 'batched_cascade_enrichment'},
       );
       return typedItems;
     } catch (e, s) {
@@ -443,14 +443,14 @@ extension FluentExecuteFind<T extends FluentStorable> on FluentProvider<T> {
 
       // SCENARIO B: RELATIONAL CASCADE — Table has complex child structures requiring hydration loops
       // Execute batched concurrent/chunked computation layers to safely process model graphs via the unified row worker
-      final List<T> items = await _computeBatched<Map<String, dynamic>, T>(maps, (row) => _rowEnrichmentAndAssembleWorker(row, task), batchSize: task.policy.chunkSize!);
+      final List<T> items = await _computeBatched<Map<String, dynamic>, T>(maps, (row) => _rowEnrichmentAndAssembleWorker(row, task), batchSize: task.policy.effectiveChunkSize);
 
       final List<T> typedItems = _createTypedList(items);
 
       FluentLog.debug(
         'Relational hydration mapping sequence for customized query finalized safely',
         tag: '$tableName:findExecutor',
-        context: {'tableName': tableName, 'taskId': task.id, 'materializedInstances': typedItems.length, 'chunkSize': task.policy.chunkSize, 'optimizationApplied': 'batched_cascade_enrichment'},
+        context: {'tableName': tableName, 'taskId': task.id, 'materializedInstances': typedItems.length, 'chunkSize': task.policy.effectiveChunkSize, 'optimizationApplied': 'batched_cascade_enrichment'},
       );
       return typedItems;
     } catch (e, s) {

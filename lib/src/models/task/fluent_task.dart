@@ -2,13 +2,14 @@
 // Use of this source code is governed by an Apache-2.0 license that can be
 // found in the LICENSE file.
 
-part of '../core/fluent_sqlite_internal.dart';
+part of '../../core/fluent_sqlite_internal.dart';
 
 /// Represents a discrete, self-contained unit of work for the database engine.
 ///
-/// This class serves as the primary command object within the [FluentEngine],[FluentProvider],
-/// encapsulating both the data to be processed and the metadata (policy, constraints,
-/// and identity) required to execute the operation safely across isolate boundaries.
+/// This class serves as the primary command object within the [FluentEngine] and
+/// [FluentProvider], encapsulating both the data to be processed and the metadata
+/// (policy, constraints, and identity) required to execute the operation
+/// asynchronously and safely within the engine's processing pipeline.
 class FluentTask {
   /// Unique identifier for the task; used for tracking, status updates, and cancellation.
   final int id;
@@ -40,7 +41,7 @@ class FluentTask {
   /// The [TableHelper] configuration specifying query constraints (where, limit, etc.).
   final TableHelper? helper;
 
-  /// The [ExecutionPolicy] defining isolate usage, priority, and timeouts.
+  /// The [ExecutionPolicy] defining priority, and timeouts.
   final ExecutionPolicy policy;
 
   /// Flags whether this task is a internal maintenance/system task (e.g., cleanup).
@@ -54,6 +55,13 @@ class FluentTask {
 
   /// A unique hash representing the task's parameters, used for task deduplication.
   late final String fingerprint;
+
+  /// Holds a collection of identical tasks that have been merged into this single task
+  /// by the Auto-Batching engine. If null, this is a standard single operation.
+  final List<FluentTask>? mergedTasks;
+
+  /// Returns true if this task contains multiple merged operations.
+  bool get isBatched => mergedTasks != null && mergedTasks!.isNotEmpty;
 
   /// Generate a key directly from a [FluentTask] for streamlined lookups.
   String get statsKey => '$dbName:$table';
@@ -79,6 +87,7 @@ class FluentTask {
     this.policy = const ExecutionPolicy(),
     this.isSystem = false,
     this.executionWeight = 0,
+    this.mergedTasks,
   }) {
     // Determine the baseline computational cost of this task.
     staticWeight = _calculateStaticWeight();
@@ -102,6 +111,7 @@ class FluentTask {
     int? executionWeight,
     bool? isSystem,
     ExecutionPolicy? policy,
+    List<FluentTask>? mergedTasks,
   }) => FluentTask(
     id: id ?? this.id,
     table: table ?? this.table,
@@ -116,6 +126,7 @@ class FluentTask {
     executionWeight: executionWeight ?? this.executionWeight,
     isSystem: isSystem ?? this.isSystem,
     policy: policy ?? this.policy,
+    mergedTasks: mergedTasks ?? this.mergedTasks,
   );
 
   /// Indicates whether this operation performs a write action on the database.
@@ -137,6 +148,8 @@ class FluentTask {
     'helper': helper?.toMap(),
     'isSystem': isSystem,
     'policy': policy.toMap(),
+    'force': force,
+    'mergedTasks': mergedTasks,
   };
 
   /// Deserializes a [Map] back into a [FluentTask] instance.
@@ -152,6 +165,8 @@ class FluentTask {
     helper: map['helper'] is Map<String, dynamic> ? TableHelper.fromMap(map['helper'] as Map<String, dynamic>) : null,
     isSystem: map['isSystem'] is bool ? map['isSystem'] as bool : false,
     policy: map['policy'] is Map<String, dynamic> ? ExecutionPolicy.fromMap(map['policy'] as Map<String, dynamic>) : const ExecutionPolicy(),
+    force: map['force'] is bool ? map['force'] as bool : false,
+    mergedTasks: map['mergedTasks'] is List<FluentTask> ? (map['mergedTasks'] as List).whereType<FluentTask>().toList() : null,
   );
 
   /// Generates a unique "fingerprint" for this task based on its critical parameters.

@@ -6,7 +6,7 @@ import '../core/core.dart';
 import '../core/fluent_sqlite_internal.dart';
 import '../exceptions/exceptions.dart';
 import '../interfaces/interfaces.dart';
-import 'sqlite_config/sqlite_performance_config.dart';
+import 'models.dart';
 
 /// Represents a logical grouping of database providers (DAOs) associated
 /// with a specific database instance.

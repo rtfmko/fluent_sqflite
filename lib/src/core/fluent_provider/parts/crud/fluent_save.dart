@@ -50,8 +50,7 @@ extension FluentSave<T extends FluentStorable> on FluentProvider<T> {
   /// * [FluentSaveStrategy.patch] — Updates only the provided fields (requires record to exist).
   /// * [FluentSaveStrategy.updateOnly] — Updates only existing records; skips new ones.
   ///
-  /// The [policy] parameter allows overriding default execution settings, such as
-  /// forcing background isolate execution or bypassing request collapsing.
+  /// The [policy] parameter allows overriding default execution settings.
   ///
   /// ### Usage Example:
   /// ```dart
@@ -60,7 +59,6 @@ extension FluentSave<T extends FluentStorable> on FluentProvider<T> {
   /// await userRepository.saveItem(
   ///   user,
   ///   saveStrategy: FluentSaveStrategy.upsert,
-  ///   policy: const ExecutionPolicy(useIsolate: false), // Force Main-thread execution
   /// );
   /// ```
   @internal
@@ -98,7 +96,6 @@ extension FluentSave<T extends FluentStorable> on FluentProvider<T> {
   ///   saveStrategy: FluentSaveStrategy.upsert,
   ///   policy: const ExecutionPolicy(
   ///     cancelIfDuplicate: true,
-  ///     useIsolate: true, // Offload heavy batch parsing to background worker
   ///   ),
   /// );
   /// ```

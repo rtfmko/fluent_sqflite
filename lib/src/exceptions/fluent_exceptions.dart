@@ -262,14 +262,11 @@ class FluentArgumentException extends FluentException {
 /// Exception thrown when the [FluentEngine] encounters a systemic failure.
 ///
 /// These errors typically indicate a breakdown in the orchestration layer,
-/// such as isolate communication issues, thread blocking, or internal
+/// such as thread blocking, or internal
 /// state corruption.
 class FluentEngineException extends FluentException {
-  /// The specific component within the engine that failed (e.g., 'IsolatePool', 'TaskScheduler').
+  /// The specific component within the engine that failed.
   final String component;
-
-  /// The state of the engine at the time of the failure (if available).
-  final String? engineState;
 
   /// The engine working task
   final FluentTask? task;
@@ -280,12 +277,11 @@ class FluentEngineException extends FluentException {
   /// * [component]: The internal module where the failure originated.
   /// * [engineState]: Optional snapshot of the engine state for debugging.
   /// * [stackTrace]: The execution path leading to the systemic failure.
-  FluentEngineException(String message, {required this.component, this.engineState, this.task, StackTrace? stackTrace}) : super(message, stackTrace);
+  FluentEngineException(String message, {required this.component, this.task, dynamic originalError, StackTrace? stackTrace}) : super(message, stackTrace, originalError);
 
   @override
   String toString() =>
       'FluentEngineException: [$component] $message'
-      '${engineState != null ? '\nEngine State: $engineState' : ''}'
       '${task != null ? '\nTask: $task' : ''}';
 }
 
@@ -362,8 +358,5 @@ class FluentDatabaseNotFoundException extends FluentException {
   /// * [dbName]: The name of the database that was not found.
   /// * [stackTrace]: Execution path leading to this error.
   FluentDatabaseNotFoundException(this.dbName, [StackTrace? stackTrace])
-      : super(
-    'Database "$dbName" is not registered. Ensure that it was initialized in FluentDb.init() or FluentEngine.',
-    stackTrace,
-  );
+    : super('Database "$dbName" is not registered. Ensure that it was initialized in FluentDb.init() or FluentEngine.', stackTrace);
 }

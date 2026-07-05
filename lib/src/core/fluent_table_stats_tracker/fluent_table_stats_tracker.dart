@@ -8,7 +8,7 @@ part of '../fluent_sqlite_internal.dart';
 /// performance metrics and schema metadata in-memory.
 ///
 /// This tracker serves as the central hub for the `SystemStatsProvider`,
-/// collecting telemetry from the worker isolate and maintaining a
+/// collecting telemetry from the worker and maintaining a
 /// synchronized view of table performance across the entire database group.
 class FluentTableStatsTracker {
   /// Internal singleton instance.

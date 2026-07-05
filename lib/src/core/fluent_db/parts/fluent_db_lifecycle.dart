@@ -55,33 +55,65 @@ extension FluentDbLifecycle on FluentDb {
   ///   ),
   /// ]);
   /// ```
-  Future<void> init(Iterable<FluentGroup> groups, {Duration? purgeDuration, bool isDev = false, bool isRetry = false}) async {
+  Future<void> init(Iterable<FluentGroup> groups, {Duration? purgeDuration, bool isDev = false, bool isRetry = false, FluentEngineConfig engineConfig = const FluentEngineConfig()}) async {
     if (_isInitialized) return;
 
     final Stopwatch stopwatch = Stopwatch()..start();
     final Map<String, FluentGroup> uniqueGroupsMap = {};
+
     for (final FluentGroup g in groups) {
       if (g.providerList.isEmpty) continue;
-      if (uniqueGroupsMap.containsKey(g.dbKey.dbName)) {
-        FluentLog.warning(
-          'Found duplicate FluentGroup for database "${g.dbKey.dbName}".',
+
+      final String dbName = g.dbKey.dbName;
+
+      if (!_isSafeDbName(g.dbKey)) {
+        final FluentDatabaseNameException exception = FluentDatabaseNameException(
+          'Invalid database name: "$dbName". '
+          'Database names must contain only alphanumeric characters and underscores (a-z, A-Z, 0-9, _).',
+          stackTrace: StackTrace.current,
+        );
+        FluentLog.error(
+          'Configuration error: Illegal database name detected.',
+          exception,
+          exception.stackTrace,
           tag: 'FluentDb:init',
           hint:
-              'You are trying to register two different FluentGroup objects with the same dbName. '
-              'Only the first one will be used. Consider merging all DAOs into a single FluentGroup for this database.',
+              'Database names are used as file names for SQLite. '
+              'To ensure cross-platform compatibility and prevent path traversal, '
+              'only use letters (a-z), digits (0-9), and underscores (_). '
+              'Avoid spaces, hyphens, dots, or special characters.',
+          context: {'dbName': dbName},
+        );
+        throw exception;
+      }
+
+      if (uniqueGroupsMap.containsKey(dbName)) {
+        FluentLog.warning(
+          'Found duplicate FluentGroup for database "$dbName". Only the first will be used.',
+          tag: 'FluentDb:init',
+          hint:
+              'Each database name must be unique within the initialization registry. '
+              'Multiple FluentGroup instances targeting the same database name are ignored. '
+              'Verify your "init" call parameters to ensure each database is defined exactly once.',
+          context: {'dbName': dbName},
         );
       } else {
-        uniqueGroupsMap[g.dbKey.dbName] = g;
+        uniqueGroupsMap[dbName] = g;
       }
     }
 
-    final List<FluentGroup> activeGroups = uniqueGroupsMap.values.toList();
-    if (activeGroups.isEmpty) {
-      FluentLog.warning('No active groups with DAOs provided.', tag: 'FluentDb:init');
+    if (uniqueGroupsMap.isEmpty) {
+      FluentLog.warning(
+        'No active groups with DAOs provided.',
+        tag: 'FluentDb:init',
+        hint:
+            'The initialization registry is empty. Ensure that you are passing a non-empty iterable of FluentGroup instances to FluentDb.init(). '
+            'If you intended to start with no databases, ignore this warning; otherwise, check your dependency injection or group provider setup.',
+      );
       return;
     }
 
-    FluentDb._lastConfig = activeGroups;
+    FluentDb._lastConfig = uniqueGroupsMap.values.toList();
     _isDevMod = isDev;
 
     if (purgeDuration != null) {
@@ -95,41 +127,22 @@ extension FluentDbLifecycle on FluentDb {
 
     final String databasesPath = await getDatabasesPath();
 
-    for (final FluentGroup group in activeGroups) {
-      if (!_isSafeDbName(group.dbKey)) {
-        final FluentDatabaseNameException exception = FluentDatabaseNameException(
-          'Invalid database name: "${group.dbKey.dbName}". '
-          'Database names must contain only alphanumeric characters and underscores (a-z, A-Z, 0-9, _).',
-          stackTrace: StackTrace.current,
-        );
-
-        FluentLog.error(
-          'Configuration error: Illegal database name detected.',
-          exception,
-          exception.stackTrace,
-          tag: 'FluentDb:init',
-          hint:
-              'Rename your FluentGroup to use only letters, numbers, or underscores. '
-              'Avoid using special characters, spaces, or path separators (/, \\).',
-          context: {'dbName': group.dbKey.dbName},
-        );
-
-        throw exception;
-      }
+    for (final FluentGroup group in uniqueGroupsMap.values) {
+      final String currentDbName = group.dbKey.dbName;
 
       try {
-        FluentLog.info('Initializing database group: ${group.dbKey.dbName}', tag: 'FluentDb:init');
+        FluentLog.info('Initializing database group: $currentDbName', tag: 'FluentDb:init');
 
-        // Registration & Relational Linkage
         for (final FluentProvider dao in group.providerList) {
-          dao.setDbName(group.dbKey.dbName);
+          dao.setDbName(currentDbName);
           dao.registerSelf(_register);
         }
 
+        final List<String> tableNames = [];
+        final Map<String, int> relationsManifest = {};
+
         for (final FluentProvider dao in group.providerList) {
           if (dao case final FluentRelationsMixin relDao) {
-            FluentLog.debug('Linking relations for ${dao.tableName}', tag: 'FluentDb:init');
-
             relDao.resolvedRelations.forEach((targetType, relation) {
               final Type oldType = relation.modelType;
               relation.bindType(targetType);
@@ -139,89 +152,89 @@ extension FluentDbLifecycle on FluentDb {
             });
             relDao.linkRelations(group.providerList);
           }
-        }
 
-        final List<String> tableNames = [];
-        final Map<String, int> relationsManifest = {};
-
-        for (final FluentProvider dao in group.providerList) {
           dao.refreshSchema();
-          _verifyAndFixIntegrity(dao, group.dbKey.dbName);
+
+          _verifyAndFixIntegrity(dao, currentDbName);
 
           tableNames.add(dao.tableName);
 
-          if (dao case final FluentRelationsMixin relDao) {
-            FluentLog.debug('Provider finalized', tag: 'FluentDb:init', context: {'table': dao.tableName, 'incomingRelations': relDao.incomingRelations.length});
-            relationsManifest[dao.tableName] = relDao.resolvedRelations.length;
-          } else {
-            relationsManifest[dao.tableName] = 0;
-          }
+          relationsManifest[dao.tableName] = (dao is FluentRelationsMixin) ? dao.resolvedRelations.length : 0;
         }
 
         final List<FluentProvider> sortedDaos = _getSortedProviders(group.providerList);
-        FluentLog.debug('Group "${group.dbKey.dbName}": Relations established and sorted.', tag: 'FluentDb:init');
+        FluentLog.debug('Group "$currentDbName": Relations established and sorted.', tag: 'FluentDb:init');
 
-        final String path = '$databasesPath/${group.dbKey.dbName}.db';
-        performanceConfigs[group.dbKey.dbName] = group.performanceConfig;
-        dbTables[group.dbKey.dbName] = tableNames;
-        dbRelationsCount[group.dbKey.dbName] = relationsManifest;
-
-        FluentLog.debug('Opening database: ${group.dbKey.dbName}', tag: 'FluentDb:init', context: {'path': path});
+        final String path = '$databasesPath/$currentDbName.db';
+        performanceConfigs[currentDbName] = group.performanceConfig;
+        dbTables[currentDbName] = tableNames;
+        dbRelationsCount[currentDbName] = relationsManifest;
 
         final Database db = await openDatabase(
           path,
           version: 1,
           onConfigure: (db) => _applyPerformanceConfig(db, group.performanceConfig, isFullConfig: true),
           onCreate: (db, version) async {
-            FluentLog.info('First run for ${group.dbKey.dbName}. Building initial schema...', tag: 'FluentDb:init');
+            FluentLog.info('First run for $currentDbName. Building initial schema...', tag: 'FluentDb:init');
             for (final FluentProvider dao in sortedDaos) {
               await dao.createTable(db);
             }
           },
         );
 
-        dbNameWithDb[group.dbKey.dbName] = db;
+        dbNameWithDb[currentDbName] = db;
 
         for (final FluentProvider dao in group.providerList) {
           dao.setDb(db);
         }
 
-        FluentLog.info('Syncing schema and running maintenance for ${group.dbKey.dbName}', tag: 'FluentDb:init');
+        FluentLog.info('Syncing schema and maintenance for $currentDbName', tag: 'FluentDb:init');
         await _syncSchema(db, group, sortedProviders: sortedDaos);
         await _runInitialMaintenance(group);
       } catch (e, st) {
         FluentLog.error(
-          'Critical error while initializing group "${group.dbKey.dbName}"',
+          'Critical error while initializing group "$currentDbName"',
           e,
           st,
           tag: 'FluentDb:init',
-          hint: 'Check the database schema definitions or migration scripts for potential syntax errors or constraint violations.',
-          context: {'dbName': group.dbKey.dbName, 'isRetry': isRetry},
+          hint:
+              'The initialization of database "$currentDbName" failed. '
+              'Check if the database file is corrupted, if there are pending migrations, '
+              'or if a schema mismatch occurred between your DAO models and the physical disk. '
+              'If this is a development environment, consider deleting the database file to trigger a clean recreation.',
+          context: {'isRetry': isRetry, 'dbName': currentDbName, 'path': '$databasesPath/$currentDbName.db'},
         );
 
         if (_isDevMod && !isRetry) {
           FluentLog.warning(
-            'DevMode: Recreating database "${group.dbKey.dbName}"...',
+            'DevMode: Recreating database "$currentDbName" due to initialization failure.',
             tag: 'FluentDb:init',
-            hint: 'The initialization failure triggered an automatic wipe of the local database file to restore schema integrity.',
+            hint:
+                'This is an automatic recovery mechanism triggered because "isDevMod" is true. '
+                'The engine detected a corrupted or incompatible database state and is performing a hard reset '
+                'by deleting the file. This ensures a clean schema environment for development.',
+            context: {'dbName': currentDbName},
           );
-          await databaseFactory.deleteDatabase('$databasesPath/${group.dbKey.dbName}');
+          await databaseFactory.deleteDatabase('$databasesPath/$currentDbName.db');
+
+          uniqueGroupsMap.clear();
           reset();
+
           return await init(groups, isDev: isDev, isRetry: true);
         } else {
           stopwatch.stop();
           rethrow;
         }
       }
-      FluentLog.debug('Group "${group.dbKey.dbName}" initialized successfully', tag: 'FluentDb:init', context: {'elapsed': stopwatch.elapsedMilliseconds});
     }
+
     FluentLog.info('Registry: Spawning FluentDb...', tag: 'FluentDb:init');
 
-    await FluentEngine().initMultiple(configs: performanceConfigs, dbTables: dbTables, dbRelationsCount: dbRelationsCount, dbNameWithDb: dbNameWithDb);
+    await FluentEngine().initMultiple(configs: performanceConfigs, dbTables: dbTables, dbRelationsCount: dbRelationsCount, dbNameWithDb: dbNameWithDb, engineConfig: engineConfig);
 
     _isInitialized = true;
     stopwatch.stop();
-    FluentLog.info('Registry: Initialization complete in ${stopwatch.elapsedMilliseconds}ms', tag: 'FluentDb:init', context: {'totalGroups': activeGroups.length});
+    FluentLog.info('Registry: Initialization complete in ${stopwatch.elapsedMilliseconds}ms', tag: 'FluentDb:init', context: {'totalGroups': uniqueGroupsMap.length});
 
     unawaited(_purgeSoftDeletedGlobal());
   }
@@ -291,34 +304,31 @@ extension FluentDbLifecycle on FluentDb {
 
     final Map<Type, FluentDbRelation> relations = dao.resolvedRelations;
 
-    FluentLog.debug('Checking integrity for DAO', tag: 'FluentDb:verifyAndFix', context: {'table': dao.tableName});
-
     relations.forEach((targetType, relation) {
       try {
         final FluentProvider<FluentStorable> targetProvider = FluentDb.providerForType(targetType, dbName: dbName);
         final FluentDbColumn targetCol = targetProvider.primaryKeyColumn;
 
-        FluentLog.debug('Verifying relation target', tag: 'FluentDb:verifyAndFix', context: {'source': dao.tableName, 'target': targetProvider.tableName, 'targetCol': targetCol.name});
-
         if (!targetCol.isPrimaryKey) {
           if (targetCol.autoCorrectAllowed) {
             targetCol.isPrimaryKey = true;
             targetProvider.refreshSchema();
-
             FluentLog.info('AUTO-FIX: Forced PRIMARY KEY on "${targetProvider.tableName}.${targetCol.name}"', tag: 'FluentDb:verifyAndFix');
           } else {
             relation.disable('Target column is not a PK and auto-correct is disabled');
             FluentLog.error(
               'Integrity violation: Target column is not a PK',
-              FluentConstraintException('Constraint violation in ${dao.tableName}', originalError: 'SQLITE_CONSTRAINT', stackTrace: StackTrace.current),
-              null,
+              FluentConstraintException('Constraint violation in ${dao.tableName}', originalError: 'SQLITE_CONSTRAINT'),
+              StackTrace.current,
               tag: 'FluentDb:verifyAndFix',
-              hint: 'Enable autoCorrectAllowed on the target column or explicitly define it as a Primary Key.',
-              context: {'table': dao.tableName, 'targetTable': targetProvider.tableName},
+              hint:
+                  'The relation setup requires the referenced column to be a Primary Key. '
+                  '1) Ensure the target column has @PrimaryKey annotation. '
+                  '2) If you cannot change the schema, enable "autoCorrectAllowed" on the column definition to force the fix. '
+                  '3) Verify if you are referencing the correct model type.',
+              context: {'table': dao.tableName, 'targetTable': targetProvider.tableName, 'dbName': dbName},
             );
           }
-        } else {
-          targetProvider.refreshSchema();
         }
       } catch (e, s) {
         relation.disable('Target column is not a PK and auto-correct is disabled');
@@ -327,7 +337,12 @@ extension FluentDbLifecycle on FluentDb {
           e,
           s,
           tag: 'FluentDb:verifyAndFix',
-          hint: 'Ensure that the model class is registered in the FluentDb before linkRelations runs.',
+          hint:
+              'The relation cannot be resolved because the target model "$targetType" is not found in the current registry. '
+              '1) Ensure the model "$targetType" is included in your FluentGroup definition. '
+              '2) Verify that the model belongs to the same database group ("$dbName"). '
+              '3) Check for typos in the relation type definition.',
+          context: {'table': dao.tableName, 'targetModel': targetType.toString(), 'dbName': dbName},
         );
       }
     });

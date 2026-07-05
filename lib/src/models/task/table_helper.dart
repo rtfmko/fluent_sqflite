@@ -2,7 +2,7 @@
 // Use of this source code is governed by an Apache-2.0 license that can be
 // found in the LICENSE file.
 
-part of '../../../core/fluent_sqlite_internal.dart';
+part of '../../core/fluent_sqlite_internal.dart';
 
 /// A specification object that encapsulates query constraints, operational flags,
 /// and raw execution parameters for database operations.

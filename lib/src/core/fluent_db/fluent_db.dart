@@ -29,9 +29,9 @@ part 'parts/fluent_db_schema.dart';
 ///
 /// * **Provider Lifecycle:** Maintains a registry of [FluentProvider] instances,
 ///   allowing for type-safe lookups and relational data mapping.
-/// * **Isolate Coordination:** Serves as the primary entry point for offloading
-///   database I/O to background isolates via the [FluentEngine], ensuring
-///   a jank-free UI.
+/// * **Pipeline Orchestration:** Serves as the primary entry point for
+///   asynchronous database I/O via the [FluentEngine], ensuring high
+///   concurrency and non-blocking operation execution.
 /// * **Schema Integrity:** Centralizes the schema discovery and migration
 ///   logic to ensure data consistency across multiple database groups.
 /// * **Execution Policy:** Enforces consistent transaction behavior, retry
@@ -373,6 +373,34 @@ class FluentDb {
     }
 
     return stream.map((event) => FluentChangeEvent<T>(modelType: event.modelType, action: event.action, items: event.items.cast<T>(), customTag: event.customTag));
+  }
+
+  /// Subscribes to system-level notifications and critical database alerts.
+  ///
+  /// This method provides a reactive interface to monitor the health and
+  /// stability of the database engine. It acts as the primary bridge between
+  /// internal engine observability and application-level monitoring systems
+  /// (e.g., Sentry, Firebase Crashlytics, or custom loggers).
+  ///
+  /// **Example Usage:**
+  /// ```dart
+  /// // Listen for all critical query execution errors
+  /// FluentDb.onAlert(tag: 'FluentEngine:query_error').listen((alert) {
+  ///   Sentry.captureException(alert.exception, stackTrace: alert.exception?.stackTrace);
+  ///   print('Critical DB Error: ${alert.message}');
+  /// });
+  /// ```
+  ///
+  /// Returns a [Stream] of [FluentSystemAlert] objects.
+  /// If [tag] is provided, the stream will only emit alerts matching that specific tag.
+  static Stream<FluentSystemAlert> onAlert({String? tag}) {
+    Stream<FluentSystemAlert> stream = FluentEngine().alertStream;
+
+    if (tag != null) {
+      stream = stream.where((alert) => alert.tag == tag);
+    }
+
+    return stream;
   }
 
   /// Saves a single [item] of type [T] into its corresponding database table.
@@ -1786,7 +1814,7 @@ class FluentDb {
   /// This is the core engine of the registry. It handles:
   /// 1. **Context Resolution:** Automatically mapping a [FluentTask] to the correct table/provider.
   /// 2. **Policy Flattening:** Merging operation-specific, provider-level, and global execution policies.
-  /// 3. **Result Hydration:** Converting raw SQL results (from the worker isolate) back into domain models using the appropriate [FluentMapper].
+  /// 3. **Result Hydration:** Converting raw SQL results (from the worker) back into domain models using the appropriate [FluentMapper].
   ///
   /// **Example Usage:**
   /// ```dart
@@ -1818,7 +1846,7 @@ class FluentDb {
       context: {'action': effectiveData.action.toString(), 'table': effectiveData.table, 'policy': effectivePolicy.toString()},
     );
 
-    // Dispatch to isolate coordinator
+    // Dispatch to coordinator
     final dynamic result = await FluentEngine().dispatch(effectiveData);
 
     // Handle Model Hydration for Read operations
@@ -1971,4 +1999,57 @@ class FluentDb {
   /// FluentDb.toggleLogging(true); // Resume logs
   /// ```
   static void toggleLogging(bool enable) => FluentLog.isGloballyEnabled(enable);
+
+  /// Dynamically updates the runtime configuration of the underlying database engine.
+  ///
+  /// This allows you to adjust maintenance cycles and temporal thresholds on the fly,
+  /// such as reducing background I/O operations when the app enters a low-power state.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// // Switch to battery-saver mode with relaxed maintenance intervals
+  /// FluentDb.changeFluentEngineConfig(
+  ///   configs: const FluentEngineConfig(
+  ///     saveInterval: Duration(minutes: 5),
+  ///     analyzeInterval: Duration(hours: 1),
+  ///   ),
+  /// );
+  /// ```
+  static void changeFluentEngineConfig({required FluentEngineConfig configs}) => FluentEngine().changeFluentEngineConfig(newConfig: configs);
+
+  /// Temporarily halts the execution pipeline for a specific database or globally.
+  ///
+  /// This method awaits the completion of currently executing tasks, ensuring
+  /// the database enters a quiescent, safe state. It is highly recommended to
+  /// use this before performing external file-system operations (like physical backups).
+  ///
+  /// **Note:** To prevent UI starvation, the engine's watchdog will automatically
+  /// force-resume the queue if the pause duration exceeds [FluentEngineConfig.maxPauseDuration].
+  ///
+  /// **Example:**
+  /// ```dart
+  /// await FluentDb.pauseQueue(dbKey: myDbKey); // Drain active tasks and suspend
+  /// await performExternalDbBackup();           // Safe to copy the .db file
+  /// FluentDb.resumeQueue(dbKey: myDbKey);      // Resume normal operations
+  /// ```
+  static Future<void> pauseQueue({FluentDbKey? dbKey}) async => await FluentEngine().pauseQueue(dbName: dbKey?.dbName);
+
+  /// Resumes the execution pipeline, allowing pending operations in the queue
+  /// to be processed.
+  ///
+  /// This must be called to lift a pause state initiated by [pauseQueue].
+  /// Best practice is to place this inside a `finally` block to guarantee
+  /// the engine does not remain permanently locked if an error occurs.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// await FluentDb.pauseQueue();
+  /// try {
+  ///   await executeCriticalMaintenance();
+  /// } finally {
+  ///   // Ensure the pipeline is unblocked even if maintenance throws an error
+  ///   FluentDb.resumeQueue();
+  /// }
+  /// ```
+  static void resumeQueue({FluentDbKey? dbKey}) => FluentEngine().resumeQueue(dbName: dbKey?.dbName);
 }

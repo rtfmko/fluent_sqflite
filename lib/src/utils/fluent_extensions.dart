@@ -136,17 +136,19 @@ extension FluentDbActionX on FluentDbAction {
     FluentDbAction.delete,
     FluentDbAction.deleteBy,
     FluentDbAction.deleteWhere,
+    FluentDbAction.hardDeleteWhere,
     FluentDbAction.deleteItemsByIds,
     FluentDbAction.restore,
     FluentDbAction.restoreItemsByIds,
     FluentDbAction.hardDelete,
     FluentDbAction.hardDeleteBy,
-    FluentDbAction.hardDeleteWhere,
     FluentDbAction.hardDeleteItemsByIds,
     FluentDbAction.purgeSoftDeleted,
     FluentDbAction.forcePurgeSoftDeleted,
     FluentDbAction.clearExpired,
     FluentDbAction.clearTable,
+    FluentDbAction.clearDatabase,
+    FluentDbAction.execute,
     FluentDbAction.wipeAll,
   };
 
@@ -155,7 +157,7 @@ extension FluentDbActionX on FluentDbAction {
   /// This includes all mutation operations as well as administrative tasks
   /// that affect the overall state of the table (e.g., clearing expired items),
   /// ensuring that observers receive timely updates regarding the data layer.
-  static const Set<FluentDbAction> _streamActions = {..._writeActions};
+  static final Set<FluentDbAction> _streamActions = Set.from(_writeActions)..removeAll([FluentDbAction.clearDatabase, FluentDbAction.wipeAll, FluentDbAction.execute]);
 
   /// Returns `true` if the current operation modifies the underlying database state.
   bool get isWriteOp => _writeActions.contains(this);
