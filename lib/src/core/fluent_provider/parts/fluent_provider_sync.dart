@@ -231,8 +231,8 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     required Future<FluentApiResponse<T>> Function() fetchFromApi,
     FluentSyncOptions<T> options = const FluentSyncOptions(),
     String? localWhere,
-    String? localOrderBy,
     List<Object?>? localWhereArgs,
+    String? localOrderBy,
     String? dbName,
     ExecutionPolicy policy = const ExecutionPolicy(),
   }) async* {

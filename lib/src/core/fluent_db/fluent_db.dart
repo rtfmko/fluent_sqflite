@@ -1803,11 +1803,12 @@ class FluentDb {
     FluentSyncOptions<T> options = const FluentSyncOptions(),
     String? localWhere,
     List<Object?>? localWhereArgs,
+    String? localOrderBy,
     FluentDbKey? dbKey,
     ExecutionPolicy policy = const ExecutionPolicy(),
   }) => providerByType<T>(
     dbName: dbKey?.dbName,
-  ).reactiveSync(fetchFromApi: fetchFromApi, options: options, localWhere: localWhere, localWhereArgs: localWhereArgs, policy: policy, dbName: dbKey?.dbName);
+  ).reactiveSync(fetchFromApi: fetchFromApi, options: options, localWhere: localWhere, localWhereArgs: localWhereArgs, localOrderBy: localOrderBy, policy: policy, dbName: dbKey?.dbName);
 
   /// Dispatches a database task to the background `FluentEngine` for execution.
   ///
