@@ -55,12 +55,13 @@ extension FluentExecuteFind<T extends FluentStorable> on FluentProvider<T> {
   /// Dispatches structured operational logging maps via [FluentLog.debug] or [FluentLog.error].
   Future<List<T>> _executeFindAllTaskOnMain(FluentTask task) async {
     final int? limit = task.helper?.limit;
+    final String? orderBy = task.helper?.orderBy;
 
     FluentLog.debug('Executing Main-thread batch selection routine', tag: '$tableName:findAllExecutor', context: {'tableName': tableName, 'taskId': task.id, 'limit': limit ?? 'unlimited'});
 
     try {
       // Execute the low-level raw query constraint directly against the database driver
-      final List<Map<String, dynamic>> result = await executor.query(tableName, limit: limit);
+      final List<Map<String, dynamic>> result = await executor.query(tableName, limit: limit, orderBy: orderBy);
 
       final int resultLength = result.length;
       if (resultLength == 0) {
@@ -99,7 +100,13 @@ extension FluentExecuteFind<T extends FluentStorable> on FluentProvider<T> {
       FluentLog.debug(
         'Relational hydration mapping sequence finalized safely',
         tag: '$tableName:findAllExecutor',
-        context: {'tableName': tableName, 'taskId': task.id, 'materializedInstances': typedItems.length, 'chunkSize': task.policy.effectiveChunkSize, 'optimizationApplied': 'batched_cascade_enrichment'},
+        context: {
+          'tableName': tableName,
+          'taskId': task.id,
+          'materializedInstances': typedItems.length,
+          'chunkSize': task.policy.effectiveChunkSize,
+          'optimizationApplied': 'batched_cascade_enrichment',
+        },
       );
       return typedItems;
     } catch (e, s) {
@@ -126,6 +133,7 @@ extension FluentExecuteFind<T extends FluentStorable> on FluentProvider<T> {
   /// Dispatches structured operational logging maps via [FluentLog.debug] or [FluentLog.error].
   Future<List<T>> _executeFindValidItemsTaskOnMain(FluentTask task) async {
     final SortDirection? sortDirection = task.helper?.sortDirection;
+    final String? customOrderBy = task.helper?.orderBy;
     final int? limit = task.helper?.limit;
 
     final String? customWhere = task.helper?.where;
@@ -162,10 +170,19 @@ extension FluentExecuteFind<T extends FluentStorable> on FluentProvider<T> {
     );
 
     try {
-      final String? orderBy = sortDirection != null ? '$expiryCol ${sortDirection.name.toUpperCase()}' : null;
+      String? finalOrderBy;
+      if (customOrderBy != null && customOrderBy.trim().isNotEmpty) {
+        if (sortDirection != null) {
+          finalOrderBy = '$customOrderBy, $expiryCol ${sortDirection.name.toUpperCase()}';
+        } else {
+          finalOrderBy = customOrderBy;
+        }
+      } else {
+        finalOrderBy = sortDirection != null ? '$expiryCol ${sortDirection.name.toUpperCase()}' : null;
+      }
 
       // Execute the low-level raw query constraints directly against the database driver
-      final List<Map<String, dynamic>> result = await executor.query(tableName, where: finalWhere, whereArgs: finalWhereArgs, limit: limit, orderBy: orderBy);
+      final List<Map<String, dynamic>> result = await executor.query(tableName, where: finalWhere, whereArgs: finalWhereArgs, limit: limit, orderBy: finalOrderBy);
 
       final int resultLength = result.length;
       if (resultLength == 0) {
@@ -204,7 +221,13 @@ extension FluentExecuteFind<T extends FluentStorable> on FluentProvider<T> {
       FluentLog.debug(
         'Relational hydration mapping sequence for valid records finalized safely',
         tag: '$tableName:findValidItemsExecutor',
-        context: {'tableName': tableName, 'taskId': task.id, 'materializedInstances': typedItems.length, 'chunkSize': task.policy.effectiveChunkSize, 'optimizationApplied': 'batched_cascade_enrichment'},
+        context: {
+          'tableName': tableName,
+          'taskId': task.id,
+          'materializedInstances': typedItems.length,
+          'chunkSize': task.policy.effectiveChunkSize,
+          'optimizationApplied': 'batched_cascade_enrichment',
+        },
       );
       return typedItems;
     } catch (e, s) {
@@ -240,6 +263,7 @@ extension FluentExecuteFind<T extends FluentStorable> on FluentProvider<T> {
   /// matching the specified criteria.
   Future<List<T>> _executeFindItemsByTaskOnMain(FluentTask task) async {
     final int? limit = task.helper?.limit;
+    final String? orderBy = task.helper?.orderBy;
     final String whereClause = task.helper?.where ?? 'id = ?';
     final List<dynamic> whereArgs = task.helper?.whereArgs ?? [];
     final String searchKey = task.helper?.key ?? 'id';
@@ -248,12 +272,12 @@ extension FluentExecuteFind<T extends FluentStorable> on FluentProvider<T> {
     FluentLog.debug(
       'Executing Main-thread conditional attribute query selection routine',
       tag: '$tableName:findItemsByExecutor',
-      context: {'tableName': tableName, 'taskId': task.id, 'searchKey': searchKey, 'searchValue': value.toString(), 'whereClause': whereClause, 'limit': limit ?? 'unlimited'},
+      context: {'tableName': tableName, 'taskId': task.id, 'orderBy': orderBy, 'searchKey': searchKey, 'searchValue': value.toString(), 'whereClause': whereClause, 'limit': limit ?? 'unlimited'},
     );
 
     try {
       // Execute the parameterized conditional query directly against the underlying driver
-      final List<Map<String, dynamic>> result = await executor.query(tableName, where: whereClause, whereArgs: whereArgs, limit: limit);
+      final List<Map<String, dynamic>> result = await executor.query(tableName, where: whereClause, whereArgs: whereArgs, limit: limit, orderBy: orderBy);
 
       final int resultLength = result.length;
       if (resultLength == 0) {
@@ -296,7 +320,13 @@ extension FluentExecuteFind<T extends FluentStorable> on FluentProvider<T> {
       FluentLog.debug(
         'Relational hydration mapping sequence for conditional query finalized safely',
         tag: '$tableName:findItemsByExecutor',
-        context: {'tableName': tableName, 'taskId': task.id, 'materializedInstances': typedItems.length, 'chunkSize': task.policy.effectiveChunkSize, 'optimizationApplied': 'batched_cascade_enrichment'},
+        context: {
+          'tableName': tableName,
+          'taskId': task.id,
+          'materializedInstances': typedItems.length,
+          'chunkSize': task.policy.effectiveChunkSize,
+          'optimizationApplied': 'batched_cascade_enrichment',
+        },
       );
       return typedItems;
     } catch (e, s) {
@@ -450,7 +480,13 @@ extension FluentExecuteFind<T extends FluentStorable> on FluentProvider<T> {
       FluentLog.debug(
         'Relational hydration mapping sequence for customized query finalized safely',
         tag: '$tableName:findExecutor',
-        context: {'tableName': tableName, 'taskId': task.id, 'materializedInstances': typedItems.length, 'chunkSize': task.policy.effectiveChunkSize, 'optimizationApplied': 'batched_cascade_enrichment'},
+        context: {
+          'tableName': tableName,
+          'taskId': task.id,
+          'materializedInstances': typedItems.length,
+          'chunkSize': task.policy.effectiveChunkSize,
+          'optimizationApplied': 'batched_cascade_enrichment',
+        },
       );
       return typedItems;
     } catch (e, s) {

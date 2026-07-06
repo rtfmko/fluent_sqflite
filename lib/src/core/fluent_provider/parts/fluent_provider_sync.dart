@@ -231,6 +231,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     required Future<FluentApiResponse<T>> Function() fetchFromApi,
     FluentSyncOptions<T> options = const FluentSyncOptions(),
     String? localWhere,
+    String? localOrderBy,
     List<Object?>? localWhereArgs,
     String? dbName,
     ExecutionPolicy policy = const ExecutionPolicy(),
@@ -255,9 +256,10 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
           policy: policy,
           ignoreLazy: options.ignoreLazy,
           dbName: dbName,
+          orderBy: localOrderBy,
         );
       } else {
-        localData = await find(where: localWhere, whereArgs: localWhereArgs, limit: options.limit, maxDepth: options.maxDepth, policy: policy, ignoreLazy: options.ignoreLazy, dbName: dbName);
+        localData = await find(where: localWhere, whereArgs: localWhereArgs, orderBy: localOrderBy, limit: options.limit, maxDepth: options.maxDepth, policy: policy, ignoreLazy: options.ignoreLazy, dbName: dbName);
       }
       FluentLog.debug('Cache loaded', tag: 'sync:cache', context: {'count': localData.length, 'model': T.toString(), 'ms': pipelineTimer.elapsedMilliseconds});
       yield FluentDataEvent(phase: FluentPipelinePhase.cacheReady, data: localData, executionMs: pipelineTimer.elapsedMilliseconds);
@@ -340,7 +342,17 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     }
 
     if (options.beforeSave != null) {
-      apiData = await options.beforeSave?.call(apiData) ?? [];
+      try {
+        apiData = await options.beforeSave?.call(apiData) ?? [];
+      } catch (e, st) {
+        FluentLog.error('User callback beforeSave failed', e, st, tag: 'sync:callback_error');
+        yield FluentDataEvent(
+          phase: FluentPipelinePhase.error,
+          error: FluentEngineException('User callback beforeSave failed', originalError: e, stackTrace: st, component: 'reactiveSync'),
+          executionMs: pipelineTimer.elapsedMilliseconds,
+        );
+        return;
+      }
     }
 
     Future<void>? persistenceFuture;
@@ -357,6 +369,8 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
             apiData: apiData,
             localWhere: localWhere,
             localWhereArgs: localWhereArgs,
+            currentLocalData: localData,
+            executionStrategy: options.executionStrategy,
             policy: policy,
             dbName: dbName,
           ).catchError((Object e, StackTrace st) {
@@ -380,7 +394,11 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     }
 
     if (options.onSuccess != null) {
-      options.onSuccess?.call(apiData);
+      try {
+        options.onSuccess?.call(apiData);
+      } catch (e) {
+        FluentLog.warning('User callback onSuccess failed, but sync was successful', tag: 'sync:callback_error');
+      }
     }
 
     pipelineTimer.stop();
@@ -429,6 +447,8 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     required FluentMergeStrategy strategy,
     required FluentRelationSyncMode relationSyncMode,
     required List<T> apiData,
+    required List<T> currentLocalData,
+    required FluentExecutionStrategy executionStrategy,
     String? localWhere,
     List<Object?>? localWhereArgs,
     required ExecutionPolicy policy,
@@ -436,7 +456,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
   }) async {
     if (strategy == FluentMergeStrategy.none) return;
 
-    final List<T> localData = await find(where: localWhere, whereArgs: localWhereArgs, policy: policy, dbName: dbName);
+    final List<T> localData = (executionStrategy == FluentExecutionStrategy.apiOnly) ? await find(where: localWhere, whereArgs: localWhereArgs, policy: policy, dbName: dbName) : currentLocalData;
     final Set<dynamic> localIds = localData.map((e) => e.primaryKeyValue).where((id) => id != null).toSet();
 
     final List<T> itemsToInsert = [];

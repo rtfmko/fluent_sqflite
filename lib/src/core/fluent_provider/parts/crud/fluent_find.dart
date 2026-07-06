@@ -91,11 +91,11 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<List<T>> findAll({int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+  Future<List<T>> findAll({String? orderBy, int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     FluentLog.debug(
       'Initiating global operational query pipeline for batch row selection',
       tag: '$tableName:findAll',
-      context: {'tableName': tableName, 'limit': limit ?? 'unlimited', 'maxDepth': maxDepth, 'ignoreLazy': ignoreLazy, 'hasCustomPolicy': policy != const ExecutionPolicy()},
+      context: {'tableName': tableName, 'limit': limit ?? 'unlimited', 'orderBy': orderBy, 'maxDepth': maxDepth, 'ignoreLazy': ignoreLazy, 'hasCustomPolicy': policy != const ExecutionPolicy()},
     );
 
     final FluentTask task = FluentTask(
@@ -104,7 +104,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
       dbName: dbName ?? this.dbName,
       maxDepth: maxDepth,
       ignoreLazy: ignoreLazy,
-      helper: TableHelper(limit: limit, multiple: true, where: _injectSoftDelete(null)),
+      helper: TableHelper(limit: limit, multiple: true, where: _injectSoftDelete(null), orderBy: orderBy),
       policy: policy,
     );
 
@@ -137,6 +137,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   Future<List<T>> findValidItems({
     String? where,
     List<Object?>? whereArgs,
+    String? orderBy,
     int? limit,
     SortDirection? sortDirection,
     int maxDepth = 1,
@@ -153,6 +154,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
         'sortDirection': sortDirection,
         'where': where,
         'whereArgs': whereArgs,
+        'orderBy': orderBy,
         'maxDepth': maxDepth,
         'ignoreLazy': ignoreLazy,
         'hasCustomPolicy': policy != const ExecutionPolicy(),
@@ -165,7 +167,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
       dbName: dbName ?? this.dbName,
       maxDepth: maxDepth,
       ignoreLazy: ignoreLazy,
-      helper: TableHelper(limit: limit, multiple: true, sortDirection: sortDirection, where: _injectSoftDelete(where), whereArgs: whereArgs),
+      helper: TableHelper(limit: limit, multiple: true, sortDirection: sortDirection, where: _injectSoftDelete(where), whereArgs: whereArgs, orderBy: orderBy),
       policy: policy,
     );
 
@@ -198,7 +200,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   /// );
   /// ```
   @internal
-  Future<List<T>> findItemsBy(dynamic value, {String? key, int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+  Future<List<T>> findItemsBy(dynamic value, {String? orderBy, String? key, int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     // Fall back to the inferred primary key identifier if no custom attribute key is passed
     final String searchKey = key ?? (_cachedPrimaryKey?.name ?? 'id');
 
@@ -207,6 +209,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
       tag: '$tableName:findItemsBy',
       context: {
         'tableName': tableName,
+        'orderBy': orderBy,
         'searchColumnKey': searchKey,
         'searchConditionValue': value.toString(),
         'limit': limit ?? 'unlimited',
@@ -222,7 +225,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
       dbName: dbName ?? this.dbName,
       maxDepth: maxDepth,
       ignoreLazy: ignoreLazy,
-      helper: TableHelper(limit: limit, key: searchKey, value: value, where: _injectSoftDelete('$searchKey = ?'), whereArgs: [value], multiple: true),
+      helper: TableHelper(limit: limit, key: searchKey, value: value, where: _injectSoftDelete('$searchKey = ?'), whereArgs: [value], multiple: true, orderBy: orderBy),
       policy: policy,
     );
 
@@ -371,7 +374,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   /// print('Found ${deletedUsers.length} deleted items.');
   /// ```
   @internal
-  Future<List<T>> findDeletedItems({int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+  Future<List<T>> findDeletedItems({String? orderBy, int? limit, int maxDepth = 1, bool ignoreLazy = false, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
     if (modelSample is! FluentSoftDeletable) {
       FluentLog.warning(
         'Find-deleted items aborted: model does not support soft-deletion',
@@ -385,7 +388,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
     FluentLog.debug(
       'Retrieving soft-deleted records',
       tag: '$tableName:findDeletedItems',
-      context: {'tableName': tableName, 'limit': limit ?? 'none', 'maxDepth': maxDepth, 'hasCustomPolicy': policy != const ExecutionPolicy()},
+      context: {'tableName': tableName, 'orderBy': orderBy, 'limit': limit ?? 'none', 'maxDepth': maxDepth, 'hasCustomPolicy': policy != const ExecutionPolicy()},
     );
 
     final FluentTask task = FluentTask(
@@ -394,7 +397,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
       dbName: dbName ?? this.dbName,
       maxDepth: maxDepth,
       ignoreLazy: ignoreLazy,
-      helper: TableHelper(where: _injectSoftDelete(null, requestDeletedOnly: true), limit: limit, multiple: true),
+      helper: TableHelper(where: _injectSoftDelete(null, requestDeletedOnly: true), limit: limit, multiple: true, orderBy: orderBy),
       policy: policy,
     );
 
