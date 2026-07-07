@@ -427,13 +427,13 @@ extension FluentExecuteUpdate<T extends FluentStorable> on FluentProvider<T> {
           }
         }
 
-        await batch.commit(noResult: true);
-
         if (_hasRelations && _relationsMixin != null) {
           FluentLog.debug('Processing deep-linked relational batch associations', tag: '$tableName:updateAllWithRelationsExecutor');
 
           await _relationsMixin!._processBatchRelations(txn, items, task, batch: batch, parentJsons: preparedJsons, currentDepth: 0, visitedTables: <String>{tableName}, syncMode: syncMode);
         }
+
+        await batch.commit(noResult: true);
 
         return validItemsCount;
       });
