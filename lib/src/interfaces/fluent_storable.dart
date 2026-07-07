@@ -232,7 +232,7 @@ abstract class FluentStorable {
   @internal
   void injectRelationId(String key, dynamic value) {
     fsMetadataInternal[key] = value;
-    FluentLog.debug('Internal relation ID injected', tag: 'FluentStorable:injectRelation', context: {'key': key});
+    FluentLog.debug('Internal relation ID injected', tag: 'FluentStorable:injectRelation', context: {'key': key, 'value' : value});
   }
 
   /// Generates the full database schema for the current model.
