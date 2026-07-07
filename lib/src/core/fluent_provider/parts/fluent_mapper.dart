@@ -397,14 +397,6 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
 
     final String pkName = _cachedPrimaryKey?.name ?? 'id';
 
-    // Take all parents ID
-    final List<dynamic> parentIds = processedRows.map((r) => r[pkName]).where((id) => id != null).toSet().toList();
-
-    if (parentIds.isEmpty) {
-      currentVisited.remove(tableName);
-      return processedRows;
-    }
-
     final int nextDepth = currentDepth + 1;
     final int maxDepth = task.maxDepth;
     final bool ignoreLazy = task.ignoreLazy;
@@ -432,13 +424,22 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
 
       if (currentVisited.contains(childDao.tableName)) continue;
 
+      final bool isManyToOne = rel.relationType == FluentDbRelationType.manyToOne || rel.relationType == FluentDbRelationType.oneToOne;
+      final String effectiveLocalKey = rel.localKey ?? childDao.defaultForeignKey;
+
+      final String localMatchKey = isManyToOne ? effectiveLocalKey : pkName;
+
+      final List<dynamic> relationTargetIds = processedRows.map((r) => r[localMatchKey]).where((id) => id != null).toSet().toList();
+
+      if (relationTargetIds.isEmpty) continue;
+
       try {
         final String remoteKey = rel.remoteKey ?? childDao.defaultForeignKey;
         final List<Map<String, dynamic>> allRawChildren = [];
 
-        for (int i = 0; i < parentIds.length; i += chunkSize) {
-          final int end = (i + chunkSize > parentIds.length) ? parentIds.length : i + chunkSize;
-          final List<dynamic> chunk = parentIds.sublist(i, end);
+        for (int i = 0; i < relationTargetIds.length; i += chunkSize) {
+          final int end = (i + chunkSize > relationTargetIds.length) ? relationTargetIds.length : i + chunkSize;
+          final List<dynamic> chunk = relationTargetIds.sublist(i, end);
           final String placeholders = List.filled(chunk.length, '?').join(',');
 
           List<Map<String, dynamic>> results;
@@ -466,20 +467,20 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
           allRawChildren.addAll(results);
         }
 
-        FluentLog.debug('Enriching relation (Batch)', tag: '$tableName:hydration', context: {'key': key, 'childCount': allRawChildren.length, 'parents': parentIds.length});
+        FluentLog.debug('Enriching relation (Batch)', tag: '$tableName:hydration', context: {'key': key, 'childCount': allRawChildren.length, 'parents': relationTargetIds.length});
 
         List<Map<String, dynamic>> enrichedChildren = [];
 
-        // Рекурсивно обрабатываем детей ТОЖЕ пачкой!
         if (allRawChildren.isNotEmpty) {
           enrichedChildren = await childDao._processRowsBatch(allRawChildren, task, visitedTables: {...currentVisited}, currentDepth: nextDepth);
         }
 
-        // Memory Join: Группируем детей по ключу родителя
-        final Map<dynamic, List<Map<String, dynamic>>> groupedChildren = {};
+        final Map<String, List<Map<String, dynamic>>> groupedChildren = {};
         for (var child in enrichedChildren) {
           final pId = child['_fluent_pivot_parent_id'] ?? child[remoteKey];
-          groupedChildren.putIfAbsent(pId, () => []).add(child);
+          if (pId != null) {
+            groupedChildren.putIfAbsent(pId.toString(), () => []).add(child);
+          }
         }
 
         for (final Map<String, dynamic> row in processedRows) {
@@ -487,8 +488,8 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
             continue;
           }
 
-          final dynamic pId = row[pkName];
-          final List<Map<String, dynamic>> matches = groupedChildren[pId] ?? [];
+          final dynamic targetMatchId = row[localMatchKey];
+          final List<Map<String, dynamic>> matches = targetMatchId != null ? (groupedChildren[targetMatchId.toString()] ?? []) : [];
 
           // Final Mapping Logic
           if (rel.castType == FluentModelCast.modelList) {

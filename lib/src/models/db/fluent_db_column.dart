@@ -94,8 +94,8 @@ class FluentDbColumn {
     }
 
     if (type == FluentDbDataType.custom && customSql != null) {
-      final upperSql = customSql!.toUpperCase().trim();
-      final allowedTypes = ['INTEGER', 'TEXT', 'REAL', 'BLOB', 'NUMERIC', 'BOOLEAN', 'TIMESTAMP'];
+      final String upperSql = customSql!.toUpperCase().trim();
+      final List<String> allowedTypes = ['INTEGER', 'TEXT', 'REAL', 'BLOB', 'NUMERIC', 'BOOLEAN', 'TIMESTAMP'];
 
       final bool isValid = allowedTypes.any((t) => upperSql.startsWith(t)) || upperSql.contains('REFERENCES');
 
