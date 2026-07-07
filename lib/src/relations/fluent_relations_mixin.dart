@@ -179,7 +179,9 @@ mixin FluentRelationsMixin<T extends FluentStorable> on FluentProvider<T> {
         }
 
         if (remoteFk != null && localFk != null) {
-          if (childRawColumns.contains(remoteFk) && localFk == modelSample.primaryKey.name) {
+          if (relation.castType == FluentModelCast.modelList) {
+            currentType = FluentDbRelationType.oneToMany;
+          } else if (childRawColumns.contains(remoteFk) && localFk == modelSample.primaryKey.name) {
             currentType = FluentDbRelationType.oneToMany;
           } else {
             currentType = FluentDbRelationType.manyToOne;
@@ -198,6 +200,10 @@ mixin FluentRelationsMixin<T extends FluentStorable> on FluentProvider<T> {
         FluentLog.info('Auto-inference result', tag: 'FluentRelationMixin', context: {'type': currentType.name, 'localKey': localFk, 'remoteKey': remoteFk});
 
         relation.relationType = currentType;
+
+        currentLocalKey = localFk;
+        currentRemoteKey = remoteFk;
+
         relation.localKey = localFk;
         relation.remoteKey = remoteFk;
       }
