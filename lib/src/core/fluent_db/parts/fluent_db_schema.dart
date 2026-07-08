@@ -51,14 +51,8 @@ extension FluentDbSchema on FluentDb {
 
           await dao.handleSmartMigration(txn);
         }
-      }
-    });
 
-    await db.transaction((txn) async {
-      for (final FluentProvider dao in providersToSync) {
-        FluentLog.debug('Syncing indexes for table', tag: 'FluentDb:syncSchema', context: {'table': dao.tableName});
-        await dao.syncIndexes(txn);
-        await dao.syncPivotTables(txn, dao, existingTables);
+        await dao.syncPivotTables(txn, existingTables);
       }
     });
 

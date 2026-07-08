@@ -113,9 +113,41 @@ class FluentDbColumn {
     }
   }
 
-  /// Creates a standard auto-incrementing Primary Key column.
-  /// Defaults to column name 'id' if not specified.
-  static FluentDbColumn primary({String? name}) => FluentDbColumn(name: name ?? 'id', type: FluentDbDataType.integer, isPrimaryKey: true, isAutoIncrement: true);
+  /// Creates a copy of this [FluentDbColumn] with the specified fields replaced.
+  FluentDbColumn copyWith({
+    String? name,
+    FluentDbDataType? type,
+    String? oldName,
+    String? customSql,
+    bool? isPrimaryKey,
+    bool? isAutoIncrement,
+    bool? isNotNull,
+    bool? isUnique,
+    String? defaultValue,
+    String? checkConstraint,
+    bool? indexed,
+    bool? autoCorrectAllowed,
+  }) {
+    return FluentDbColumn(
+      name: name ?? this.name,
+      type: type ?? this.type,
+      oldName: oldName ?? this.oldName,
+      customSql: customSql ?? this.customSql,
+      isPrimaryKey: isPrimaryKey ?? this.isPrimaryKey,
+      isAutoIncrement: isAutoIncrement ?? this.isAutoIncrement,
+      isNotNull: isNotNull ?? this.isNotNull,
+      isUnique: isUnique ?? this.isUnique,
+      defaultValue: defaultValue ?? this.defaultValue,
+      checkConstraint: checkConstraint ?? this.checkConstraint,
+      indexed: indexed ?? this.indexed,
+      autoCorrectAllowed: autoCorrectAllowed ?? this.autoCorrectAllowed,
+    );
+  }
+
+  /// Creates a standard Primary Key column.
+  /// Defaults to column name 'id' and enables auto-increment by default.
+  static FluentDbColumn primary({String? name, bool isAutoIncrement = true}) =>
+      FluentDbColumn(name: name ?? 'id', type: FluentDbDataType.integer, isPrimaryKey: true, isAutoIncrement: isAutoIncrement);
 
   /// Creates a text-based column.
   static FluentDbColumn text(String name, {bool isNotNull = false}) => FluentDbColumn(name: name, type: FluentDbDataType.text, isNotNull: isNotNull);

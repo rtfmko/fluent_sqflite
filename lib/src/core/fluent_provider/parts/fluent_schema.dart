@@ -273,27 +273,21 @@ CREATE TABLE IF NOT EXISTS $pivotName (
         await _reconstructTable(txn, expectedCols, existingColumns.keys.toSet());
       } else {
         // Incremental Additive Migration
-        final List<Future<void>> alterFutures = [];
         for (final FluentDbColumn col in expectedCols) {
           if (!existingColumns.containsKey(col.name)) {
             final String addSql = 'ALTER TABLE $tableName ADD COLUMN ${col.sqlDefinition}';
 
             FluentLog.debug('Applying additive migration for column: ${col.name}', tag: '$tableName:migration');
             FluentLog.sql(addSql, tag: '$tableName:migration');
-            alterFutures.add(txn.execute(addSql));
 
-            if (col.indexed) {
-              final String indexSql = 'CREATE INDEX IF NOT EXISTS idx_${tableName}_${col.name} ON $tableName (${col.name})';
-              FluentLog.sql(indexSql, tag: '$tableName:migration');
-              alterFutures.add(txn.execute(indexSql));
-            }
+            await txn.execute(addSql);
           }
         }
-
-        await Future.wait(alterFutures);
       }
 
-      await syncIndexes(txn);
+      final bool structureChanged = needsReconstruction || (existingColumns.length != expectedCols.length);
+
+      await syncIndexes(txn, tablePragma: structureChanged ? null : prisma);
       FluentLog.info('Schema synchronization completed successfully', tag: '$tableName:migration');
     } catch (e, st) {
       FluentLog.error(
@@ -335,7 +329,7 @@ CREATE TABLE IF NOT EXISTS $pivotName (
   /// * Schema Introspection: Uses `PRAGMA table_info` to verify column existence before indexing.
   /// * Atomic Batching: Executes index creation in parallel to minimize initialization latency.
   /// * Resilience: Prevents corruption by aborting index operations for columns missing from the disk.
-  Future<void> syncIndexes(DatabaseExecutor executor) async {
+  Future<void> syncIndexes(DatabaseExecutor executor, {final List<Map<String, Object?>>? tablePragma}) async {
     final List<FluentDbColumn> expectedCols = getFullSchema;
     final Iterable<FluentDbColumn> toIndex = expectedCols.where((c) => c.indexed && !c.isPrimaryKey);
 
@@ -346,10 +340,8 @@ CREATE TABLE IF NOT EXISTS $pivotName (
     FluentLog.debug('Synchronizing table indices', tag: '$tableName:schema', context: {'totalPotentialIndices': toIndex.length});
 
     try {
-      final List<Map<String, Object?>> tableInfo = await executor.rawQuery("PRAGMA table_info('$tableName')");
+      final List<Map<String, Object?>> tableInfo = tablePragma ?? await executor.rawQuery("PRAGMA table_info('$tableName')");
       final Set<String> actualColumnsOnDisk = {for (final row in tableInfo) (row['name'] as String)};
-
-      final List<Future<void>> indexFutures = [];
 
       for (final FluentDbColumn col in toIndex) {
         final String indexName = 'idx_${tableName}_${col.name}';
@@ -366,19 +358,15 @@ CREATE TABLE IF NOT EXISTS $pivotName (
 
         final String sql = 'CREATE INDEX IF NOT EXISTS $indexName ON $tableName (${col.name});';
 
-        indexFutures.add(() async {
-          try {
-            FluentLog.sql(sql, tag: '$tableName:schema');
-            await executor.execute(sql);
+        try {
+          FluentLog.sql(sql, tag: '$tableName:schema');
 
-            FluentLog.debug('Index verified/created', tag: '$tableName:schema', context: {'indexName': indexName});
-          } catch (e, s) {
-            FluentLog.error('Failed to create index', e, s, tag: '$tableName:schema', context: {'indexName': indexName});
-          }
-        }());
+          FluentLog.debug('Verifying/Creating index: $indexName', tag: '$tableName:schema');
+          await executor.execute(sql);
+        } catch (e, s) {
+          FluentLog.error('Failed to create index', e, s, tag: '$tableName:schema', context: {'indexName': indexName});
+        }
       }
-
-      await Future.wait(indexFutures);
     } catch (e, s) {
       FluentLog.error('Critical failure during index synchronization', e, s, tag: '$tableName:schema', context: {'tableName': tableName});
     }
@@ -437,6 +425,7 @@ CREATE TABLE IF NOT EXISTS $pivotName (
         final String insertSql = 'INSERT INTO $tempTableName ($targetSql) SELECT $sourceSql FROM $tableName';
 
         FluentLog.sql(insertSql, arguments: const [], tag: '$tableName:migration');
+        await txn.execute(insertSql);
       } else {
         FluentLog.warning('Table reconstruction resulted in empty schema match', tag: '$tableName:migration');
       }
@@ -445,9 +434,6 @@ CREATE TABLE IF NOT EXISTS $pivotName (
       await txn.execute('ALTER TABLE $tempTableName RENAME TO $tableName');
 
       FluentLog.info('Table reconstruction finalized successfully', tag: '$tableName:migration', context: {'table': tableName});
-
-      final List<String> indexQueries = generateIndicesSql();
-      await Future.wait(indexQueries.map((query) => txn.execute(query)));
     } catch (e, s) {
       FluentLog.error('Critical failure during table reconstruction', e, s, tag: '$tableName:migration', context: {'tableName': tableName});
       rethrow;
@@ -609,17 +595,17 @@ CREATE TABLE IF NOT EXISTS $pivotName (
   ///
   /// [executor] The database transaction or instance to execute the schema setup against.
   /// [dao] The provider instance being synchronized.
-  Future<void> syncPivotTables(DatabaseExecutor executor, FluentProvider dao, Set<String> existingTables) async {
-    final bool hasRelations = dao is FluentRelationsMixin;
+  Future<void> syncPivotTables(DatabaseExecutor executor, Set<String> existingTables) async {
+    final bool hasRelations = this is FluentRelationsMixin;
     FluentLog.debug(
-      'Syncing indexes for table',
+      'Syncing pivot tables for table',
       tag: 'FluentDb:syncSchema',
-      context: {'table': dao.tableName, 'hasRelations': hasRelations, 'totalRelations': hasRelations ? dao.resolvedRelations.length : 0},
+      context: {'table': tableName, 'hasRelations': hasRelations, 'totalRelations': hasRelations ? (this as FluentRelationsMixin).resolvedRelations.length : 0},
     );
 
     if (!hasRelations) return;
 
-    final Map<Type, FluentDbRelation<FluentStorable, FluentStorable>> relations = dao.resolvedRelations;
+    final Map<Type, FluentDbRelation<FluentStorable, FluentStorable>> relations = (this as FluentRelationsMixin).resolvedRelations;
     final List<String> relationDetails = relations.entries.map((e) => '${e.key}(${e.value.relationType.name})').toList();
     FluentLog.debug('Checking M2M pivot table integrity', tag: '$tableName:syncPivotTables', context: {'totalRelations': relations.length, 'relationsList': relationDetails.join(', ')});
 
@@ -634,10 +620,10 @@ CREATE TABLE IF NOT EXISTS $pivotName (
 
         final FluentProvider<FluentStorable> childDao = relatedProvider(rel.modelType);
 
-        FluentLog.info('Creating missing pivot table: $pivotName', tag: '$tableName:syncPivotTables', context: {'parent': dao.tableName, 'child': childDao.tableName});
+        FluentLog.info('Creating missing pivot table: $pivotName', tag: '$tableName:syncPivotTables', context: {'parent': tableName, 'child': childDao.tableName});
 
         try {
-          final String sql = dao.generatePivotTableSql(rel, childDao);
+          final String sql = generatePivotTableSql(rel, childDao);
           await executor.execute(sql);
 
           existingTables.add(pivotName);
