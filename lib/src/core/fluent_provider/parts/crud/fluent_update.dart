@@ -291,7 +291,14 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
   /// [syncMode] Determines how nested relations are merged (e.g., preserving local children or replacing them).
   /// [policy] The [ExecutionPolicy] defining task priority and concurrency constraints.
   @internal
-  Future<int> updateAllWithRelations(Iterable<T> items, {FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+  Future<int> updateAllWithRelations(
+    Iterable<T> items, {
+    FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal,
+    ExecutionPolicy policy = const ExecutionPolicy(),
+    bool ignoreLazy = false,
+    int? maxDepth,
+    String? dbName,
+  }) {
     if (items.isEmpty) {
       FluentLog.warning('Batch relational update aborted: input collection is empty', tag: '$tableName:updateAllWithRelations', context: {'tableName': tableName});
       return Future.value(0);
@@ -309,6 +316,8 @@ extension FluentUpdate<T extends FluentStorable> on FluentProvider<T> {
       dbName: dbName ?? this.dbName,
       data: itemList,
       relations: preparedJsons,
+      ignoreLazy: ignoreLazy,
+      maxDepth: maxDepth ?? 0,
       helper: TableHelper(multiple: true, syncMode: syncMode),
       policy: policy,
     );

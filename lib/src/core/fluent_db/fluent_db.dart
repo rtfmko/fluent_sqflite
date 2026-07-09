@@ -742,6 +742,8 @@ class FluentDb {
     FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal,
     Object? tag,
     ExecutionPolicy policy = const ExecutionPolicy(),
+    bool ignoreLazy = false,
+    int? maxDepth,
     FluentDbKey? dbKey,
   }) {
     if (dbKey?.dbName == null) {
@@ -749,7 +751,7 @@ class FluentDb {
     }
     return _executeMixedBatch(
       items,
-      (provider, typedItems) => provider.updateAllWithRelations(typedItems, syncMode: syncMode, policy: policy.withTag(tag), dbName: dbKey?.dbName),
+      (provider, typedItems) => provider.updateAllWithRelations(typedItems, syncMode: syncMode, policy: policy.withTag(tag), ignoreLazy: ignoreLazy, maxDepth: maxDepth, dbName: dbKey?.dbName),
       dbName: dbKey?.dbName,
     );
   }

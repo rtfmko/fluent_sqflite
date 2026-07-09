@@ -259,7 +259,16 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
           orderBy: localOrderBy,
         );
       } else {
-        localData = await find(where: localWhere, whereArgs: localWhereArgs, orderBy: localOrderBy, limit: options.limit, maxDepth: options.maxDepth, policy: policy, ignoreLazy: options.ignoreLazy, dbName: dbName);
+        localData = await find(
+          where: localWhere,
+          whereArgs: localWhereArgs,
+          orderBy: localOrderBy,
+          limit: options.limit,
+          maxDepth: options.maxDepth,
+          policy: policy,
+          ignoreLazy: options.ignoreLazy,
+          dbName: dbName,
+        );
       }
       FluentLog.debug('Cache loaded', tag: 'sync:cache', context: {'count': localData.length, 'model': T.toString(), 'ms': pipelineTimer.elapsedMilliseconds});
       yield FluentDataEvent(phase: FluentPipelinePhase.cacheReady, data: localData, executionMs: pipelineTimer.elapsedMilliseconds);
@@ -373,6 +382,8 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
             executionStrategy: options.executionStrategy,
             policy: policy,
             dbName: dbName,
+            ignoreLazy: options.ignoreLazy,
+            maxDepth: options.maxDepth,
           ).catchError((Object e, StackTrace st) {
             FluentLog.error('Background DB persistence failed', e, st, tag: 'sync:persistence:error');
           });
@@ -453,10 +464,14 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     List<Object?>? localWhereArgs,
     required ExecutionPolicy policy,
     required String? dbName,
+    required bool ignoreLazy,
+    required int maxDepth,
   }) async {
     if (strategy == FluentMergeStrategy.none) return;
 
-    final List<T> localData = (executionStrategy == FluentExecutionStrategy.apiOnly) ? await find(where: localWhere, whereArgs: localWhereArgs, policy: policy, dbName: dbName) : currentLocalData;
+    final List<T> localData = (executionStrategy == FluentExecutionStrategy.apiOnly)
+        ? await find(where: localWhere, whereArgs: localWhereArgs, policy: policy, dbName: dbName, maxDepth: maxDepth, ignoreLazy: ignoreLazy)
+        : currentLocalData;
     final Set<dynamic> localIds = localData.map((e) => e.primaryKeyValue).where((id) => id != null).toSet();
 
     final List<T> itemsToInsert = [];
@@ -480,7 +495,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
         }
 
         if (itemsToUpdate.isNotEmpty) {
-          await updateAllWithRelations(itemsToUpdate, syncMode: relationSyncMode, policy: policy, dbName: dbName);
+          await updateAllWithRelations(itemsToUpdate, syncMode: relationSyncMode, policy: policy, dbName: dbName, ignoreLazy: ignoreLazy, maxDepth: maxDepth);
         }
 
         if (strategy == FluentMergeStrategy.syncDeletions) {
