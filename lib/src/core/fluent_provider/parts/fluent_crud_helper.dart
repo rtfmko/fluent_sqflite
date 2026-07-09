@@ -142,7 +142,15 @@ extension FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
 
     switch (strategy) {
       case FluentSaveStrategy.upsert:
-        batch.insert(tableName, sqlData, conflictAlgorithm: ConflictAlgorithm.replace);
+        final String pkName = _cachedPrimaryKey?.name ?? 'id';
+        final dynamic pkValue = sqlData[pkName];
+
+        if (pkValue != null) {
+          batch.insert(tableName, sqlData, conflictAlgorithm: ConflictAlgorithm.ignore);
+          batch.update(tableName, sqlData, where: '$pkName = ?', whereArgs: [pkValue]);
+        } else {
+          batch.insert(tableName, sqlData);
+        }
         break;
 
       case FluentSaveStrategy.insertOnly:

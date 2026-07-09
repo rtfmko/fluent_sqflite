@@ -790,7 +790,17 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
 
         switch (strategy) {
           case FluentSaveStrategy.upsert:
-            effectiveBatch.insert(childDao.tableName, json, conflictAlgorithm: ConflictAlgorithm.replace);
+            effectiveBatch.insert(childDao.tableName, json, conflictAlgorithm: ConflictAlgorithm.ignore);
+
+            final Map<String, dynamic> updateData = <String, dynamic>{};
+            final Set<String> relKeys = childDao.relationKeys;
+            for (final MapEntry<String, dynamic> entry in json.entries) {
+              if (!relKeys.contains(entry.key)) {
+                updateData[entry.key] = entry.value;
+              }
+            }
+
+            effectiveBatch.update(childDao.tableName, updateData, where: '$childPkName = ?', whereArgs: [id]);
             break;
 
           case FluentSaveStrategy.patch:
