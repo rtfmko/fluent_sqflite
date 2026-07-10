@@ -592,6 +592,30 @@ extension FluentDataEventX<T> on FluentDataEvent<T> {
   /// Returns `true` if the pipeline encountered an exception during execution.
   bool get hasError => phase == FluentPipelinePhase.error || error != null;
 
+  /// Determines if the current event state is suitable for UI rendering.
+  ///
+  /// Returns `true` when the pipeline provides a usable dataset—either from
+  /// local cache ([FluentPipelinePhase.cacheReady]) or a successful final
+  /// synchronization ([FluentPipelinePhase.completed]).
+  ///
+  /// Use this in `buildWhen` logic (e.g., in BLoC or StreamBuilder) to filter out
+  /// transient states and prevent UI flickering.
+  bool get shouldRenderUi => phase == FluentPipelinePhase.cacheReady || phase == FluentPipelinePhase.completed;
+
+  /// Returns `true` if the current payload originates from the local database.
+  ///
+  /// This indicates the data may be temporally stale depending on the
+  /// synchronization strategy. Use this to display \"offline\" or \"stale\"
+  /// indicators to the user.
+  bool get isCachedData => source == FluentDataSource.cache;
+
+  /// Returns `true` if the current payload is authoritative, fetched directly
+  /// from the remote backend.
+  ///
+  /// Use this to confirm that the displayed data is up-to-date and reflects
+  /// the latest server-side state.
+  bool get isFreshData => source == FluentDataSource.api;
+
   /// Strict functional pattern matching for event states.
   ///
   /// Forces the handling of all possible outcomes. Each callback receives the

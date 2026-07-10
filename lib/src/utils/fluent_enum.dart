@@ -671,3 +671,33 @@ enum FluentApiErrorBehavior {
   /// and user-facing notifications.
   preserveCacheAndComplete,
 }
+
+/// Represents the provenance (origin) of the data payload within a [FluentDataEvent].
+///
+/// This metadata is critical for downstream UI consumers to distinguish between
+/// "offline-ready" cached data and "fresh" network-synchronized data. It allows
+/// developers to implement features like "offline mode" indicators, stale data
+/// warnings, or perform granular data reconciliation without needing complex
+/// external state management.
+enum FluentDataSource {
+  /// Represents an uninitialized or transient state where no data payload is available.
+  ///
+  /// Use this for pipeline event phases that act as control signals (e.g., initial
+  /// loading status, stream subscriptions, or empty-state transitions) where
+  /// no actual model data is attached.
+  none,
+
+  /// Signifies that the data was retrieved from the local SQLite database.
+  ///
+  /// Data from this source is immediately available for UI rendering, providing
+  /// low-latency performance. However, depending on the sync strategy, this
+  /// data may be temporally stale relative to the server-side state.
+  cache,
+
+  /// Indicates that the data was successfully fetched from the remote backend.
+  ///
+  /// This represents the "Source of Truth" for the current entity state.
+  /// UI components receiving this source can typically assume the data is
+  /// up-to-date and reflects the most recent network transaction.
+  api,
+}

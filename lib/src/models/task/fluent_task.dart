@@ -166,7 +166,7 @@ class FluentTask {
     isSystem: map['isSystem'] is bool ? map['isSystem'] as bool : false,
     policy: map['policy'] is Map<String, dynamic> ? ExecutionPolicy.fromMap(map['policy'] as Map<String, dynamic>) : const ExecutionPolicy(),
     force: map['force'] is bool ? map['force'] as bool : false,
-    mergedTasks: map['mergedTasks'] is List<FluentTask> ? (map['mergedTasks'] as List).whereType<FluentTask>().toList() : null,
+    mergedTasks: map['mergedTasks'] is List ? (map['mergedTasks'] as List).map((e) => FluentTask.fromMap(e as Map<String, dynamic>)).toList() : null,
   );
 
   /// Generates a unique "fingerprint" for this task based on its critical parameters.
@@ -196,6 +196,14 @@ class FluentTask {
           sb.write('${arg.runtimeType}:$arg,');
         }
       }
+    }
+
+    if (action.isWriteOp && data != null) {
+      sb.write('${data.hashCode}:');
+    }
+
+    if (relations != null) {
+      sb.write('${relations.hashCode}:');
     }
 
     final String fingerprint = sb.toString();
@@ -318,6 +326,16 @@ class FluentTask {
 
   @override
   String toString() {
-    return 'FluentTask{id: $id, table: $table, dbName: $dbName, action: $action, maxDepth: $maxDepth, ignoreLazy: $ignoreLazy, force: $force, helper: $helper, policy: $policy, isSystem: $isSystem, staticWeight: $staticWeight, executionWeight: $executionWeight, fingerprint: $fingerprint}';
+    final StringBuffer sb = StringBuffer('FluentTask{id: $id, table: $table, action: ${action.name}');
+    if (dbName.isNotEmpty) sb.write(', dbName: $dbName');
+    if (maxDepth != 1) sb.write(', maxDepth: $maxDepth');
+    if (ignoreLazy) sb.write(', ignoreLazy: true');
+    if (force) sb.write(', force: true');
+    if (isSystem) sb.write(', isSystem: true');
+    if (helper != null) sb.write(', helper: $helper');
+    if (policy != const ExecutionPolicy()) sb.write(', policy: $policy');
+    if (mergedTasks != null && mergedTasks!.isNotEmpty) sb.write(', mergedTasksCount: ${mergedTasks!.length}');
+    sb.write(', weight: $staticWeight/$executionWeight, hash: $fingerprint}');
+    return sb.toString();
   }
 }

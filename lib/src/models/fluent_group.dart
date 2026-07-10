@@ -98,6 +98,15 @@ class FluentGroup {
 
   @override
   String toString() {
-    return 'FluentGroup{dbName: $dbKey.dbName, providerList: $providerList, performanceConfig: $performanceConfig}';
+    final StringBuffer sb = StringBuffer('FluentGroup{');
+    final List<String> parts = [];
+
+    parts.add('dbKey: $dbKey');
+    parts.add('providerCount: ${providerList.length}');
+    parts.add('performance: $performanceConfig');
+
+    sb.write(parts.join(', '));
+    sb.write('}');
+    return sb.toString();
   }
 }

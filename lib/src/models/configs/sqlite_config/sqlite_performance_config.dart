@@ -163,6 +163,22 @@ class SQLitePerformanceConfig {
 
   @override
   String toString() {
-    return 'SQLitePerformanceConfig{enableForeignKeys: $enableForeignKeys, journalMode: $journalMode, synchronous: $synchronous, cacheSize: $cacheSize, tempStoreInMemory: $tempStoreInMemory}';
+    final StringBuffer sb = StringBuffer('SQLitePerformanceConfig{');
+    final List<String> parts = [];
+
+    parts.add('journal: ${journalMode.name}');
+    parts.add('sync: ${synchronous.name}');
+    parts.add('cache: $cacheSize');
+    parts.add('strategy: ${queueStrategy.name}');
+
+    if (enableForeignKeys) parts.add('fk: true');
+    if (tempStoreInMemory) parts.add('tempStore: mem');
+    if (enableConcurrentReads == true) parts.add('concurrentReads: true');
+
+    parts.add('tuning: [maxReads: $_maxConcurrentReads, aging: $_queueAgingPercentage%, sub: $_queueAgingSubtract]');
+
+    sb.write(parts.join(', '));
+    sb.write('}');
+    return sb.toString();
   }
 }

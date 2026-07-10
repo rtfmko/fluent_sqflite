@@ -33,6 +33,22 @@ class FluentSystemAlert {
 
   @override
   String toString() {
-    return 'FluentSystemAlert{message: $message, tag: $tag, context: $context, exception: $exception}';
+    final StringBuffer sb = StringBuffer('FluentSystemAlert{');
+    final List<String> parts = [];
+
+    parts.add('tag: "$tag"');
+    parts.add('message: "$message"');
+
+    if (context != null && context!.isNotEmpty) {
+      parts.add('context: $context');
+    }
+
+    if (exception != null) {
+      parts.add('exception: $exception');
+    }
+
+    sb.write(parts.join(', '));
+    sb.write('}');
+    return sb.toString();
   }
 }

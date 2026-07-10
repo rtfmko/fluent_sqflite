@@ -27,5 +27,17 @@ class FluentChangeEvent<T> {
   FluentChangeEvent({required this.modelType, required this.action, this.items = const [], this.customTag});
 
   @override
-  String toString() => 'ChangeEvent(type: $modelType, action: ${action.name}, tag: $customTag)';
+  String toString() {
+    final StringBuffer sb = StringBuffer('FluentChangeEvent{');
+    sb.write('model: ${modelType.toString()}');
+    sb.write(', action: ${action.name}');
+    sb.write(', itemsCount: ${items.length}');
+
+    if (customTag != null) {
+      sb.write(', tag: $customTag');
+    }
+
+    sb.write('}');
+    return sb.toString();
+  }
 }

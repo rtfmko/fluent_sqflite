@@ -375,7 +375,7 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
 
       final FluentProvider childDao = FluentDb.providerForType(childType, dbName: task.dbName);
 
-      if (task.action != FluentDbAction.save && rel.isLazy && !task.ignoreLazy) continue;
+      if (!task.action.isWriteOp && rel.isLazy && !task.ignoreLazy) continue;
       if (visitedTables != null && visitedTables.contains(childDao.tableName)) continue;
 
       if (rel.updateMode == FluentRelationUpdateMode.readOnly) continue;

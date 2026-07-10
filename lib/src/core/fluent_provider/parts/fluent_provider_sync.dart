@@ -271,11 +271,11 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
         );
       }
       FluentLog.debug('Cache loaded', tag: 'sync:cache', context: {'count': localData.length, 'model': T.toString(), 'ms': pipelineTimer.elapsedMilliseconds});
-      yield FluentDataEvent(phase: FluentPipelinePhase.cacheReady, data: localData, executionMs: pipelineTimer.elapsedMilliseconds);
+      yield FluentDataEvent(phase: FluentPipelinePhase.cacheReady, data: localData, source: FluentDataSource.cache, executionMs: pipelineTimer.elapsedMilliseconds);
 
       if (options.executionStrategy == FluentExecutionStrategy.cacheOnly) {
         FluentLog.info('Execution strategy is cacheOnly. Terminating pipeline.', tag: 'sync:pipeline');
-        yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: localData, executionMs: pipelineTimer.elapsedMilliseconds);
+        yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: localData, source: FluentDataSource.cache, executionMs: pipelineTimer.elapsedMilliseconds);
         return;
       }
     }
@@ -415,7 +415,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
     pipelineTimer.stop();
     FluentLog.info('Sync completed successfully', tag: 'sync:pipeline', context: {'total_ms': pipelineTimer.elapsedMilliseconds});
 
-    yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: apiData, executionMs: pipelineTimer.elapsedMilliseconds);
+    yield FluentDataEvent(phase: FluentPipelinePhase.completed, data: apiData, source: FluentDataSource.api, executionMs: pipelineTimer.elapsedMilliseconds);
   }
 
   /// Executes a cleanup operation on the local database for the entity type [T].

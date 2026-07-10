@@ -238,6 +238,26 @@ class FluentDbColumn {
 
   @override
   String toString() {
-    return 'FluentDbColumn{name: $name, type: $type, oldName: $oldName, customSql: $customSql, isPrimaryKey: $isPrimaryKey, isAutoIncrement: $isAutoIncrement, isNotNull: $isNotNull, isUnique: $isUnique, defaultValue: $defaultValue, checkConstraint: $checkConstraint}';
+    final StringBuffer sb = StringBuffer('FluentDbColumn{');
+    final List<String> parts = [];
+
+    parts.add('name: "$name"');
+    parts.add('type: ${type.name}');
+
+    if (isPrimaryKey) parts.add('isPK: true');
+    if (isAutoIncrement) parts.add('isAutoIncrement: true');
+    if (isNotNull) parts.add('isNotNull: true');
+    if (isUnique) parts.add('isUnique: true');
+    if (indexed) parts.add('indexed: true');
+    if (autoCorrectAllowed) parts.add('autoCorrect: true');
+
+    if (oldName != null) parts.add('oldName: "$oldName"');
+    if (defaultValue != null) parts.add('defaultValue: "$defaultValue"');
+    if (checkConstraint != null) parts.add('check: "$checkConstraint"');
+    if (customSql != null) parts.add('customSql: "$customSql"');
+
+    sb.write(parts.join(', '));
+    sb.write('}');
+    return sb.toString();
   }
 }

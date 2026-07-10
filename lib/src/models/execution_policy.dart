@@ -18,8 +18,8 @@ class ExecutionPolicy {
   /// Essential for memory management when dealing with large datasets.
   final int? chunkSize;
 
-  /// If true, the coordinator will drop the current task if an identical
-  /// task (based on [FluentTask.fingerprint]) is already awaiting execution.
+  /// The maximum duration to wait for a task to be processed before timing out.
+  /// If exceeded, the task will be aborted and an error emitted.
   final Duration? timeout;
 
   /// If true, the coordinator will drop the current task if an identical
@@ -160,6 +160,17 @@ class ExecutionPolicy {
 
   @override
   String toString() {
-    return 'ExecutionPolicy{priority: $priority, chunkSize: $chunkSize, timeout: $timeout, cancelIfDuplicate: $cancelIfDuplicate}';
+    final StringBuffer sb = StringBuffer('ExecutionPolicy{');
+    final List<String> parts = [];
+
+    if (priority != null) parts.add('priority: $priority');
+    if (chunkSize != null) parts.add('chunkSize: $chunkSize');
+    if (timeout != null) parts.add('timeout: ${timeout!.inMilliseconds}ms');
+    if (cancelIfDuplicate == true) parts.add('cancelIfDuplicate: true');
+    if (customTag != null) parts.add('customTag: $customTag');
+
+    sb.write(parts.join(', '));
+    sb.write('}');
+    return sb.toString();
   }
 }

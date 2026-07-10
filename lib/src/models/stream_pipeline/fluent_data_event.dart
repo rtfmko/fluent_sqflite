@@ -29,9 +29,41 @@ class FluentDataEvent<T> {
   /// of the synchronization process at each phase.
   final int? executionMs;
 
+  /// The provenance (origin) of the data payload.
+  ///
+  /// This indicates whether the [data] was retrieved from the local database
+  /// ([FluentDataSource.cache]) or fetched directly from the remote backend
+  /// ([FluentDataSource.api]).
+  ///
+  /// Use this to implement data freshness indicators in the UI or to
+  /// conditionally execute business logic based on the authority of the data source.
+  final FluentDataSource source;
+
   /// Returns `true` if the pipeline has finished its execution (successfully or not).
   bool get isTerminal => phase == FluentPipelinePhase.completed || phase == FluentPipelinePhase.error;
 
   /// Creates a [FluentDataEvent].
-  const FluentDataEvent({required this.phase, this.data = const [], this.error, this.executionMs});
+  const FluentDataEvent({required this.phase, this.data = const [], this.error, this.executionMs, this.source = FluentDataSource.none});
+
+  @override
+  String toString() {
+    final StringBuffer sb = StringBuffer('FluentDataEvent{');
+    final List<String> parts = [];
+
+    parts.add('phase: ${phase.name}');
+    parts.add('source: ${source.name}');
+    parts.add('items: ${data.length}');
+
+    if (executionMs != null) {
+      parts.add('ms: $executionMs');
+    }
+
+    if (error != null) {
+      parts.add('error: $error');
+    }
+
+    sb.write(parts.join(', '));
+    sb.write('}');
+    return sb.toString();
+  }
 }

@@ -22,7 +22,13 @@ abstract class FluentException implements Exception {
   FluentException(this.message, this.stackTrace, [this.originalError]);
 
   @override
-  String toString() =>
-      '[$runtimeType] $message ${originalError ?? ''}'
-      '${stackTrace != null ? "\nOriginal StackTrace:\n$stackTrace" : ""}';
+  String toString() {
+    final StringBuffer sb = StringBuffer('[$runtimeType]: $message');
+
+    if (originalError != null) {
+      sb.write(' | Cause: $originalError');
+    }
+
+    return sb.toString();
+  }
 }

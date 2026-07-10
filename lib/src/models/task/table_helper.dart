@@ -188,6 +188,26 @@ class TableHelper {
 
   @override
   String toString() {
-    return 'TableHelper{limit: $limit, offset: $offset, where: $where, whereArgs: $whereArgs, orderBy: $orderBy, id: $id, key: $key, value: $value, dataMap: $dataMap, saveStrategy: $saveStrategy, onlyValid: $onlyValid, sortDirection: $sortDirection, sql: $sql, arguments: $arguments, multiple: $multiple, column: $column, isHardDelete: $isHardDelete, syncMode: $syncMode}';
+    final StringBuffer sb = StringBuffer('TableHelper{');
+    final List<String> parts = [];
+
+    if (limit != null) parts.add('limit: $limit');
+    if (offset != null) parts.add('offset: $offset');
+    if (where != null) parts.add('where: "$where"');
+    if (whereArgs != null) parts.add('args: $whereArgs');
+    if (orderBy != null) parts.add('orderBy: $orderBy');
+    if (id != null) parts.add('id: $id');
+    if (key != null) parts.add('key: $key, value: $value');
+    if (dataMap != null) parts.add('dataKeys: ${dataMap!.keys.toList()}');
+    if (sql != null) parts.add('sql: $sql');
+    if (onlyValid) parts.add('onlyValid: true');
+    if (isHardDelete) parts.add('isHardDelete: true');
+    if (sortDirection != null) parts.add('sort: ${sortDirection!.name}');
+    if (syncMode != FluentRelationSyncMode.preserveLocal) parts.add('syncMode: ${syncMode.name}');
+    if (saveStrategy != FluentSaveStrategy.upsert) parts.add('strategy: ${saveStrategy.name}');
+
+    sb.write(parts.join(', '));
+    sb.write('}');
+    return sb.toString();
   }
 }

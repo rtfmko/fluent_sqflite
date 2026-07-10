@@ -232,7 +232,7 @@ abstract class FluentStorable {
   @internal
   void injectRelationId(String key, dynamic value) {
     fsMetadataInternal[key] = value;
-    FluentLog.debug('Internal relation ID injected', tag: 'FluentStorable:injectRelation', context: {'key': key, 'value' : value});
+    FluentLog.debug('Internal relation ID injected', tag: 'FluentStorable:injectRelation', context: {'key': key, 'value': value});
   }
 
   /// Generates the full database schema for the current model.
@@ -487,8 +487,33 @@ abstract class FluentStorable {
     return model;
   }
 
-  @override
-  String toString() {
-    return 'FluentStorable{expiryColumn: $expiryColumn, migrations: $migrations, expiryDate: $expiryDate, expiryDuration: $expiryDuration}';
+  /// Helper to format the object's state in a clean, consistent way.
+  /// Skips null values to keep logs readable.
+  @protected
+  String formatToString(Map<String, Object?> fields) {
+    final StringBuffer sb = StringBuffer('$runtimeType{');
+    final List<String> parts = [];
+
+    fields.forEach((key, value) {
+      if (value != null) {
+        if (value is Iterable && value.isEmpty) return;
+        if (value is Map && value.isEmpty) return;
+
+        parts.add('$key: $value');
+      }
+    });
+
+    sb.write(parts.join(', '));
+    sb.write('}');
+    return sb.toString();
   }
+
+  @override
+  String toString() => formatToString({
+    'expiryDate': expiryDate,
+    'expiryDuration': expiryDuration,
+    'unloadedRelations': unloadedRelations.isNotEmpty ? unloadedRelations : null,
+    'dynamicFields': _dynamicStore.isNotEmpty ? _dynamicStore : null,
+    'primaryKey': primaryKey,
+  });
 }
