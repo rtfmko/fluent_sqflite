@@ -1801,7 +1801,7 @@ class FluentDb {
   /// ```
   /// *Note: This method is non-blocking and provides a [Stream] of [FluentDataEvent].*
   static Stream<FluentDataEvent<T>> reactiveSync<T extends FluentStorable>({
-    required Future<FluentApiResponse<T>> Function() fetchFromApi,
+    required Future<FluentApiResponse<T?>> Function() fetchFromApi,
     FluentSyncOptions<T> options = const FluentSyncOptions(),
     String? localWhere,
     List<Object?>? localWhereArgs,
