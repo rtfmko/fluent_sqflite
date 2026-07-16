@@ -228,7 +228,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
   /// });
   /// ```
   Stream<FluentDataEvent<T>> reactiveSync({
-    required Future<FluentApiResponse<T>> Function() fetchFromApi,
+    required Future<FluentApiResponse<T?>> Function() fetchFromApi,
     FluentSyncOptions<T> options = const FluentSyncOptions(),
     String? localWhere,
     List<Object?>? localWhereArgs,
@@ -282,7 +282,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
 
     yield FluentDataEvent(phase: FluentPipelinePhase.loadingApi, executionMs: pipelineTimer.elapsedMilliseconds);
 
-    FluentApiResponse<T>? response;
+    FluentApiResponse<T?>? response;
     int attempts = 0;
     Object? lastError;
 
@@ -338,7 +338,7 @@ extension FluentProviderSyncExtension<T extends FluentStorable> on FluentProvide
       return;
     }
 
-    List<T> apiData = response?.data ?? [];
+    List<T> apiData = response?.data?.whereType<T>().toList() ?? [];
 
     if (apiData.isEmpty) {
       FluentLog.info('Empty API response', tag: 'sync:api');
