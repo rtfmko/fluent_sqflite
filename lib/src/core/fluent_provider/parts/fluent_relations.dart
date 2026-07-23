@@ -654,6 +654,55 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       }
     }
 
+    final Set<dynamic> parentIdsToCheck = {};
+    for (int i = 0; i < fixedRawList.length; i++) {
+      if (fixedRawList[i] != null) {
+        dynamic pId;
+        final dynamic childElement = fixedRawList[i];
+        if (childElement is FluentStorable) {
+          pId = childElement.buildJson()[effectiveRemoteKey];
+        } else if (childElement is Map) {
+          pId = childElement[effectiveRemoteKey];
+        }
+        if (pId != null) parentIdsToCheck.add(pId);
+      }
+    }
+
+    if (parentIdsToCheck.isNotEmpty) {
+      final Set<dynamic> actuallyExistingParents = {};
+      final List<dynamic> parentIdList = parentIdsToCheck.toList();
+      final int chunkSize = task.policy.effectiveChunkSize;
+
+      for (int i = 0; i < parentIdList.length; i += chunkSize) {
+        final chunk = parentIdList.sublist(i, i + chunkSize > parentIdList.length ? parentIdList.length : i + chunkSize);
+        final placeholders = List.filled(chunk.length, '?').join(', ');
+
+        final List<Map<String, Object?>> rows = await txn!.rawQuery('SELECT $parentPkName FROM $currentTableName WHERE $parentPkName IN ($placeholders)', chunk);
+
+        for (final row in rows) {
+          actuallyExistingParents.add(row[parentPkName]);
+        }
+      }
+
+      final List<dynamic> missingParentIds = parentIdList.where((id) => !actuallyExistingParents.contains(id)).toList();
+
+      if (missingParentIds.isNotEmpty) {
+        FluentLog.warning(
+          'Relational integrity risk detected: Hydrating children for unverified parent entities',
+          tag: '$tableName:relations',
+          context: {
+            'parentTable': currentTableName,
+            'childTable': childDao.tableName,
+            'missingParentIds': missingParentIds.toString(),
+            'hint':
+                'These parent IDs are not yet physically committed to the database. '
+                'If they fail to insert during this transaction batch, saving these children '
+                'will trigger a Foreign Key constraint exception (787).',
+          },
+        );
+      }
+    }
+
     final List<FluentStorable> flatChildrenList = childDao._createTypedList(fixedRawList);
 
     if (flatChildrenList.isNotEmpty) {
@@ -835,6 +884,43 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       }
     }
 
+    if (existingChildrenToUpsert.isNotEmpty) {
+      final List<dynamic> upsertTargetIds = existingChildrenToUpsert.map((c) => childToSqlJson[c]?[childPkName]).where((id) => id != null).toList();
+
+      if (upsertTargetIds.isNotEmpty) {
+        final Set<dynamic> actuallyExistingIds = {};
+        final int chunkSize = task.policy.effectiveChunkSize;
+
+        for (int i = 0; i < upsertTargetIds.length; i += chunkSize) {
+          final List<dynamic> chunk = upsertTargetIds.sublist(i, i + chunkSize > upsertTargetIds.length ? upsertTargetIds.length : i + chunkSize);
+          final String placeholders = List.filled(chunk.length, '?').join(', ');
+
+          final List<Map<String, Object?>> rows = await txn!.rawQuery('SELECT $childPkName FROM ${childDao.tableName} WHERE $childPkName IN ($placeholders)', chunk);
+
+          for (final Map<String, Object?> row in rows) {
+            actuallyExistingIds.add(row[childPkName]);
+          }
+        }
+
+        final List<dynamic> missingIds = upsertTargetIds.where((id) => !actuallyExistingIds.contains(id)).toList();
+
+        if (missingIds.isNotEmpty) {
+          FluentLog.warning(
+            'Relational integrity risk detected: Attempting to link unresolved child entities',
+            tag: '$tableName:relations',
+            context: {
+              'childTable': childDao.tableName,
+              'missingIds': missingIds.toString(),
+              'hint':
+                  'These IDs do not currently exist in the database. If the batch upsert fails to create them '
+                  '(e.g., due to missing NOT NULL fields in a partial API model), the ORM will safely skip '
+                  'their pivot linkage to prevent a Foreign Key constraint crash.',
+            },
+          );
+        }
+      }
+    }
+
     final Set<String> uniquePairs = <String>{};
 
     for (final MapEntry<int, List<FluentStorable>> entry in parentIndexToChildren.entries) {
@@ -886,8 +972,14 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
 
         final String pairKey = '$parentId:$childId';
         if (uniquePairs.add(pairKey)) {
-          final Map<String, dynamic> pivotRecord = {pivotParentKey: parentId, pivotChildKey: childId};
-          effectiveBatch.insert(pivotTable, pivotRecord, conflictAlgorithm: ConflictAlgorithm.replace);
+          final String safeInsertSql =
+              '''
+            INSERT OR REPLACE INTO $pivotTable ($pivotParentKey, $pivotChildKey)
+            SELECT ?, ?
+            WHERE EXISTS (SELECT 1 FROM ${childDao.tableName} WHERE $childPkName = ?)
+          ''';
+
+          effectiveBatch.rawInsert(safeInsertSql, [parentId, childId, childId]);
         }
       }
     }
@@ -1001,10 +1093,21 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
         sql = 'UPDATE $table SET $column = NULL WHERE $column IN ($placeholders)$polyClause';
       }
 
-      if (batch != null) {
-        isDelete ? batch.rawDelete(sql, args) : batch.rawUpdate(sql, args);
-      } else {
-        isDelete ? await txn!.rawDelete(sql, args) : await txn!.rawUpdate(sql, args);
+      try {
+        if (batch != null) {
+          isDelete ? batch.rawDelete(sql, args) : batch.rawUpdate(sql, args);
+        } else {
+          isDelete ? await txn!.rawDelete(sql, args) : await txn!.rawUpdate(sql, args);
+        }
+      } catch (e, st) {
+        FluentLog.error(
+          'Failed to execute relational teardown chunk',
+          e,
+          st,
+          tag: '$table:relations:teardown',
+          context: {'operation': isDelete ? 'DELETE' : 'UPDATE (NULLIFY)', 'column': column, 'chunkSize': chunk.length},
+        );
+        rethrow;
       }
     }
   }

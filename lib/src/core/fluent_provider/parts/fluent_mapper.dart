@@ -656,7 +656,7 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
 
     FluentLog.debug('Initiating batched processing', tag: '$tableName:batch', context: {'totalItems': totalItems, 'batchSize': batchSize});
 
-    final List<R> results = List<R>.filled(totalItems, null as R);
+    final List<R> results = <R>[];
 
     for (int i = 0; i < totalItems; i += batchSize) {
       final int end = (i + batchSize < totalItems) ? i + batchSize : totalItems;
@@ -668,9 +668,7 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
 
       final List<R> processedChunk = await Future.wait(chunkFutures);
 
-      for (int j = 0; j < currentChunkLength; j++) {
-        results[i + j] = processedChunk[j];
-      }
+      results.addAll(processedChunk);
 
       if (end < totalItems) {
         await Future<void>.delayed(Duration.zero);
