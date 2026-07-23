@@ -360,3 +360,30 @@ class FluentDatabaseNotFoundException extends FluentException {
   FluentDatabaseNotFoundException(this.dbName, [StackTrace? stackTrace])
     : super('Database "$dbName" is not registered. Ensure that it was initialized in FluentDb.init() or FluentEngine.', stackTrace);
 }
+
+/// Exception thrown when a [FluentTask] is aborted or purged from the queue
+/// before execution.
+///
+/// Typically occurs during structural changes, such as clearing a database
+/// or table context, where pending tasks are invalidated to ensure safety.
+class FluentTaskCancelledException extends FluentException {
+  /// The specific component within the engine where the task was cancelled.
+  final String component;
+
+  /// The engine working task that was cancelled.
+  final FluentTask? task;
+
+  /// Creates a [FluentTaskCancelledException].
+  ///
+  /// * [message]: A brief explanation of why the task was cancelled.
+  /// * [component]: The internal module where the cancellation originated.
+  /// * [task]: Optional reference to the task that was aborted.
+  /// * [originalError]: Optional underlying error or reason for cancellation.
+  /// * [stackTrace]: The execution path leading to the task cancellation.
+  FluentTaskCancelledException(String message, {required this.component, this.task, dynamic originalError, StackTrace? stackTrace}) : super(message, stackTrace, originalError);
+
+  @override
+  String toString() =>
+      'FluentTaskCancelledException: [$component] $message'
+      '${task != null ? '\nTask: $task' : ''}';
+}

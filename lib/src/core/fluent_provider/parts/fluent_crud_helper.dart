@@ -102,7 +102,7 @@ extension FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
   /// * Sanitizes extraneous keys to prevent underlying SQLite syntax errors.
   /// * Fires warning telemetry via [FluentLog.warning] if any model attributes were stripped.
   /// * Configures structural [FluentSaveStrategy] states according to the [strategy] modifier.
-  void _upsertItemInTxn(Batch batch, Map<String, dynamic> map, FluentSaveStrategy strategy) {
+  int _upsertItemInTxn(Batch batch, Map<String, dynamic> map, FluentSaveStrategy strategy) {
     final Set<String> allowedColumns = tableColumns;
 
     // Evaluate input map structure against the verified schema constraints
@@ -148,14 +148,15 @@ extension FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
         if (pkValue != null) {
           batch.insert(tableName, sqlData, conflictAlgorithm: ConflictAlgorithm.ignore);
           batch.update(tableName, sqlData, where: '$pkName = ?', whereArgs: [pkValue]);
+          return 2;
         } else {
           batch.insert(tableName, sqlData);
+          return 1;
         }
-        break;
 
       case FluentSaveStrategy.insertOnly:
         batch.insert(tableName, sqlData, conflictAlgorithm: ConflictAlgorithm.ignore);
-        break;
+        return 1;
 
       case FluentSaveStrategy.patch:
       case FluentSaveStrategy.updateOnly:
@@ -164,10 +165,11 @@ extension FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
 
         if (pkValue != null) {
           batch.update(tableName, sqlData, where: '$pkName = ?', whereArgs: [pkValue]);
+          return 1;
         } else {
           FluentLog.warning('Update strategy used but no primary key found in payload. Skipping record.', tag: '$tableName:schema:upsertItemExecutor');
+          return 0;
         }
-        break;
     }
   }
 

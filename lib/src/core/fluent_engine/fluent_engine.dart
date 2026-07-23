@@ -1407,7 +1407,7 @@ class FluentEngine {
     for (final int id in taskIdsToCancel) {
       final Completer<dynamic>? completer = _pendingRequests.remove(id);
       if (completer != null && !completer.isCompleted) {
-        completer.completeError(FluentEngineException('Task purged due to structural clear', component: 'purgePendingTasks'));
+        completer.completeError(FluentTaskCancelledException('Task purged due to structural clear', component: 'purgePendingTasks'));
       }
     }
 

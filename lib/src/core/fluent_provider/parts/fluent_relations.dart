@@ -206,6 +206,11 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     final Set<String> currentVisited = visitedTables ?? <String>{};
     currentVisited.add(tableName);
 
+    // Tracking Exact Batch Indices
+    int currentBatchIndex = 0;
+    final List<int?> idResultIndices = List.filled(itemsLength, null, growable: false);
+    final String pkName = primaryKeyColumn.name;
+
     // Iterative Batch Processing: Flatten domain models into SQL-safe maps
     for (int i = 0; i < itemsLength; i++) {
       final dynamic item = items[i];
@@ -229,7 +234,12 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
           }
         }
 
-        _upsertItemInTxn(batch, flatSqlJson, saveStrategy);
+        if (flatSqlJson[pkName] == null) {
+          idResultIndices[i] = currentBatchIndex;
+        }
+
+        final int commandsAdded = _upsertItemInTxn(batch, flatSqlJson, saveStrategy);
+        currentBatchIndex += commandsAdded;
       }
     }
 
@@ -241,16 +251,15 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
       _checkBatchResults(results);
 
       if (sqlJsonCache != null) {
-        final String pkName = primaryKeyColumn.name;
-
         for (int i = 0; i < itemsLength; i++) {
-          if (i < results.length) {
-            final res = results[i];
+          final int? targetIndex = idResultIndices[i];
+
+          if (targetIndex != null && targetIndex < results.length) {
+            final Object? res = results[targetIndex];
             if (res is int) {
               if (sqlJsonCache[i].isNotEmpty) {
                 sqlJsonCache[i][pkName] = res;
               }
-            } else {
               if (modelItems != null && i < modelItems.length) {
                 modelItems[i].injectRelationId(pkName, res);
               }
