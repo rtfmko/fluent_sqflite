@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 
 import '../../fluent_sqflite.dart';
 import '../core/fluent_sqlite_internal.dart';
@@ -329,20 +330,35 @@ abstract class FluentStorable {
   /// ### Logic:
   /// - **Primary Keys:** Specifically handled to enforce auto-incrementing integers or text IDs.
   /// - **Primitives:** Maps Dart types (`int`, `double`, `bool`, `DateTime`, `String`) to standard SQL types.
-  /// - **Collections:** Maps `List` or `Map` to `TEXT` (usually for JSON storage).
+  /// - **Collections & Complex:** Maps `List`, `Map`, `Enum`, `Uri`, etc., to `TEXT`.
   ///
   /// @throws [FluentSchemaException] if the type is unrecognized, prompting the
   /// user to define it explicitly in `missingColumns`.
   FluentDbColumn _inferColumnType(String key, dynamic value) {
-    // Direct type-to-SQL mapping
+    // --- Direct type-to-SQL mapping (Primitives) ---
     if (value is int) return FluentDbColumn.integer(key);
     if (value is double) return FluentDbColumn.real(key);
     if (value is bool) return FluentDbColumn.boolean(key);
     if (value is DateTime) return FluentDbColumn.timestamp(key);
     if (value is String) return FluentDbColumn.text(key);
+    if (value is Uint8List) return FluentDbColumn.blob(key);
 
-    // Collections are serialized as TEXT/JSON
-    if (value is List || value is Map) return FluentDbColumn.text(key);
+    // --- Dart Core Types ---
+    if (value is Duration) return FluentDbColumn.integer(key);
+    if (value is BigInt) return FluentDbColumn.text(key);
+    if (value is RegExp) return FluentDbColumn.text(key);
+    if (value is Uri) return FluentDbColumn.text(key);
+
+    // --- Flutter Specific Types ---
+    if (value is Color) return FluentDbColumn.integer(key);
+    if (value is Locale) return FluentDbColumn.text(key);
+    if (value is TimeOfDay) return FluentDbColumn.text(key);
+
+    // --- Collections & Enums ---
+    // Serialized as TEXT (JSON or String representation)
+    if (value is List || value is Map || value is Enum) {
+      return FluentDbColumn.text(key);
+    }
 
     throw FluentSchemaException(
       modelName: runtimeType.toString(),
@@ -427,14 +443,16 @@ abstract class FluentStorable {
   /// column definitions when the schema builder encounters unknown field types.
   ///
   /// ### Mapping Logic:
-  /// - **Numbers:** `int` -> `integer`, `double` -> `real`.
+  /// - **Numbers/Complex (Int based):** `int`, `Color`, and `Duration` -> `integer`; `double` -> `real`.
   /// - **Booleans/Dates:** Map to `boolean` and `timestamp` respectively.
   /// - **Binary:** `Uint8List` maps to `blob` for efficient binary storage.
-  /// - **Complex/Default:** `List`, `Map`, `String`, and unknown types default
-  ///   to `text` (typically handled as serialized JSON strings).
+  /// - **Complex/Default:** `List`, `Map`, `String`, `Locale`, `Uri`, `TimeOfDay`,
+  ///   and unknown types default to `text` (typically handled as serialized strings).
   String _mapDartTypeToMethod(String? dartType) {
     switch (dartType) {
       case 'int':
+      case 'Color':
+      case 'Duration':
         return 'integer';
       case 'double':
         return 'real';
@@ -448,6 +466,9 @@ abstract class FluentStorable {
       case 'Map':
       case 'Null':
       case 'String':
+      case 'Locale':
+      case 'Uri':
+      case 'TimeOfDay':
       default:
         return 'text';
     }

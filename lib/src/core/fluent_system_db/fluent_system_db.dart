@@ -72,7 +72,7 @@ class _FluentSystemDb {
     try {
       await _systemStatsProvider.saveStatsBatch(_systemDb!, statsList);
     } catch (e, st) {
-      final FluentBaseException exception = FluentBaseException('Critical failure while persisting telemetry batch.', st, e);
+      final FluentBaseException exception = FluentBaseException('Critical failure while persisting telemetry batch.', e, st);
       FluentLog.error(exception.message, exception, exception.stackTrace, tag: 'FluentSystemDb:save', hint: 'Ensure disk space is available and database permissions are granted.');
       rethrow;
     }

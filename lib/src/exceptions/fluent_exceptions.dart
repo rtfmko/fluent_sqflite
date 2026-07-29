@@ -170,8 +170,22 @@ class FluentBatchException extends FluentException {
 
   @override
   String toString() {
-    final errors = results.whereType<Exception>().length;
-    return 'FluentBatchException: $errors error(s) occurred during batch execution in "$tableName".';
+    final List<Exception> errors = results.whereType<Exception>().toList();
+    final StringBuffer sb = StringBuffer('FluentBatchException: [$tableName] ');
+
+    sb.write('${errors.length} error(s) occurred during batch execution.');
+
+    if (errors.isNotEmpty) {
+      const int displayLimit = 3;
+      for (int i = 0; i < errors.length && i < displayLimit; i++) {
+        sb.write('\n  - ${errors[i]}');
+      }
+      if (errors.length > displayLimit) {
+        sb.write('\n  ... and ${errors.length - displayLimit} more error(s).');
+      }
+    }
+
+    return sb.toString();
   }
 }
 
@@ -189,9 +203,6 @@ class FluentConstraintException extends FluentException {
   ///   specific constraint types (e.g., SQLITE_CONSTRAINT_UNIQUE).
   /// * [stackTrace]: The execution path where the violation occurred.
   FluentConstraintException(String message, {dynamic originalError, StackTrace? stackTrace}) : super(message, stackTrace, originalError);
-
-  @override
-  String toString() => 'FluentConstraintException: $message\nDetails: $originalError';
 }
 
 /// Exception thrown when the application's data model definition conflicts
@@ -223,27 +234,13 @@ class FluentSchemaException extends FluentException {
 /// This class serves as the standard error type for generic failures
 /// within the library when a more specific exception type (e.g., [FluentSchemaException])
 /// is not applicable.
-class FluentBaseException implements FluentException {
-  @override
-  final String message;
-  @override
-  final dynamic originalError;
-  @override
-  final StackTrace? stackTrace;
-
+class FluentBaseException extends FluentException {
   /// Creates a [FluentBaseException].
   ///
   /// * [message]: A human-readable description of the error.
   /// * [stackTrace]: The location in code where the error occurred.
   /// * [originalError]: The underlying technical error, if available.
-  FluentBaseException(this.message, [this.stackTrace, this.originalError]);
-
-  @override
-  String toString() {
-    final StringBuffer sb = StringBuffer()..write('FluentSQFLiteException: $message');
-    if (originalError != null) sb.write('\nUnderlying error: $originalError');
-    return sb.toString();
-  }
+  FluentBaseException(String message, [dynamic originalError, StackTrace? stackTrace]) : super(message, stackTrace, originalError);
 }
 
 /// Exception thrown when a method receives invalid arguments.
@@ -280,9 +277,19 @@ class FluentEngineException extends FluentException {
   FluentEngineException(String message, {required this.component, this.task, dynamic originalError, StackTrace? stackTrace}) : super(message, stackTrace, originalError);
 
   @override
-  String toString() =>
-      'FluentEngineException: [$component] $message'
-      '${task != null ? '\nTask: $task' : ''}';
+  String toString() {
+    final StringBuffer sb = StringBuffer('FluentEngineException: [$component] $message');
+
+    if (task != null) {
+      sb.write('\nTask: $task');
+    }
+
+    if (originalError != null) {
+      sb.write('\nDetails: $originalError');
+    }
+
+    return sb.toString();
+  }
 }
 
 /// Exception thrown when a synchronization operation between the local
@@ -344,7 +351,13 @@ class FluentApiException extends FluentException {
   FluentApiException(this.statusCode, {String message = 'Invalid API status code', Object? originalError, StackTrace? stackTrace}) : super(message, stackTrace, originalError);
 
   @override
-  String toString() => 'FluentApiException: [StatusCode: $statusCode] $message';
+  String toString() {
+    final StringBuffer sb = StringBuffer('FluentApiException: [StatusCode: $statusCode] $message');
+    if (originalError != null) {
+      sb.write('\nDetails: $originalError');
+    }
+    return sb.toString();
+  }
 }
 
 /// Exception thrown when an operation is performed on a database key
@@ -383,7 +396,44 @@ class FluentTaskCancelledException extends FluentException {
   FluentTaskCancelledException(String message, {required this.component, this.task, dynamic originalError, StackTrace? stackTrace}) : super(message, stackTrace, originalError);
 
   @override
-  String toString() =>
-      'FluentTaskCancelledException: [$component] $message'
-      '${task != null ? '\nTask: $task' : ''}';
+  String toString() {
+    final StringBuffer sb = StringBuffer('FluentTaskCancelledException: [$component] $message');
+
+    if (task != null) {
+      sb.write('\nTask: $task');
+    }
+
+    if (originalError != null) {
+      sb.write('\nDetails: $originalError');
+    }
+
+    return sb.toString();
+  }
+}
+
+/// Exception thrown when attempting synchronization operations on a provider
+/// or model that does not support synchronization.
+///
+/// Typically occurs when [syncWithServer] is called on a [FluentProvider]
+/// that lacks the [FluentSyncable] mixin.
+class FluentSyncableException extends FluentException {
+  /// The name of the table or model where the synchronization error occurred.
+  final String? tableOrModel;
+
+  /// Creates a [FluentSyncableException].
+  ///
+  /// * [message]: A brief explanation of the error.
+  /// * [tableOrModel]: Optional identifier of the target table/model.
+  /// * [stackTrace]: The execution path leading to the exception.
+  FluentSyncableException(String message, {this.tableOrModel, StackTrace? stackTrace}) : super(message, stackTrace);
+
+  @override
+  String toString() {
+    final StringBuffer sb = StringBuffer('FluentSyncableException: ');
+    if (tableOrModel != null) {
+      sb.write('[$tableOrModel] ');
+    }
+    sb.write(message);
+    return sb.toString();
+  }
 }

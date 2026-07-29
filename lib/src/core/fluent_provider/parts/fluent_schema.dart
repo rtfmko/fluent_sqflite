@@ -231,7 +231,7 @@ CREATE TABLE IF NOT EXISTS $pivotName (
       final List<FluentDbColumn> expectedCols = getFullSchema;
       final Set<String> expectedNames = expectedCols.map((e) => e.name).toSet();
       final Set<String> plannedRenames = {
-        for (final c in expectedCols)
+        for (final FluentDbColumn c in expectedCols)
           if (c.oldName != null) c.oldName!,
       };
 
@@ -415,7 +415,7 @@ CREATE TABLE IF NOT EXISTS $pivotName (
         }
       }
 
-      for (final abandoned in unusedOldCols) {
+      for (final String abandoned in unusedOldCols) {
         FluentLog.warning('Column migration aborted: Data loss imminent', tag: '$tableName:migration', hint: 'Column "$abandoned" is not mapped in the current schema and will be purged.');
       }
 
@@ -443,9 +443,9 @@ CREATE TABLE IF NOT EXISTS $pivotName (
   }
 
   /// Assembles and initializes the full table schema by reconciling model definitions,
-  /// migration history, and relational dependency constraints.
+  /// migration history, relational dependency constraints, and feature extensions.
   ///
-  /// This compilation routine executes a deterministic three-stage lifecycle to generate
+  /// This compilation routine executes a deterministic multi-stage lifecycle to generate
   /// the definitive structural mapping for the database storage layer:
   ///
   /// 1. **Base Model Resolution:** Initializes columns from [modelSample], filtering
@@ -457,11 +457,14 @@ CREATE TABLE IF NOT EXISTS $pivotName (
   ///    [FluentRelationsMixin]. It reconciles cross-table references, automatically
   ///    deriving data types from target schemas and applying `ON DELETE` cascading
   ///    logic where defined.
+  /// 4. **Feature Extensions Injection:** Safely merges system and extension columns
+  ///    (such as soft-delete tracking via [FluentSoftDeletable] and automated
+  ///    synchronization columns via [FluentSyncable]) using non-destructive insertion
+  ///    to respect any explicit user-defined overrides.
   ///
   /// Additionally, this routine performs internal housekeeping:
   /// * Resolves the primary key (defaulting to 'id' if not explicitly defined).
   /// * Populates schema caches for query optimization (`_cachedTableColumns`, `_cachedRelationKeys`).
-  /// * Injects soft-delete tracking columns if the model implements [FluentSoftDeletable].
   ///
   /// Returns a cached, immutable list of [FluentDbColumn] definitions reflecting
   /// the final physical state of the table.
@@ -555,6 +558,18 @@ CREATE TABLE IF NOT EXISTS $pivotName (
       }
     }
 
+    if (modelSample is FluentSoftDeletable) {
+      final FluentSoftDeletable sample = modelSample as FluentSoftDeletable;
+      finalMap.putIfAbsent(sample.softDeleteColumn, () => FluentDbColumn.systemSoftDelete(sample.softDeleteColumn));
+    }
+
+    if (this is FluentSyncable) {
+      final FluentSyncable syncProvider = this as FluentSyncable;
+      for (final FluentDbColumn col in syncProvider.syncColumns) {
+        finalMap.putIfAbsent(col.name, () => col);
+      }
+    }
+
     final List<FluentDbColumn> finalizedSchema = finalMap.values.toList(growable: false);
 
     _cachedTableColumns = finalMap.keys.toSet();
@@ -571,11 +586,6 @@ CREATE TABLE IF NOT EXISTS $pivotName (
     } else {
       _relationsMixin = null;
       _cachedRelationKeys = const <String>{};
-    }
-
-    if (modelSample is FluentSoftDeletable) {
-      final FluentSoftDeletable sample = modelSample as FluentSoftDeletable;
-      finalizedSchema.add(FluentDbColumn.systemSoftDelete(sample.softDeleteColumn));
     }
 
     _cachedFullSchema = finalizedSchema;

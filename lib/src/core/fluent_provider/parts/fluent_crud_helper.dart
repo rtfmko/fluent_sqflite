@@ -64,7 +64,7 @@ extension FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
       hint: 'Inspect internal SQLite connection status, schema state, or execution query parameters.',
       context: {'tableName': tableName, 'isConstraintViolation': false},
     );
-    throw FluentBaseException('Database error while writing to "$tableName": $e', stackTrace, e);
+    throw FluentBaseException('Database error while writing to "$tableName": $e', e, stackTrace);
   }
 
   /// Processing worker executing relational data structure resolution for a single row model.

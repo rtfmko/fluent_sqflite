@@ -89,32 +89,50 @@ extension FluentQuery<T extends FluentStorable> on FluentProvider<T> {
   ///
   /// [where] defines an optional conditional selection SQL filter clause used to constrain counting bounds.
   /// [whereArgs] contains the precise tracking parameters or variables bound to the conditional arguments.
+  /// [whereFilter] provides a type-safe, composable alternative to raw [where] and [whereArgs] (e.g., using [FluentFilter.eq]).
   /// [policy] defines prioritization, query collapsing, and concurrency controls managed by the coordinator.
+  ///
+  /// *Note: You can use either [whereFilter] or [where] / [whereArgs] to scope*
+  /// *the query, but providing both simultaneously will trigger an assertion error.*
   ///
   /// Returns a [Future<int>] yielding the total count of rows matching the evaluated criteria parameters.
   ///
-  /// ### Usage Example:
+  /// ### Usage Example with type-safe [whereFilter]:
   /// ```dart
-  /// // Calculate active rows matching an identity constraint using a background isolation priority
-  /// final activeItemsCount = await sessionRepository.count(
-  ///   where: 'status = ? AND is_stale = ?',
-  ///   whereArgs: ['active', 0],
+  /// // Calculate active rows matching an identity constraint using a type-safe filter
+  /// final int activeItemsCount = await sessionRepository.count(
+  ///   whereFilter: FluentFilter.eq('status', 'active')
+  ///       .and(FluentFilter.eq('is_stale', 0)),
   ///   policy: const ExecutionPolicy(priority: TaskPriority.normal),
   /// );
   /// ```
   @internal
-  Future<int> count({String? where, List<Object?>? whereArgs, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+  Future<int> count({String? where, List<Object?>? whereArgs, FluentFilter? whereFilter, ExecutionPolicy policy = const ExecutionPolicy(), String? dbName}) {
+    assert(!(whereFilter != null && where != null), 'Provide either [whereFilter] or [where], not both.');
+
+    if (whereFilter != null && where != null) {
+      FluentLog.warning(
+        'Mutually exclusive query parameters provided.',
+        tag: '$tableName:count',
+        hint: 'Both [whereFilter] and [where] were passed. The raw [where] clause will be ignored. Please leave only one to prevent unexpected behavior.',
+        context: {'tableName': tableName, 'ignoredWhere': where, 'appliedFilter': whereFilter.whereClause, 'appliedFilterArgs': whereFilter.whereArgs},
+      );
+    }
+
+    final String? actualWhere = whereFilter?.whereClause ?? where;
+    final List<Object?>? actualWhereArgs = whereFilter?.whereArgs ?? whereArgs;
+
     FluentLog.debug(
       'Initiating global operational query pipeline for storage layer record aggregation counting',
       tag: '$tableName:count',
-      context: {'tableName': tableName, 'hasConditionalWhereFilter': where != null, 'queryArgumentsCount': whereArgs?.length ?? 0, 'hasCustomPolicy': policy != const ExecutionPolicy()},
+      context: {'tableName': tableName, 'hasConditionalWhereFilter': actualWhere != null, 'queryArgumentsCount': actualWhereArgs?.length ?? 0, 'hasCustomPolicy': policy != const ExecutionPolicy()},
     );
 
     final FluentTask task = FluentTask(
       action: FluentDbAction.count,
       table: tableName,
       dbName: dbName ?? this.dbName,
-      helper: TableHelper(where: _injectSoftDelete(where), whereArgs: whereArgs, multiple: where == null),
+      helper: TableHelper(where: _injectSoftDelete(actualWhere), whereArgs: actualWhereArgs, multiple: actualWhere == null),
       policy: policy,
     );
 

@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 import 'dart:convert';
-import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../../exceptions/exceptions.dart';
@@ -13,54 +13,34 @@ import '../../interfaces/interfaces.dart';
 import '../../models/models.dart';
 import '../../relations/relations.dart';
 import '../../soft_delete/soft_delete.dart';
+import '../../sync/sync.dart';
 import '../../utils/utils.dart';
 import '../core.dart';
 import '../fluent_sqlite_internal.dart';
 import '../utils/utils.dart';
 
 part 'parts/crud/executors/fluent_execute_delete.dart';
-
 part 'parts/crud/executors/fluent_execute_find.dart';
-
 part 'parts/crud/executors/fluent_execute_maintenance.dart';
-
 part 'parts/crud/executors/fluent_execute_query.dart';
-
 part 'parts/crud/executors/fluent_execute_raw.dart';
-
 part 'parts/crud/executors/fluent_execute_restore.dart';
-
 part 'parts/crud/executors/fluent_execute_save.dart';
-
 part 'parts/crud/executors/fluent_execute_update.dart';
-
 part 'parts/crud/fluent_delete.dart';
-
 part 'parts/crud/fluent_find.dart';
-
 part 'parts/crud/fluent_maintenance.dart';
-
 part 'parts/crud/fluent_query.dart';
-
 part 'parts/crud/fluent_raw.dart';
-
 part 'parts/crud/fluent_restore.dart';
-
 part 'parts/crud/fluent_save.dart';
-
 part 'parts/crud/fluent_update.dart';
-
 part 'parts/fluent_crud_helper.dart';
-
 part 'parts/fluent_mapper.dart';
-
-part 'parts/fluent_provider_sync.dart';
-
 part 'parts/fluent_relation_loader.dart';
-
 part 'parts/fluent_relations.dart';
-
 part 'parts/fluent_schema.dart';
+part 'parts/fluent_sync_with_server.dart';
 
 /// The foundational abstract base class for all database provider implementations.
 ///
@@ -360,34 +340,8 @@ abstract class FluentProvider<T extends FluentStorable> {
   /// [enriched] The raw map result, potentially populated with relational child data.
   /// Returns a fully hydrated model [T].
   T _assembleModel(Map<String, dynamic> enriched) {
-    final String metaColName = FluentDbColumn.systemMetadata().name;
-    final dynamic rawMeta = enriched[metaColName];
-
-    Map<String, dynamic> workingMap = enriched;
-
-    // Stage 1: Restore dynamic types using stored metadata
-    if (rawMeta is String && rawMeta.isNotEmpty) {
-      try {
-        final dynamic metaMap = jsonDecode(rawMeta);
-        if (metaMap is Map<String, dynamic> && metaMap.isNotEmpty) {
-          for (final MapEntry<String, dynamic> entry in metaMap.entries) {
-            final String key = entry.key;
-
-            if (entry.value == 'bool' && enriched.containsKey(key)) {
-              final dynamic val = enriched[key];
-              if (val is int) {
-                if (identical(workingMap, enriched)) {
-                  workingMap = Map<String, dynamic>.from(enriched);
-                }
-                workingMap[key] = val == 1;
-              }
-            }
-          }
-        }
-      } catch (e, s) {
-        FluentLog.error('Failed to restore dynamic types from metadata', e, s, tag: '$tableName:assembly');
-      }
-    }
+    // Stage 1: Restore dynamic types
+    Map<String, dynamic> workingMap = _restoreTypesFromMetadata(enriched);
 
     // Stage 2: Relational casting and final model creation
     workingMap = _castReadyRelations(workingMap);
@@ -402,6 +356,112 @@ abstract class FluentProvider<T extends FluentStorable> {
     }
 
     return model;
+  }
+
+  Map<String, dynamic> _restoreTypesFromMetadata(Map<String, dynamic> row) {
+    final String metaKey = FluentDbColumn.systemMetadata().name;
+    final Object? metaRaw = row[metaKey];
+
+    if (metaRaw is! String || metaRaw.isEmpty) return row;
+
+    Map<String, dynamic> result = row;
+
+    try {
+      final Map<String, dynamic> decoded = jsonDecode(metaRaw) as Map<String, dynamic>;
+
+      for (final MapEntry<String, dynamic> entry in decoded.entries) {
+        final String key = entry.key;
+        final String typeHint = entry.value.toString();
+
+        final dynamic value = result[key];
+        if (value == null) continue;
+
+        if (identical(result, row)) {
+          result = Map<String, dynamic>.from(row);
+        }
+
+        switch (typeHint) {
+          case 'bool':
+            result[key] = value == 1;
+            break;
+          case 'datetime':
+            if (value is num) {
+              result[key] = DateTime.fromMillisecondsSinceEpoch(value.toInt());
+            } else {
+              final String strVal = value.toString();
+              final int? timestamp = int.tryParse(strVal);
+
+              if (timestamp != null) {
+                result[key] = DateTime.fromMillisecondsSinceEpoch(timestamp);
+              } else {
+                result[key] = DateTime.tryParse(strVal);
+              }
+            }
+            break;
+          case 'duration':
+            if (value is int) result[key] = Duration(microseconds: value);
+            break;
+          case 'color':
+            if (value is int) result[key] = Color(value);
+            break;
+          case 'locale':
+            final List<String> parts = value.toString().split('-');
+            result[key] = parts.length > 1 ? Locale(parts[0], parts[1]) : Locale(parts[0]);
+            break;
+          case 'timeofday':
+            final List<String> parts = value.toString().split(':');
+            if (parts.length == 2) {
+              result[key] = TimeOfDay(hour: int.tryParse(parts[0]) ?? 0, minute: int.tryParse(parts[1]) ?? 0);
+            }
+            break;
+          case 'bigint':
+            result[key] = BigInt.tryParse(value.toString());
+            break;
+          case 'regexp':
+            result[key] = RegExp(value.toString());
+            break;
+          case 'uri':
+            result[key] = Uri.tryParse(value.toString());
+            break;
+          case 'json':
+            if (value is String) {
+              try {
+                result[key] = jsonDecode(value);
+              } catch (_) {}
+            }
+            break;
+          case 'enum':
+            final List<Enum>? values = modelSample.enumValues[key];
+            if (values != null) {
+              try {
+                if (tableConfig.storeEnumsAsNames) {
+                  result[key] = values.byName(value.toString());
+                } else {
+                  final int? index = int.tryParse(value.toString());
+                  if (index != null && index >= 0 && index < values.length) {
+                    result[key] = values[index];
+                  } else {
+                    FluentLog.warning('Enum index out of bounds or invalid', tag: '$tableName:hydration', context: {'key': key, 'value': value, 'enumLength': values.length});
+                    result.remove(key);
+                  }
+                }
+              } catch (e) {
+                FluentLog.warning('Failed to restore enum, name might be removed or invalid', tag: '$tableName:hydration', context: {'key': key, 'value': value, 'error': e.toString()});
+                result.remove(key);
+              }
+            }
+            break;
+        }
+      }
+
+      if (!identical(result, row)) {
+        result.remove(metaKey);
+      }
+    } catch (e, s) {
+      FluentLog.error('Failed to restore dynamic types from metadata', e, s, tag: '$tableName:hydration');
+    }
+
+    return result;
   }
 
   /// Routes a [FluentTask] to its corresponding implementation method based on the [FluentDbAction].

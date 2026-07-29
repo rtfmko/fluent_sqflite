@@ -375,7 +375,9 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
 
     // Stage 1: Type Sanitization
     if (tableConfig.sanitizeTypes) {
-      processedRows.forEach(_sanitizeRowInPlace);
+      for (int i = 0; i < processedRows.length; i++) {
+        processedRows[i] = _restoreTypesFromMetadata(processedRows[i]);
+      }
     }
 
     // Stage 2: Relational Hydration
@@ -476,8 +478,8 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
         }
 
         final Map<String, List<Map<String, dynamic>>> groupedChildren = {};
-        for (var child in enrichedChildren) {
-          final pId = child['_fluent_pivot_parent_id'] ?? child[remoteKey];
+        for (final Map<String, dynamic> child in enrichedChildren) {
+          final dynamic pId = child['_fluent_pivot_parent_id'] ?? child[remoteKey];
           if (pId != null) {
             groupedChildren.putIfAbsent(pId.toString(), () => []).add(child);
           }
@@ -512,44 +514,6 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
 
     currentVisited.remove(tableName);
     return processedRows;
-  }
-
-  void _sanitizeRowInPlace(Map<String, dynamic> processedRow) {
-    final String metaKey = FluentDbColumn.systemMetadata().name;
-    final Object? metaRaw = processedRow[metaKey];
-
-    if (metaRaw is String && metaRaw.isNotEmpty) {
-      try {
-        final Map<String, dynamic> decoded = jsonDecode(metaRaw) as Map<String, dynamic>;
-
-        for (final String key in decoded.keys) {
-          final dynamic value = processedRow[key];
-          if (value == null) continue;
-
-          final String typeHint = decoded[key].toString();
-          switch (typeHint) {
-            case 'bool':
-              processedRow[key] = value == 1;
-              break;
-            case 'datetime':
-              processedRow[key] = value is int ? DateTime.fromMillisecondsSinceEpoch(value) : DateTime.tryParse(value.toString());
-              break;
-            case 'json':
-              if (value is String) processedRow[key] = jsonDecode(value);
-              break;
-            case 'enum':
-              final List<Enum>? values = modelSample.enumValues[key];
-              if (values != null) {
-                processedRow[key] = tableConfig.storeEnumsAsNames ? values.byName(value.toString()) : values[value as int];
-              }
-              break;
-          }
-        }
-      } catch (e, s) {
-        FluentLog.error('Failed to sanitize row metadata', e, s, tag: '$tableName:hydration');
-      }
-      processedRow.remove(metaKey);
-    }
   }
 
   Map<String, dynamic> _castReadyRelations(Map<String, dynamic> processedRow) {
@@ -682,47 +646,5 @@ extension FluentMapper<T extends FluentStorable> on FluentProvider<T> {
 
   /// Sanitizes Dart domain types into SQLite-compatible primitives while tracking
   /// structural metadata for accurate reconstruction.
-  ///
-  /// This method acts as the serialization gateway:
-  /// * Primitive Passthrough: Allows `String`, `num`, and `Uint8List` to persist without overhead.
-  /// * Type Coercion: Maps high-level types (e.g., `DateTime`, `Enum`, `Color`) into
-  ///   SQL-compliant formats (timestamps, indices, or hex/integer equivalents).
-  /// * Metadata Tracking: Returns an optional [metaType] hint which is stored in the
-  ///   system metadata column, enabling strict type-resurrection during hydration.
-  ///
-  /// [value] The raw field value from the domain model.
-  /// Returns a record containing the sanitized value and its associated type identifier.
-  ({dynamic value, String? metaType}) _sanitizeValue(dynamic value) {
-    if (value == null) return (value: null, metaType: null);
-
-    if (value is String || value is num || value is Uint8List) {
-      return (value: value, metaType: null);
-    }
-
-    if (value is bool) return (value: value ? 1 : 0, metaType: 'bool');
-
-    if (value is DateTime) {
-      final dynamic formattedDate = tableConfig.dateTimeFormat == FluentDateTimeFormat.timestamp ? value.millisecondsSinceEpoch : value.toIso8601String();
-      return (value: formattedDate, metaType: 'datetime');
-    }
-
-    if (value is Map || value is List) {
-      try {
-        return (value: jsonEncode(value), metaType: 'json');
-      } catch (_) {
-        throw InvalidSqlTypeException(tableName, value);
-      }
-    }
-
-    if (value is Enum) {
-      final dynamic formattedEnum = tableConfig.storeEnumsAsNames ? value.name : value.index;
-      return (value: formattedEnum, metaType: 'enum');
-    }
-
-    if (value is Color) return (value: value.toARGB32(), metaType: 'color');
-
-    if (value is Uri) return (value: value.toString(), metaType: 'uri');
-
-    throw InvalidSqlTypeException(tableName, value);
-  }
+  ({dynamic value, String? metaType}) _sanitizeValue(dynamic value) => FluentSqlSanitizer.sanitize(value: value, config: tableConfig, tableName: tableName);
 }

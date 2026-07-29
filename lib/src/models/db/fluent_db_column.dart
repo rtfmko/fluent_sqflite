@@ -220,6 +220,8 @@ class FluentDbColumn {
     final bool hasCustomAi = trimmedCustom != null && trimmedCustom.toUpperCase().contains('AUTOINCREMENT');
     final bool hasCustomNotNull = trimmedCustom != null && trimmedCustom.toUpperCase().contains('NOT NULL');
     final bool hasCustomUnique = trimmedCustom != null && trimmedCustom.toUpperCase().contains('UNIQUE');
+    final bool hasCustomDefault = trimmedCustom != null && trimmedCustom.toUpperCase().contains('DEFAULT');
+    final bool hasCustomCheck = trimmedCustom != null && trimmedCustom.toUpperCase().contains('CHECK');
 
     if (isPrimaryKey && !hasCustomPk) {
       parts.add('PRIMARY KEY');
@@ -230,6 +232,14 @@ class FluentDbColumn {
 
     if (isNotNull && !isPrimaryKey && !hasCustomNotNull) parts.add('NOT NULL');
     if (isUnique && !isPrimaryKey && !hasCustomUnique) parts.add('UNIQUE');
+
+    if (defaultValue != null && !hasCustomDefault) {
+      parts.add('DEFAULT $defaultValue');
+    }
+
+    if (checkConstraint != null && !hasCustomCheck) {
+      parts.add('CHECK ($checkConstraint)');
+    }
 
     _cachedSqlDefinition = parts.join(' ');
     FluentLog.debug('Generated SQL definition for column "$name"', tag: 'FluentDbColumn', context: {'sql': _cachedSqlDefinition});

@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 import 'dart:typed_data';
+import 'dart:ui';
 
 /// Supported SQLite data types and their mapping from Dart types.
 ///
@@ -36,19 +37,35 @@ enum FluentDbDataType {
   /// Automatically detects the appropriate [FluentDbDataType] for a given Dart [value].
   ///
   /// Mapping rules:
-  /// * [int], [bool], or [DateTime] -> [integer].
+  /// * [int], [bool], [Duration], [Color] -> [integer].
   /// * [double] or [num] -> [real].
   /// * [Uint8List] (or any list of bytes) -> [blob].
-  /// * Everything else -> [text] (default).
+  /// * Everything else (incl. [String], [Map], [List], [Enum], [DateTime]) -> [text] (default).
   ///
   /// Example:
   /// ```dart
-  /// final FluentDbDataType type = FluentDbDataType.fromType(DateTime.now()); // FluentDbDataType.integer
+  /// final FluentDbDataType type = FluentDbDataType.fromType(123); // FluentDbDataType.integer
   /// ```
   static FluentDbDataType fromType(dynamic value) {
-    if (value is int || value is bool) return FluentDbDataType.integer;
-    if (value is double || value is num) return FluentDbDataType.real;
-    if (value is Uint8List) return FluentDbDataType.blob;
+    // Map types that translate to SQLite INTEGER
+    if (value is int || value is bool || value is Duration || value is Color) {
+      return FluentDbDataType.integer;
+    }
+
+    // Map types that translate to SQLite REAL
+    if (value is double || value is num) {
+      return FluentDbDataType.real;
+    }
+
+    // Map types that translate to SQLite BLOB
+    if (value is Uint8List) {
+      return FluentDbDataType.blob;
+    }
+
+    // NOTE: DateTime is mapped to text by default here, as storing it as an
+    // ISO8601 string is the safest cross-platform default without tableConfig context.
+
+    // Map everything else (String, Map, List, Enum, BigInt, Locale, etc.) to TEXT
     return FluentDbDataType.text;
   }
 }
@@ -459,9 +476,10 @@ enum FluentSyncStrategy {
   /// from the local database upon successful confirmation.
   purgeDeleted,
 
-  /// **Push Strategy:** Identifies active (non-deleted) records that require
-  /// synchronization, pushes their state to the server, and optionally updates
-  /// local metadata (e.g., `is_synced` or `updated_at` flags) to avoid redundant uploads.
+  /// **Push Strategy:** Identifies active, unsynced records (filtered automatically
+  /// via [unsyncedWhereClause]), pushes their state to the server via [onPush],
+  /// and applies the provider's [syncCompleteState] (such as marking records
+  /// as synced) upon successful transport to prevent redundant uploads.
   pushActive,
 
   /// **Pull Strategy:** Fetches data payloads from the server and performs

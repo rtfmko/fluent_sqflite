@@ -26,7 +26,7 @@ abstract class FluentException implements Exception {
     final StringBuffer sb = StringBuffer('[$runtimeType]: $message');
 
     if (originalError != null) {
-      sb.write(' | Cause: $originalError');
+      sb.write('\nCause: $originalError');
     }
 
     return sb.toString();

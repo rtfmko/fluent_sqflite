@@ -282,6 +282,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   ///
   /// [where] defines the parameterized filter query constraint string (e.g., 'status = ? AND age > ?').
   /// [whereArgs] contains the typed runtime evaluation variables mapped directly to placeholders in the where clause.
+  /// [whereFilter] provides a type-safe, composable alternative to raw [where] and [whereArgs] (e.g., using [FluentFilter.eq]).
   /// [orderBy] defines explicit sorting priorities and directions (e.g., 'created_at DESC, total_price ASC').
   /// [limit] defines the maximum upper bounds constraint for returned database entries. Pass `null` for unlimited rows.
   /// [offset] specifies the row index constraint from which database record extraction starts.
@@ -289,13 +290,16 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   /// [ignoreLazy] overrides proxy patterns to immediately evaluate related sub-tables where applicable.
   /// [policy] defines prioritization, query collapsing, and concurrency controls managed by the coordinator.
   ///
+  /// *Note: You can use either [whereFilter] or [where] / [whereArgs] to scope*
+  /// *the query, but providing both simultaneously will trigger an assertion error.*
+  ///
   /// Returns a matching [List<T>] containing materialized data layers.
   ///
-  /// ### Usage Example:
+  /// ### Usage Example with type-safe [whereFilter]:
   /// ```dart
-  /// final premiumInvoices = await invoiceRepository.find(
-  ///   where: 'status = ? AND total_amount > ?',
-  ///   whereArgs: ['PAID', 500.0],
+  /// final Invoice premiumInvoices = await invoiceRepository.find(
+  ///   whereFilter: FluentFilter.eq('status', 'PAID')
+  ///       .and(FluentFilter.gt('total_amount', 500.0)),
   ///   orderBy: 'settled_at DESC',
   ///   limit: 20,
   ///   offset: 40, // Useful for multi-tier pagination screens
@@ -305,6 +309,7 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
   Future<List<T>> find({
     String? where,
     List<Object?>? whereArgs,
+    FluentFilter? whereFilter,
     String? orderBy,
     int? limit,
     int? offset,
@@ -313,13 +318,27 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
     ExecutionPolicy policy = const ExecutionPolicy(),
     String? dbName,
   }) {
+    assert(!(whereFilter != null && where != null), 'Provide either [whereFilter] or [where], not both.');
+
+    if (whereFilter != null && where != null) {
+      FluentLog.warning(
+        'Mutually exclusive query parameters provided.',
+        tag: '$tableName:find',
+        hint: 'Both [whereFilter] and [where] were passed. The raw [where] clause will be ignored. Please leave only one to prevent unexpected behavior.',
+        context: {'tableName': tableName, 'ignoredWhere': where, 'appliedFilter': whereFilter.whereClause, 'appliedFilterArgs': whereFilter.whereArgs},
+      );
+    }
+
+    final String? actualWhere = whereFilter?.whereClause ?? where;
+    final List<Object?>? actualWhereArgs = whereFilter?.whereArgs ?? whereArgs;
+
     FluentLog.debug(
       'Initiating global operational query pipeline for structured condition row selection',
       tag: '$tableName:find',
       context: {
         'tableName': tableName,
-        'hasWhereClause': where != null,
-        'whereArgsCount': whereArgs?.length ?? 0,
+        'hasWhereClause': actualWhere != null,
+        'whereArgsCount': actualWhereArgs?.length ?? 0,
         'hasOrderBy': orderBy != null,
         'limit': limit ?? 'unlimited',
         'offset': offset ?? 0,
@@ -335,11 +354,11 @@ extension FluentFind<T extends FluentStorable> on FluentProvider<T> {
       table: tableName,
       maxDepth: maxDepth,
       ignoreLazy: ignoreLazy,
-      helper: TableHelper(where: _injectSoftDelete(where), whereArgs: whereArgs, orderBy: orderBy, limit: limit, offset: offset, multiple: true),
+      helper: TableHelper(where: _injectSoftDelete(actualWhere), whereArgs: actualWhereArgs, orderBy: orderBy, limit: limit, offset: offset, multiple: true),
       policy: policy,
     );
-    final String? injectedWhere = _injectSoftDelete(where);
-    FluentLog.debug('Generated SQL WHERE clause', tag: 'debug:sql', context: {'injected': injectedWhere, 'original': where});
+    final String? injectedWhere = _injectSoftDelete(actualWhere);
+    FluentLog.debug('Generated SQL WHERE clause', tag: 'debug:sql', context: {'injected': injectedWhere, 'original': actualWhere});
     return FluentDb.executeTask<T, List<T>>(provider: this, task: task);
   }
 

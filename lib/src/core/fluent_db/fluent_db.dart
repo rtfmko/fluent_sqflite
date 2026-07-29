@@ -10,14 +10,12 @@ import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../../../fluent_sqflite.dart';
+import '../../sync/sync.dart';
 import '../fluent_sqlite_internal.dart';
 
 part 'parts/fluent_db_lifecycle.dart';
-
 part 'parts/fluent_db_locator.dart';
-
 part 'parts/fluent_db_maintenance.dart';
-
 part 'parts/fluent_db_schema.dart';
 
 /// The central orchestration hub for the database persistence layer.
@@ -565,26 +563,34 @@ class FluentDb {
   /// Executes a custom SQL-based query with support for `WHERE` clauses,
   /// ordering, and pagination.
   ///
-  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// [where] defines an optional conditional selection SQL filter clause.
+  /// [whereArgs] contains the precise tracking parameters bound to the conditional arguments.
+  /// [whereFilter] provides a type-safe, composable alternative to raw [where] and [whereArgs] (e.g., using [FluentFilter.eq]).
+  /// [orderBy] defines explicit sorting priorities and directions (e.g., 'date DESC').
+  /// [limit] and [offset] control result pagination.
   ///
+  /// **The [dbKey] determines the database instance to scope the operation against:**
   /// * If provided, the operation is explicitly scoped to that database instance.
   /// * If omitted, the system will attempt to resolve the database automatically
   ///   based on the model type [T].
   ///
-  /// *Note: If the model [T] is registered in multiple database groups,
-  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  /// *Note: If the model [T] is registered in multiple database groups,*
+  /// *the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
   ///
-  /// **Example:**
+  /// *Note: You can use either [whereFilter] or [where] / [whereArgs] to scope*
+  /// *the query, but providing both simultaneously will trigger an assertion error.*
+  ///
+  /// **Example with type-safe [whereFilter]:**
   /// ```dart
   /// final List<Order> highValueOrders = await FluentDb.find<Order>(
-  ///   where: 'amount > ?',
-  ///   whereArgs: [1000],
-  ///   orderBy: 'date DESC'
+  ///   whereFilter: FluentFilter.gt('amount', 1000),
+  ///   orderBy: 'date DESC',
   /// );
   /// ```
   static Future<List<T>> find<T extends FluentStorable>({
     String? where,
     List<Object?>? whereArgs,
+    FluentFilter? whereFilter,
     String? orderBy,
     int? limit,
     int? offset,
@@ -596,9 +602,18 @@ class FluentDb {
     if (dbKey?.dbName == null) {
       FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:find');
     }
-    return providerByType<T>(
+    return providerByType<T>(dbName: dbKey?.dbName).find(
+      where: where,
+      whereArgs: whereArgs,
+      whereFilter: whereFilter,
+      orderBy: orderBy,
+      limit: limit,
+      offset: offset,
+      maxDepth: maxDepth,
+      ignoreLazy: ignoreLazy,
+      policy: policy,
       dbName: dbKey?.dbName,
-    ).find(where: where, whereArgs: whereArgs, orderBy: orderBy, limit: limit, offset: offset, maxDepth: maxDepth, ignoreLazy: ignoreLazy, policy: policy, dbName: dbKey?.dbName);
+    );
   }
 
   /// Retrieves a single raw record map by a specific column value.
@@ -1104,26 +1119,33 @@ class FluentDb {
     return providerByType<T>(dbName: dbKey?.dbName).exists(id, policy: policy, dbName: dbKey?.dbName);
   }
 
-  /// Returns the count of records matching the optional [where] clause.
+  /// Returns the count of records matching the optional [where] clause or [whereFilter].
   ///
-  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// [where] defines an optional conditional selection SQL filter clause.
+  /// [whereArgs] contains the precise tracking parameters bound to the conditional arguments.
+  /// [whereFilter] provides a type-safe, composable alternative to raw [where] and [whereArgs] (e.g., using [FluentFilter.eq]).
   ///
+  /// **The [dbKey] determines how to handle records that already exist:**
   /// * If provided, the operation is explicitly scoped to that database instance.
   /// * If omitted, the system will attempt to resolve the database automatically
   ///   based on the model type [T].
   ///
-  /// *Note: If the model [T] is registered in multiple database groups,
-  /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  /// *Note: If the model [T] is registered in multiple database groups,*
+  /// *the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
   ///
-  /// **Example:**
+  /// *Note: You can use either [whereFilter] or [where] / [whereArgs] to scope*
+  /// *the query, but providing both simultaneously will trigger an assertion error.*
+  ///
+  /// **Example with type-safe [whereFilter]:**
   /// ```dart
-  /// final int activeCount = await FluentDb.count<User>(where: 'status = ?', whereArgs: ['active']);
-  /// ```
-  static Future<int> count<T extends FluentStorable>({String? where, List<Object?>? whereArgs, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) {
+  /// final int activeCount = await FluentDb.count<User>(
+  ///   whereFilter: FluentFilter.eq('status', 'active'),
+  /// );
+  static Future<int> count<T extends FluentStorable>({String? where, List<Object?>? whereArgs, FluentFilter? whereFilter, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) {
     if (dbKey?.dbName == null) {
       FluentLog.debug('Performing auto-resolved CRUD operation for $T', tag: 'FluentDb:count');
     }
-    return providerByType<T>(dbName: dbKey?.dbName).count(where: where, whereArgs: whereArgs, policy: policy, dbName: dbKey?.dbName);
+    return providerByType<T>(dbName: dbKey?.dbName).count(where: where, whereArgs: whereArgs, whereFilter: whereFilter, policy: policy, dbName: dbKey?.dbName);
   }
 
   /// Executes a custom SQL statement against the database for the specified entity type [T].
@@ -1645,7 +1667,15 @@ class FluentDb {
   /// handling data discovery, asynchronous network transport, and post-sync database
   /// cleanup or state updates.
   ///
-  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// **Requirement:** The provider for model [T] **must** include the **[FluentSyncable]**
+  /// mixin in its class declaration (e.g., `class MyProvider extends FluentProvider<MyModel> with FluentSyncable<MyModel>`).
+  /// If the provider lacks this mixin, a [FluentSyncableException] will be thrown.
+  ///
+  /// [additionalWhere] defines an optional conditional selection SQL filter clause.
+  /// [additionalWhereArgs] contains the precise tracking parameters bound to the conditional arguments.
+  /// [additionalFilter] provides a type-safe, composable alternative to raw [additionalWhere] and [additionalWhereArgs] (e.g., using [FluentFilter.eq]).
+  ///
+  /// **The [dbKey] determines how to handle records that already exist:**
   ///
   /// * If provided, the operation is explicitly scoped to that database instance.
   /// * If omitted, the system will attempt to resolve the database automatically
@@ -1654,14 +1684,18 @@ class FluentDb {
   /// *Note: If the model [T] is registered in multiple database groups,
   /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
   ///
-  /// **Example:**
+  /// *Note: You can use either [additionalFilter] or [additionalWhere] / [additionalWhereArgs] to scope*
+  /// *the query, but providing both simultaneously will trigger an assertion error.*
+  ///
+  /// **Example with type-safe [additionalFilter]:**
   /// ```dart
   /// // Push pending local tasks to the server and mark them as synced
   /// final FluentSyncResult<Task> result = await FluentDb.syncWithServer<Task>(
   ///   strategy: FluentSyncStrategy.pushActive,
   ///   onPush: (items) async => await myApiClient.uploadTasks(items),
-  ///   additionalWhere: 'is_synced = 0',
-  ///   markAsSyncedFields: {'is_synced': 1},
+  ///   additionalFilter: FluentFilter.eq('is_synced', 0),
+  ///   // markAsSyncedFields is omitted here because the FluentSyncable mixin
+  ///   // automatically applies syncCompleteState (e.g., {'is_synced': 1}) upon success.
   ///   tag: 'TaskSync',
   /// );
   /// ```
@@ -1671,21 +1705,41 @@ class FluentDb {
     Future<List<T>> Function()? onPull,
     String? additionalWhere,
     List<Object?>? additionalWhereArgs,
+    FluentFilter? additionalFilter,
     Map<String, dynamic>? markAsSyncedFields,
     Object? tag,
     ExecutionPolicy policy = const ExecutionPolicy(),
     FluentDbKey? dbKey,
-  }) => providerByType<T>(dbName: dbKey?.dbName).syncWithServer(
-    strategy: strategy,
-    onPush: onPush,
-    onPull: onPull,
-    additionalWhere: additionalWhere,
-    additionalWhereArgs: additionalWhereArgs,
-    markAsSyncedFields: markAsSyncedFields,
-    tag: tag,
-    policy: policy,
-    dbName: dbKey?.dbName,
-  );
+  }) {
+    final FluentProvider syncProvider = providerByType<T>(dbName: dbKey?.dbName);
+
+    if (syncProvider is! FluentSyncable<T>) {
+      final FluentSyncableException exception = FluentSyncableException('The provider does not support synchronization.', tableOrModel: T.toString(), stackTrace: StackTrace.current);
+      FluentLog.error(
+        exception.message,
+        exception,
+        exception.stackTrace,
+        tag: 'FluentDb:syncWithServer',
+        hint: 'Add "with FluentSyncable<${T.toString()}>" to your provider class declaration.',
+        context: {'model': T.toString()},
+      );
+
+      throw exception;
+    }
+
+    return syncProvider.syncWithServer(
+      strategy: strategy,
+      onPush: onPush,
+      onPull: onPull,
+      additionalWhere: additionalWhere,
+      additionalWhereArgs: additionalWhereArgs,
+      additionalFilter: additionalFilter,
+      markAsSyncedFields: markAsSyncedFields,
+      tag: tag,
+      policy: policy,
+      dbName: dbKey?.dbName,
+    );
+  }
 
   /// Initiates a reactive synchronization pipeline for the entity type [T].
   ///
@@ -1693,7 +1747,11 @@ class FluentDb {
   /// managing retries, reconciling with local storage, and streaming state
   /// updates (loading, saving, completed) to the UI.
   ///
-  /// **The [saveStrategy] determines how to handle records that already exist:**
+  /// [localWhere] defines an optional conditional selection SQL filter clause.
+  /// [localWhereArgs] contains the precise tracking parameters bound to the conditional arguments.
+  /// [localFilter] provides a type-safe, composable alternative to raw [localWhere] and [localWhereArgs] (e.g., using [FluentFilter.eq]).
+  ///
+  /// **The [dbKey] determines how to handle records that already exist:**
   ///
   /// * If provided, the operation is explicitly scoped to that database instance.
   /// * If omitted, the system will attempt to resolve the database automatically
@@ -1701,6 +1759,9 @@ class FluentDb {
   ///
   /// *Note: If the model [T] is registered in multiple database groups,
   /// the system will throw an [AmbiguousProviderException] if [dbKey] is not provided.*
+  ///
+  /// *Note: You can use either [localFilter] or [localWhere] / [localWhereArgs] to scope*
+  /// *the local cache query, but providing both simultaneously will trigger an assertion error.*
   ///
   /// ### Examples
   ///
@@ -1742,7 +1803,7 @@ class FluentDb {
   /// ```
   ///
   ///
-  /// **3. Advanced usage with filtering and custom reconciliation:**
+  /// **3. Advanced usage with type-safe [localFilter] and custom reconciliation:**
   /// Demonstrates using custom merge strategies, error behaviors, and data transformation.
   /// ```dart
   /// await FluentDb.reactiveSync<Post>(
@@ -1753,8 +1814,7 @@ class FluentDb {
   ///       statusCode: res.statusCode ?? 200,
   ///     );
   ///   },
-  ///   localWhere: 'user_id = ?',
-  ///   localWhereArgs: [123],
+  ///   localFilter: FluentFilter.eq('user_id', 123),
   ///   options: FluentSyncOptions<Post>(
   ///     executionStrategy: FluentExecutionStrategy.cacheThenApiYieldThenSave,
   ///     mergeStrategy: FluentMergeStrategy.syncDeletions,
@@ -1806,11 +1866,19 @@ class FluentDb {
     String? localWhere,
     List<Object?>? localWhereArgs,
     String? localOrderBy,
+    FluentFilter? localFilter,
     FluentDbKey? dbKey,
     ExecutionPolicy policy = const ExecutionPolicy(),
-  }) => providerByType<T>(
+  }) => providerByType<T>(dbName: dbKey?.dbName).reactiveSync(
+    fetchFromApi: fetchFromApi,
+    options: options,
+    localWhere: localWhere,
+    localWhereArgs: localWhereArgs,
+    localFilter: localFilter,
+    localOrderBy: localOrderBy,
+    policy: policy,
     dbName: dbKey?.dbName,
-  ).reactiveSync(fetchFromApi: fetchFromApi, options: options, localWhere: localWhere, localWhereArgs: localWhereArgs, localOrderBy: localOrderBy, policy: policy, dbName: dbKey?.dbName);
+  );
 
   /// Dispatches a database task to the background `FluentEngine` for execution.
   ///
