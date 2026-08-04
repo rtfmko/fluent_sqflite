@@ -206,85 +206,89 @@ extension FluentRelations<T extends FluentStorable> on FluentProvider<T> {
     final Set<String> currentVisited = visitedTables ?? <String>{};
     currentVisited.add(tableName);
 
-    // Tracking Exact Batch Indices
-    int currentBatchIndex = 0;
-    final List<int?> idResultIndices = List.filled(itemsLength, null, growable: false);
-    final String pkName = primaryKeyColumn.name;
+    try {
+      // Tracking Exact Batch Indices
+      int currentBatchIndex = 0;
+      final List<int?> idResultIndices = List.filled(itemsLength, null, growable: false);
+      final String pkName = primaryKeyColumn.name;
 
-    // Iterative Batch Processing: Flatten domain models into SQL-safe maps
-    for (int i = 0; i < itemsLength; i++) {
-      final dynamic item = items[i];
-      if (item is T) {
-        if (modelItems != null) {
-          modelItems[i] = item;
-        }
-
-        final bool useCache = parentJsons != null && i < parentJsons.length && parentJsons[i].isNotEmpty;
-        final Map<String, dynamic> rawJson = useCache ? Map<String, dynamic>.from(parentJsons[i]) : _prepareSqlJson(item);
-
-        if (parentJsons == null && sqlJsonCache != null) {
-          sqlJsonCache[i] = rawJson;
-        }
-
-        // SQL Sanitization: Strip relational keys before table insertion
-        final Map<String, dynamic> flatSqlJson = {};
-        for (final MapEntry<String, dynamic> entry in rawJson.entries) {
-          if (!relKeys.contains(entry.key)) {
-            flatSqlJson[entry.key] = entry.value;
+      // Iterative Batch Processing: Flatten domain models into SQL-safe maps
+      for (int i = 0; i < itemsLength; i++) {
+        final dynamic item = items[i];
+        if (item is T) {
+          if (modelItems != null) {
+            modelItems[i] = item;
           }
-        }
 
-        if (flatSqlJson[pkName] == null) {
-          idResultIndices[i] = currentBatchIndex;
-        }
+          final bool useCache = parentJsons != null && i < parentJsons.length && parentJsons[i].isNotEmpty;
+          final Map<String, dynamic> rawJson = useCache ? Map<String, dynamic>.from(parentJsons[i]) : _prepareSqlJson(item);
 
-        final int commandsAdded = _upsertItemInTxn(batch, flatSqlJson, saveStrategy);
-        currentBatchIndex += commandsAdded;
+          if (parentJsons == null && sqlJsonCache != null) {
+            sqlJsonCache[i] = rawJson;
+          }
+
+          // SQL Sanitization: Strip relational keys before table insertion
+          final Map<String, dynamic> flatSqlJson = {};
+          for (final MapEntry<String, dynamic> entry in rawJson.entries) {
+            if (!relKeys.contains(entry.key)) {
+              flatSqlJson[entry.key] = entry.value;
+            }
+          }
+
+          if (flatSqlJson[pkName] == null) {
+            idResultIndices[i] = currentBatchIndex;
+          }
+
+          final int commandsAdded = _upsertItemInTxn(batch, flatSqlJson, saveStrategy);
+          currentBatchIndex += commandsAdded;
+        }
       }
-    }
 
-    // Atomic Commit: Finalize root batch and map auto-increment IDs back to cache
-    if (isRootBatch) {
-      FluentLog.sql('Executing batched upsert operations', tag: '$tableName:sql:executeAddExecutor');
+      // Atomic Commit: Finalize root batch and map auto-increment IDs back to cache
+      if (isRootBatch) {
+        FluentLog.sql('Executing batched upsert operations', tag: '$tableName:sql:executeAddExecutor');
 
-      final List<Object?> results = await batch.commit(noResult: false);
-      _checkBatchResults(results);
+        final List<Object?> results = await batch.commit(noResult: false);
+        _checkBatchResults(results);
 
-      if (sqlJsonCache != null) {
-        for (int i = 0; i < itemsLength; i++) {
-          final int? targetIndex = idResultIndices[i];
+        if (sqlJsonCache != null) {
+          for (int i = 0; i < itemsLength; i++) {
+            final int? targetIndex = idResultIndices[i];
 
-          if (targetIndex != null && targetIndex < results.length) {
-            final Object? res = results[targetIndex];
-            if (res is int) {
-              if (sqlJsonCache[i].isNotEmpty) {
-                sqlJsonCache[i][pkName] = res;
-              }
-              if (modelItems != null && i < modelItems.length) {
-                modelItems[i].injectRelationId(pkName, res);
+            if (targetIndex != null && targetIndex < results.length) {
+              final Object? res = results[targetIndex];
+              if (res is int) {
+                if (sqlJsonCache[i].isNotEmpty) {
+                  sqlJsonCache[i][pkName] = res;
+                }
+                if (modelItems != null && i < modelItems.length) {
+                  modelItems[i].injectRelationId(pkName, res);
+                }
               }
             }
           }
         }
       }
-    }
 
-    // Recursive Relational Hydration: Cascade process to child providers
-    if (hasRels && modelItems != null) {
-      final FluentRelationSyncMode mode = task.helper?.syncMode ?? FluentRelationSyncMode.preserveLocal;
+      // Recursive Relational Hydration: Cascade process to child providers
+      if (hasRels && modelItems != null) {
+        final FluentRelationSyncMode mode = task.helper?.syncMode ?? FluentRelationSyncMode.preserveLocal;
 
-      await _relationsMixin!._processBatchRelations(
-        txn,
-        modelItems,
-        task,
-        batch: isRootBatch ? null : batch,
-        parentJsons: sqlJsonCache,
-        currentDepth: nextDepth,
-        visitedTables: currentVisited,
-        syncMode: mode,
-      );
+        await _relationsMixin!._processBatchRelations(
+          txn,
+          modelItems,
+          task,
+          batch: isRootBatch ? null : batch,
+          parentJsons: sqlJsonCache,
+          currentDepth: nextDepth,
+          visitedTables: currentVisited,
+          syncMode: mode,
+        );
+      }
+    } finally {
+      // Guaranteed cleanup to prevent stale table state on error retry
+      currentVisited.remove(tableName);
     }
-    currentVisited.remove(tableName);
   }
 
   /// Validates the outcome of a batched transaction, identifying constraint violations or structural execution failures.

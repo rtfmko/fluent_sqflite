@@ -318,7 +318,8 @@ class FluentSQFLiteException extends FluentException {
   ///
   /// * [message]: A descriptive explanation of the database failure.
   /// * [stackTrace]: The execution path leading to the failure.
-  FluentSQFLiteException(String message, {StackTrace? stackTrace}) : super(message, stackTrace);
+  /// * [originalError]: The underlying technical error, if available.
+  FluentSQFLiteException(String message, {dynamic originalError, StackTrace? stackTrace}) : super(message, stackTrace, originalError);
 }
 
 /// Exception thrown when a relational mapping or evaluation fails.

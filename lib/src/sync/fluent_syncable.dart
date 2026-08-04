@@ -193,6 +193,12 @@ mixin FluentSyncable<T extends FluentStorable> on FluentProvider<T> {
         if (ids.isNotEmpty) {
           FluentLog.debug('Marking ${ids.length} items as synced', tag: 'sync_$tableName');
           await updateFieldsMultipleByIds(ids, actualMarkAsSyncedFields, policy: policy.withTag('${'sync_$tableName'}_mark_synced'), dbName: dbName);
+        } else {
+          FluentLog.warning(
+            'Failed to mark items as synced: primaryKeyValue is null for all processed items',
+            tag: 'sync_$tableName',
+            hint: 'Ensure that ${T.toString()} correctly implements primaryKeyValue getter.',
+          );
         }
       }
 

@@ -45,24 +45,37 @@ extension FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
   /// and wraps underlying failures into specialized package exception modules.
   void _handleDatabaseException(DatabaseException e, StackTrace stackTrace) {
     final String errorString = e.toString();
-    if (e.isUniqueConstraintError() || errorString.contains('UNIQUE')) {
+    if (e.isUniqueConstraintError() || errorString.contains('UNIQUE') || errorString.contains('1555')) {
       FluentLog.error(
         'Database write aborted due to uniqueness constraint violation',
         e,
         stackTrace,
         tag: '$tableName:exception:database',
         hint: 'Verify data records match table indexing schema parameters and unique identifiers.',
-        context: {'tableName': tableName, 'isConstraintViolation': true},
+        context: {'tableName': tableName, 'isConstraintViolation': true, 'rawError': errorString},
       );
-      throw FluentConstraintException('Unique constraint violation in table "$tableName"', originalError: e);
+      throw FluentConstraintException('Unique constraint violation in table "$tableName"', originalError: e, stackTrace: stackTrace);
     }
+
+    if (e.isNoSuchTableError() || errorString.contains('no such table')) {
+      FluentLog.error(
+        'Database operation failed: Table does not exist in active schema',
+        e,
+        stackTrace,
+        tag: '$tableName:exception:database',
+        hint: 'Ensure schema sync / migrations were properly executed before query dispatch.',
+        context: {'tableName': tableName},
+      );
+      throw FluentSQFLiteException('Table "$tableName" does not exist in database.', originalError: e, stackTrace: stackTrace);
+    }
+
     FluentLog.error(
       'Database pipeline caught unhandled low-level engine exception during write routing',
       e,
       stackTrace,
       tag: '$tableName:exception:database',
       hint: 'Inspect internal SQLite connection status, schema state, or execution query parameters.',
-      context: {'tableName': tableName, 'isConstraintViolation': false},
+      context: {'tableName': tableName, 'isConstraintViolation': false, 'rawError': errorString},
     );
     throw FluentBaseException('Database error while writing to "$tableName": $e', e, stackTrace);
   }
