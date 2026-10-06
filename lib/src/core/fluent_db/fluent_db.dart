@@ -1709,6 +1709,7 @@ class FluentDb {
     Map<String, dynamic>? markAsSyncedFields,
     Object? tag,
     ExecutionPolicy policy = const ExecutionPolicy(),
+    bool pushOnlyUnsynced = true,
     FluentDbKey? dbKey,
   }) {
     final FluentProvider syncProvider = providerByType<T>(dbName: dbKey?.dbName);
@@ -1737,6 +1738,7 @@ class FluentDb {
       markAsSyncedFields: markAsSyncedFields,
       tag: tag,
       policy: policy,
+      pushOnlyUnsynced: pushOnlyUnsynced,
       dbName: dbKey?.dbName,
     );
   }
