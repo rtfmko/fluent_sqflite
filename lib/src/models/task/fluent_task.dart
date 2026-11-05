@@ -4,75 +4,13 @@
 
 part of '../../core/fluent_sqlite_internal.dart';
 
-/// Represents a discrete, self-contained unit of work for the database engine.
+/// One call on a table, as the engine schedules and runs it: what to do ([action], [helper], [data]), which relations
+/// a read loads ([maxDepth], [ignoreLazy]), how it is scheduled ([policy]) and the [tag] of its change events.
 ///
-/// This class serves as the primary command object within the [FluentEngine] and
-/// [FluentProvider], encapsulating both the data to be processed and the metadata
-/// (policy, constraints, and identity) required to execute the operation
-/// asynchronously and safely within the engine's processing pipeline.
+/// The values the engine derives from it ([fingerprint], [staticWeight], [costKey]) are computed on first use and
+/// once per instance: a task is copied a few times on its way (table, policy, id), and most copies never need them.
 class FluentTask {
-  /// Unique identifier for the task; used for tracking, status updates, and cancellation.
-  final int id;
-
-  /// The target table name for this operation.
-  final String table;
-
-  /// The specific database instance identifier (e.g., 'primary', 'cache').
-  final String dbName;
-
-  /// The type of action to perform (e.g., `find`, `save`, `delete`).
-  final FluentDbAction action;
-
-  /// The primary payload or raw data required for the operation.
-  final dynamic data;
-
-  /// The maximum depth for recursive relationship resolution (e.g., fetching nested entities).
-  final int maxDepth;
-
-  /// If true, skips loading relationships marked as "lazy" to optimize performance.
-  final bool ignoreLazy;
-
-  /// If true, bypasses standard validation or deduplication checks.
-  final bool force;
-
-  /// Pre-resolved or injected relational mapping data for batch operations.
-  final List<Map<String, dynamic>>? relations;
-
-  /// The [TableHelper] configuration specifying query constraints (where, limit, etc.).
-  final TableHelper? helper;
-
-  /// The [ExecutionPolicy] defining priority, and timeouts.
-  final ExecutionPolicy policy;
-
-  /// Flags whether this task is a internal maintenance/system task (e.g., cleanup).
-  final bool isSystem;
-
-  /// The base priority weight calculated at instantiation; used for queue sorting.
-  late final int staticWeight;
-
-  /// The dynamic weight adjusted by the coordinator during runtime (e.g., task aging).
-  int executionWeight;
-
-  /// A unique hash representing the task's parameters, used for task deduplication.
-  late final String fingerprint;
-
-  /// Holds a collection of identical tasks that have been merged into this single task
-  /// by the Auto-Batching engine. If null, this is a standard single operation.
-  final List<FluentTask>? mergedTasks;
-
-  /// Returns true if this task contains multiple merged operations.
-  bool get isBatched => mergedTasks != null && mergedTasks!.isNotEmpty;
-
-  /// Generate a key directly from a [FluentTask] for streamlined lookups.
-  String get statsKey => '$dbName:$table';
-
-  /// Constructs a [FluentTask] and automatically computes its scheduling metadata.
-  ///
-  /// The constructor immediately processes the [action], [helper], and [policy]
-  /// to generate a [staticWeight] and [fingerprint]. This ensures that the
-  /// task is "ready for dispatch" the moment it is instantiated, allowing
-  /// the [FluentEngine] to place it into the correct priority queue
-  /// without further computation.
+  /// Creates a task.
   FluentTask({
     this.id = 0,
     this.table = '',
@@ -81,246 +19,167 @@ class FluentTask {
     this.data,
     this.maxDepth = 1,
     this.ignoreLazy = false,
-    this.force = false,
-    this.relations,
     this.helper,
     this.policy = const ExecutionPolicy(),
-    this.isSystem = false,
+    this.tag,
     this.executionWeight = 0,
     this.mergedTasks,
-  }) {
-    // Determine the baseline computational cost of this task.
-    staticWeight = _calculateStaticWeight();
+  });
 
-    // Create a unique identifier to support automatic task deduplication.
-    fingerprint = _calculateFingerprint();
-  }
+  /// Identifies the queued call (set by the engine).
+  final int id;
 
-  /// Creates a copy of this [FluentTask] with the specified fields replaced.
+  /// The table of the call.
+  final String table;
+
+  /// The database of [table].
+  final String dbName;
+
+  /// What the call does.
+  final FluentDbAction action;
+
+  /// The payload: models to write, or the body of a relation operation / transaction.
+  final dynamic data;
+
+  /// How many relation levels a read loads; 0 loads none (`FluentLoad.none`).
+  final int maxDepth;
+
+  /// Whether a read also loads the `lazy` relations (`FluentLoad.all`).
+  final bool ignoreLazy;
+
+  /// The condition, order, paging, SQL and write options of the call.
+  final TableHelper? helper;
+
+  /// Priority and read collapsing.
+  final ExecutionPolicy policy;
+
+  /// The `tag:` of the call, carried to its change events (`FluentChangeEvent.tag`).
+  final Object? tag;
+
+  /// The weight the scheduler orders reads by (static weight + measured cost), set when the task is queued.
+  int executionWeight;
+
+  /// Engine clock (ms) when the task entered the queue; used for aging.
+  int enqueuedAt = 0;
+
+  /// The calls merged into this one (adjacent saves, `findById` lookups); `null` for a single call.
+  final List<FluentTask>? mergedTasks;
+
+  /// Whether this task carries several merged calls.
+  bool get isBatched => mergedTasks != null && mergedTasks!.isNotEmpty;
+
+  /// Identifies identical reads: two reads with the same fingerprint (and no write between them) return the same rows.
+  late final String fingerprint = _calculateFingerprint();
+
+  /// The base cost of the task, from its action and shape (the scheduler adds the measured cost).
+  late final int staticWeight = _calculateStaticWeight();
+
+  /// The key of the task's query shape in the cost model (`FluentTableStatsTracker.keyOf`).
+  late final String costKey = FluentTableStatsTracker.keyOf(this);
+
+  /// A copy with the given values replaced (the derived values are computed again when needed).
   FluentTask copyWith({
     int? id,
     String? table,
     String? dbName,
-    FluentDbAction? action,
     dynamic data,
-    int? maxDepth,
-    bool? ignoreLazy,
-    bool? force,
-    List<Map<String, dynamic>>? relations,
     TableHelper? helper,
-    int? executionWeight,
-    bool? isSystem,
     ExecutionPolicy? policy,
     List<FluentTask>? mergedTasks,
   }) => FluentTask(
     id: id ?? this.id,
     table: table ?? this.table,
     dbName: dbName ?? this.dbName,
-    action: action ?? this.action,
+    action: action,
     data: data ?? this.data,
-    maxDepth: maxDepth ?? this.maxDepth,
-    ignoreLazy: ignoreLazy ?? this.ignoreLazy,
-    force: force ?? this.force,
-    relations: relations ?? this.relations,
+    maxDepth: maxDepth,
+    ignoreLazy: ignoreLazy,
     helper: helper ?? this.helper,
-    executionWeight: executionWeight ?? this.executionWeight,
-    isSystem: isSystem ?? this.isSystem,
     policy: policy ?? this.policy,
+    tag: tag,
+    executionWeight: executionWeight,
     mergedTasks: mergedTasks ?? this.mergedTasks,
   );
 
-  /// Indicates whether this operation performs a write action on the database.
+  /// Whether the call changes data.
   bool get isWriteOp => action.isWriteOp;
 
-  /// Indicates whether this operation supports data streaming functionality.
-  bool get isStreamOp => action.isStreamOp;
+  /// Whether the call publishes a change event (raw SQL only when it changes rows).
+  bool get isStreamOp => action.isStreamOp || (action == FluentDbAction.execute && _changesData(helper?.sql));
 
-  /// Serializes the [FluentTask] instance into a JSON-compatible map.
-  Map<String, dynamic> toMap() => {
-    'id': id,
-    'table': table,
-    'dbName': dbName,
-    'action': action.index,
-    'data': data,
-    'maxDepth': maxDepth,
-    'ignoreLazy': ignoreLazy,
-    'relationsSchema': relations,
-    'helper': helper?.toMap(),
-    'isSystem': isSystem,
-    'policy': policy.toMap(),
-    'force': force,
-    'mergedTasks': mergedTasks,
-  };
-
-  /// Deserializes a [Map] back into a [FluentTask] instance.
-  factory FluentTask.fromMap(Map<String, dynamic> map) => FluentTask(
-    id: map['id'] is int ? map['id'] as int : 0,
-    table: map['table'] is String ? map['table'] as String : '',
-    dbName: map['dbName'] is String ? map['dbName'] as String : '',
-    action: FluentDbAction.values[map['action'] is int ? map['action'] as int : 0],
-    data: map['data'],
-    maxDepth: map['maxDepth'] is int ? map['maxDepth'] as int : 1,
-    ignoreLazy: map['ignoreLazy'] is bool ? map['ignoreLazy'] as bool : false,
-    relations: map['relationsSchema'] is List ? map['relationsSchema'] as List<Map<String, dynamic>> : null,
-    helper: map['helper'] is Map<String, dynamic> ? TableHelper.fromMap(map['helper'] as Map<String, dynamic>) : null,
-    isSystem: map['isSystem'] is bool ? map['isSystem'] as bool : false,
-    policy: map['policy'] is Map<String, dynamic> ? ExecutionPolicy.fromMap(map['policy'] as Map<String, dynamic>) : const ExecutionPolicy(),
-    force: map['force'] is bool ? map['force'] as bool : false,
-    mergedTasks: map['mergedTasks'] is List ? (map['mergedTasks'] as List).map((e) => FluentTask.fromMap(e as Map<String, dynamic>)).toList() : null,
-  );
-
-  /// Generates a unique "fingerprint" for this task based on its critical parameters.
+  /// Whether raw SQL changes rows (INSERT / UPDATE / DELETE / REPLACE): such `execute` calls publish an event,
+  /// DDL and PRAGMA do not.
   ///
-  /// This fingerprint is used for task deduplication within the [FluentEngine].
-  /// By creating a hash-like identifier, we can instantly detect if an identical
-  /// operation is already queued, preventing redundant database I/O and potential
-  /// race conditions.
-  ///
-  /// **Why include runtime types?**
-  /// Including `arg.runtimeType` ensures that an integer `1` and a string `"1"`
-  /// are treated as distinct parameters, preventing false-positive deduplication.
-  String _calculateFingerprint() {
-    final StringBuffer sb = StringBuffer('$dbName:$table:${action.name}:$maxDepth:$ignoreLazy:');
-
-    final TableHelper? h = helper;
-    if (h != null) {
-      sb.write('${h.id}_${h.where}_${h.orderBy}_${h.limit}_${h.offset}_${h.sql}_');
-
-      if (h.whereArgs != null) {
-        for (final arg in h.whereArgs!) {
-          sb.write('${arg.runtimeType}:$arg,');
-        }
+  /// Leading comments are skipped; for `WITH` the statement after the common table expressions decides (words
+  /// inside their parentheses or in string literals do not count).
+  static bool _changesData(String? sql) {
+    if (sql == null) return false;
+    String head = sql.replaceAll(_comments, ' ').replaceAll(_literals, "''").trimLeft().toUpperCase();
+    if (head.startsWith('WITH')) {
+      for (String inner = head; ; inner = head) {
+        head = head.replaceAll(_innermostParens, ' ');
+        if (head == inner) break;
       }
-      if (h.arguments != null) {
-        for (final arg in h.arguments!) {
-          sb.write('${arg.runtimeType}:$arg,');
-        }
-      }
+      return RegExp(r'\b(INSERT|UPDATE|DELETE|REPLACE)\b').hasMatch(head);
     }
-
-    if (action.isWriteOp && data != null) {
-      sb.write('${data.hashCode}:');
-    }
-
-    if (relations != null) {
-      sb.write('${relations.hashCode}:');
-    }
-
-    final String fingerprint = sb.toString();
-
-    FluentLog.debug('Fingerprint generated for task: $fingerprint', tag: 'FluentTask:fingerprint');
-
-    return fingerprint;
+    return head.startsWith('INSERT') || head.startsWith('UPDATE') || head.startsWith('DELETE') || head.startsWith('REPLACE');
   }
 
-  /// Calculates the static weight of the task based on its computational complexity,
-  /// I/O impact, and relational overhead.
-  ///
-  /// This weight is used by the [FluentEngine] to prioritize tasks in the
-  /// execution queue. Higher weights indicate more resource-intensive operations
-  /// that may require careful scheduling to prevent UI thread stuttering or
-  /// SQLite lock contention.
-  int _calculateStaticWeight() {
-    int w = 0;
+  static final RegExp _comments = RegExp(r'--[^\n]*|/\*.*?\*/', dotAll: true);
+  static final RegExp _literals = RegExp(r"'(?:[^']|'')*'");
+  static final RegExp _innermostParens = RegExp(r'\([^()]*\)');
+
+  /// Everything that decides the rows a read returns; argument types are included so `1` and `'1'` differ, and
+  /// deferred conditions (ids, search, related) with every value of theirs ([FluentDeferredCondition.fingerprint]).
+  String _calculateFingerprint() {
+    final StringBuffer sb = StringBuffer('$dbName:$table:${action.name}:$maxDepth:$ignoreLazy:');
     final TableHelper? h = helper;
-
-    // 1. Complexity Score: Assign base cost to actions based on typical SQLite performance
-    switch (action) {
-      case FluentDbAction.findById:
-      case FluentDbAction.exists:
-      case FluentDbAction.updateSingleField:
-      case FluentDbAction.rawGetItem:
-      case FluentDbAction.restore:
-      case FluentDbAction.readSchema:
-        w += 10;
-        break;
-
-      case FluentDbAction.update:
-      case FluentDbAction.save:
-      case FluentDbAction.saveStats:
-        w += 25;
-        break;
-
-      case FluentDbAction.count:
-      case FluentDbAction.updateMultipleFields:
-      case FluentDbAction.delete:
-      case FluentDbAction.deleteBy:
-      case FluentDbAction.hardDelete:
-      case FluentDbAction.hardDeleteBy:
-      case FluentDbAction.find:
-      case FluentDbAction.findItemsBy:
-      case FluentDbAction.findValidItems:
-      case FluentDbAction.rawGetItems:
-      case FluentDbAction.findDeletedItems:
-        w += 40;
-        break;
-
-      case FluentDbAction.findAll:
-      case FluentDbAction.analyzeStats:
-      case FluentDbAction.updateWithRelations:
-        w += 60;
-        break;
-
-      case FluentDbAction.deleteWhere:
-      case FluentDbAction.hardDeleteWhere:
-      case FluentDbAction.deleteItemsByIds:
-      case FluentDbAction.clearTable:
-      case FluentDbAction.clearExpired:
-      case FluentDbAction.hardDeleteItemsByIds:
-      case FluentDbAction.purgeSoftDeleted:
-      case FluentDbAction.forcePurgeSoftDeleted:
-      case FluentDbAction.restoreItemsByIds:
-      case FluentDbAction.updateAll:
-      case FluentDbAction.updateAllWithRelations:
-      case FluentDbAction.updateMultipleFieldsByIds:
-      case FluentDbAction.wipeAll:
-        w += 100;
-        break;
-
-      case FluentDbAction.execute:
-        w += 150;
-        break;
-
-      default:
-        w += 30;
-    }
-
-    // 2. Query Refinement: Adjust weight based on query builder constraints
     if (h != null) {
-      // 1. Limit optimization:
+      sb.write('${fluentValueKey(h.id)}_${h.where}_${h.orderBy}_${h.limit}_${h.offset}_${h.sql}_${h.columns}_${h.distinct}_');
+      for (final FluentDeferredCondition c in h.deferred ?? const <FluentDeferredCondition>[]) {
+        sb.write('${c.fingerprint};');
+      }
+      sb.write('_');
+      for (final Object? arg in h.whereArgs ?? const []) {
+        sb.write('${fluentValueKey(arg)},');
+      }
+      sb.write('_');
+      for (final Object? arg in h.arguments ?? const []) {
+        sb.write('${fluentValueKey(arg)},');
+      }
+    }
+    if (action.isWriteOp && data != null) sb.write('${identityHashCode(data)}:');
+    return sb.toString();
+  }
+
+  /// The base cost: the action, the paging and order, the relation levels.
+  int _calculateStaticWeight() {
+    int w = switch (action) {
+      FluentDbAction.findById || FluentDbAction.exists || FluentDbAction.restore => 10,
+      FluentDbAction.update || FluentDbAction.save => 25,
+      FluentDbAction.count ||
+      FluentDbAction.updateFields ||
+      FluentDbAction.delete ||
+      FluentDbAction.hardDelete ||
+      FluentDbAction.find ||
+      FluentDbAction.findMaps ||
+      FluentDbAction.rawQuery => 40,
+      FluentDbAction.clearTable || FluentDbAction.clearExpired || FluentDbAction.purgeDeleted || FluentDbAction.wipeAll => 100,
+      FluentDbAction.execute || FluentDbAction.transaction => 150,
+      _ => 30,
+    };
+    final TableHelper? h = helper;
+    if (h != null) {
       if (h.limit != null) {
-        if (h.limit! <= 100) {
-          w -= 15;
-        } else {
-          w += 10;
-        }
-      } else if (action == FluentDbAction.find || action == FluentDbAction.findItemsBy) {
+        w += h.limit! <= 100 ? -15 : 10;
+      } else if (action == FluentDbAction.find) {
         w += 40;
       }
-
-      // 2. Sorting overhead (Temp tables)
-      if (h.sortDirection != null || h.orderBy != null) {
-        w += 20;
-      }
-
-      // 3. Index usage (Efficient lookup)
-      if (h.key != null && h.value != null) {
-        w -= 15;
-      }
+      if (h.orderBy != null) w += 20;
     }
-
-    // 3. Relational Recursion: Penalize deep object graphs (N+1 query risk)
-    if (maxDepth == 0) {
-      w += 150; // Severe penalty for unbounded recursion
-    } else if (maxDepth > 1) {
-      w += (maxDepth * 30);
-    }
-
-    // 4. Data Fetching Policy: Eager loading (ignoreLazy) increases memory pressure
+    // Relation levels cost queries; depth 0 (no relations) costs nothing extra.
+    if (maxDepth > 1) w += maxDepth * 30;
     if (ignoreLazy) w += 20;
-
-    FluentLog.debug('Weight calculated for task $id: $w (Action: ${action.name})', tag: 'FluentTask:weighting');
-
     return w;
   }
 
@@ -330,12 +189,11 @@ class FluentTask {
     if (dbName.isNotEmpty) sb.write(', dbName: $dbName');
     if (maxDepth != 1) sb.write(', maxDepth: $maxDepth');
     if (ignoreLazy) sb.write(', ignoreLazy: true');
-    if (force) sb.write(', force: true');
-    if (isSystem) sb.write(', isSystem: true');
     if (helper != null) sb.write(', helper: $helper');
     if (policy != const ExecutionPolicy()) sb.write(', policy: $policy');
-    if (mergedTasks != null && mergedTasks!.isNotEmpty) sb.write(', mergedTasksCount: ${mergedTasks!.length}');
-    sb.write(', weight: $staticWeight/$executionWeight, hash: $fingerprint}');
+    if (tag != null) sb.write(', tag: $tag');
+    if (isBatched) sb.write(', merged: ${mergedTasks!.length}');
+    sb.write(', weight: $staticWeight/$executionWeight}');
     return sb.toString();
   }
 }

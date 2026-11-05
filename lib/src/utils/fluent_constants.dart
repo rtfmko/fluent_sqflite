@@ -4,8 +4,6 @@
 
 part of '../core/fluent_sqlite_internal.dart';
 
-/// The filename for the dedicated system database used by the FluentEngine.
-const String _systemDbName = 'fluent_system.db';
-
-/// The default retention interval for soft-deleted records before they qualify for hard deletion.
-const Duration defaultSoftDeleteRetentionPeriod = Duration(days: 7);
+/// The file of the telemetry database of earlier versions, deleted at start (query costs now live in each
+/// database's `__fluent_stats` table).
+const String legacyStatsDbName = 'fluent_system.db';

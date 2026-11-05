@@ -6,90 +6,101 @@
 
 part of '../fluent_db.dart';
 
-/// Provides lifecycle management capabilities for the [FluentDb].
-///
-/// This extension encapsulates the orchestration logic required to manage the
-/// database engine's operational state. It handles:
-///
-/// * **Initialization & Restart:** Orchestrating the setup, validation, and hot-reloading
-///   of database configurations.
-/// * **Connection Teardown:** Graceful shutdown of database handles and registry state resets.
-/// * **Diagnostic Control:** Facilitating database maintenance operations, including
-///   the purging of specific databases or total system resets for testing environments.
-/// * **Dynamic Tuning:** Allowing real-time performance adjustments via hot-swapping
-///   SQLite configurations without interrupting active sessions.
-///
-/// Use this extension to control the high-level lifecycle of the persistence
-/// layer across your application's start-up, backgrounding, and testing phases.
-extension FluentDbLifecycle on FluentDb {
-  /// Checks if a database file by [dbName] is currently open.
-  bool isDatabaseOpen(String dbName) {
-    final Map<Type, FluentProvider<FluentStorable>>? group = _groupedRegistry[dbName];
-    if (group == null) return false;
+/// Hooks of the lifecycle for tests (hidden from the public API).
+extension FluentLifecycleHooks on FluentDb {
+  /// Deletes the database file at the path (what `deleteDatabases` and `resetOnSchemaError` call). Tests replace it
+  /// to simulate a file that cannot be deleted (a lock): the caller then checks that the file is really gone.
+  static Future<void> Function(String path) deleteFile = (String path) => databaseFactory.deleteDatabase(path);
+}
 
-    return group.values.any((p) => p.db.isOpen);
+/// The lifecycle of [FluentDb]: [FluentDb.planMigrations], [FluentDb.init], [FluentDb.restart], [FluentDb.close] and
+/// [FluentDb.deleteDatabases] (the public statics serialize them), plus the maintenance timers, the read pool and the
+/// SQLite pragmas of each connection.
+extension _FluentDbLifecycle on FluentDb {
+  /// [FluentDb.planMigrations]: plans every group on its own connection (an open database gets an empty plan).
+  Future<List<FluentMigrationPlan>> _planMigrations(Iterable<FluentGroup> groups, FluentConfig config, {required bool runCode}) async {
+    final List<FluentGroup> groupList = groups.toList(growable: false);
+    _refuseSharedProviders([for (final FluentGroup g in groupList) if (g.providerList.isNotEmpty) g], tag: 'FluentDb:planMigrations');
+    if (!_isInitialized) FluentEngine().applyConfig(config);
+    final List<FluentMigrationPlan> plans = [];
+    for (final FluentGroup group in groupList) {
+      if (group.providerList.isEmpty) continue;
+      final String name = group.dbKey.dbName;
+      if (_groupedRegistry.containsKey(name)) {
+        FluentLog.issue(
+          FluentIssueKind.ignoredCall,
+          'planMigrations: database "$name" is already open, so its schema is already applied; the plan is empty.',
+          database: name,
+          tag: 'FluentDb:planMigrations',
+          hint: 'Plan before FluentDb.init (or after FluentDb.close).',
+        );
+        plans.add(FluentMigrationPlan(database: name, changes: const [], issues: const []));
+        continue;
+      }
+      if (group.readOnly && !group.inMemory) {
+        // A read-only file is never synced (init skips the schema), so there is nothing to plan: it is not even opened,
+        // which keeps the file and its journal untouched.
+        plans.add(FluentMigrationPlan(database: name, changes: const [], issues: const []));
+        continue;
+      }
+      for (final FluentProvider dao in group.providerList) {
+        dao.setDbName(name);
+      }
+      buildFluentRelationGraph(
+        group.providerList,
+        foreignKeysEnabled: group.config.enableForeignKeys,
+        autoFallback: group.autoRelationFallback,
+        indexReferences: group.config.indexReferences ?? config.indexReferences,
+        autoRelations: group.config.autoRelations ?? config.autoRelations,
+      );
+      for (final FluentProvider dao in group.providerList) {
+        dao.refreshSchema();
+      }
+      final String path = await group.resolvePath();
+      // A file that does not exist is planned in memory: planning never creates it.
+      final bool isNew = group.inMemory || !await databaseFactory.databaseExists(path);
+      final Database db = await openDatabase(isNew ? inMemoryDatabasePath : path, singleInstance: false);
+      try {
+        await db.execute('PRAGMA foreign_keys = ${group.config.enableForeignKeys ? 'ON' : 'OFF'}');
+        plans.add(await _planSchema(db, group, _getSortedProviders(group.providerList), runCode: runCode, isNewDatabase: isNew));
+      } finally {
+        await db.close();
+      }
+    }
+    return plans;
   }
 
-  /// Initializes the database registry by processing [groups] of [FluentProvider] entities.
-  ///
-  /// This process performs a multi-stage orchestration:
-  /// 1. **De-duplication:** Ensures each database group is registered exactly once.
-  /// 2. **Linkage:** Automatically resolves relational paths and bidirectional backlinks.
-  /// 3. **Validation:** Checks schema integrity and performs topological sorting for dependency-safe creation.
-  /// 4. **Persistence:** Initializes SQLite instances and synchronizes schema evolution.
-  /// 5. **Coordination:** Spawns the [FluentEngine] for background processing.
-  /// 6. **Maintenance:** Triggers an initial global purge of soft-deleted records.
-  ///
-  /// [isRetry] acts as a safety guard to prevent infinite loops during recovery in dev mode.
-  ///
-  /// ### Usage:
-  /// ```dart
-  /// await FluentDb.init([
-  ///   FluentGroup(
-  ///     dbKey: AppDatabases.cache,
-  ///     providerList: [GoodsProvider(), PriceProvider()],
-  ///   ),
-  ///   FluentGroup(
-  ///     dbKey: AppDatabases.user,
-  ///     providerList: [UserProvider(), ProfileProvider()],
-  ///   ),
-  /// ]);
-  /// ```
-  Future<void> init(Iterable<FluentGroup> groups, {Duration? purgeDuration, bool isDev = false, bool isRetry = false, FluentEngineConfig engineConfig = const FluentEngineConfig()}) async {
+  /// [FluentDb.init]: opens, syncs and registers every group. A failing group closes every database this call opened;
+  /// with `resetOnSchemaError` (and not [isRetry]) its file is deleted and the whole init runs once more.
+  Future<void> _init(Iterable<FluentGroup> groups, FluentConfig config, {required bool isRetry}) async {
     if (_isInitialized) return;
 
+    // The caller's Iterable may be single-use: it is read once, the retry (resetOnSchemaError) reuses this list.
+    final List<FluentGroup> groupList = groups.toList(growable: false);
     final Stopwatch stopwatch = Stopwatch()..start();
     final Map<String, FluentGroup> uniqueGroupsMap = {};
 
-    for (final FluentGroup g in groups) {
+    for (final FluentGroup g in groupList) {
       if (g.providerList.isEmpty) continue;
 
       final String dbName = g.dbKey.dbName;
 
       if (!_isSafeDbName(g.dbKey)) {
-        final FluentDatabaseNameException exception = FluentDatabaseNameException(
-          'Invalid database name: "$dbName". '
-          'Database names must contain only alphanumeric characters and underscores (a-z, A-Z, 0-9, _).',
-          stackTrace: StackTrace.current,
-        );
-        FluentLog.error(
-          'Configuration error: Illegal database name detected.',
-          exception,
-          exception.stackTrace,
+        throw FluentLog.raise(
+          FluentConfigException(
+            'Invalid database name "$dbName": it is used as the file name, so only letters, digits and _ are allowed.',
+            code: FluentErrorCode.invalidDatabaseName,
+            hint: "Rename it, e.g. FluentDbKey('${dbName.replaceAll(RegExp(r'[^A-Za-z0-9_]'), '_')}').",
+          ),
           tag: 'FluentDb:init',
-          hint:
-              'Database names are used as file names for SQLite. '
-              'To ensure cross-platform compatibility and prevent path traversal, '
-              'only use letters (a-z), digits (0-9), and underscores (_). '
-              'Avoid spaces, hyphens, dots, or special characters.',
-          context: {'dbName': dbName},
         );
-        throw exception;
       }
 
       if (uniqueGroupsMap.containsKey(dbName)) {
-        FluentLog.warning(
+        FluentLog.issue(
+          FluentIssueKind.duplicateGroup,
           'Found duplicate FluentGroup for database "$dbName". Only the first will be used.',
+          database: dbName,
           tag: 'FluentDb:init',
           hint:
               'Each database name must be unique within the initialization registry. '
@@ -103,7 +114,8 @@ extension FluentDbLifecycle on FluentDb {
     }
 
     if (uniqueGroupsMap.isEmpty) {
-      FluentLog.warning(
+      FluentLog.issue(
+        FluentIssueKind.noGroups,
         'No active groups with DAOs provided.',
         tag: 'FluentDb:init',
         hint:
@@ -113,73 +125,90 @@ extension FluentDbLifecycle on FluentDb {
       return;
     }
 
+    _refuseSharedProviders(uniqueGroupsMap.values, tag: 'FluentDb:init');
+
     FluentDb._lastConfig = uniqueGroupsMap.values.toList();
-    _isDevMod = isDev;
+    FluentDb._lastFluentConfig = config;
+    FluentEngine().applyConfig(config);
 
-    if (purgeDuration != null) {
-      FluentDb._softDeleteRetentionPeriod = purgeDuration;
-    }
-
-    final Map<String, SQLitePerformanceConfig> performanceConfigs = {};
-    final Map<String, List<String>> dbTables = {};
+    final Map<String, FluentDbConfig> dbConfigs = {};
     final Map<String, Database> dbNameWithDb = {};
     final Map<String, Map<String, int>> dbRelationsCount = {};
+    final Map<String, List<Map<String, Object?>>> stats = {};
+    final Set<String> persistStats = {};
 
-    final String databasesPath = await getDatabasesPath();
 
     for (final FluentGroup group in uniqueGroupsMap.values) {
       final String currentDbName = group.dbKey.dbName;
 
       try {
-        FluentLog.info('Initializing database group: $currentDbName', tag: 'FluentDb:init');
+        FluentLog.debug('Initializing database group: $currentDbName', tag: 'FluentDb:init');
 
         for (final FluentProvider dao in group.providerList) {
           dao.setDbName(currentDbName);
           dao.registerSelf(_register);
         }
+        _warnSharedModelTypes(group);
 
         final List<String> tableNames = [];
         final Map<String, int> relationsManifest = {};
 
+        // Resolve relations once for the whole group: columns, link tables, delete rules.
+        buildFluentRelationGraph(
+          group.providerList,
+          foreignKeysEnabled: group.config.enableForeignKeys,
+          autoFallback: group.autoRelationFallback,
+          indexReferences: group.config.indexReferences ?? config.indexReferences,
+          autoRelations: group.config.autoRelations ?? config.autoRelations,
+        );
+
         for (final FluentProvider dao in group.providerList) {
-          if (dao case final FluentRelationsMixin relDao) {
-            relDao.resolvedRelations.forEach((targetType, relation) {
-              final Type oldType = relation.modelType;
-              relation.bindType(targetType);
-              if (oldType != relation.modelType) {
-                FluentLog.debug('Fixed model binding', tag: 'FluentDb:init', context: {'table': dao.tableName, 'from': oldType.toString(), 'to': relation.modelType.toString()});
-              }
-            });
-            relDao.linkRelations(group.providerList);
-          }
-
           dao.refreshSchema();
-
-          _verifyAndFixIntegrity(dao, currentDbName);
-
           tableNames.add(dao.tableName);
-
-          relationsManifest[dao.tableName] = (dao is FluentRelationsMixin) ? dao.resolvedRelations.length : 0;
+          relationsManifest[dao.tableName] = dao.relationLinks.length;
         }
+
+        group.providerList.forEach(FluentAnalyzer().onSchema);
 
         final List<FluentProvider> sortedDaos = _getSortedProviders(group.providerList);
         FluentLog.debug('Group "$currentDbName": Relations established and sorted.', tag: 'FluentDb:init');
 
-        final String path = '$databasesPath/$currentDbName.db';
-        performanceConfigs[currentDbName] = group.performanceConfig;
-        dbTables[currentDbName] = tableNames;
+        final String path = await group.resolvePath();
+        dbConfigs[currentDbName] = group.config;
         dbRelationsCount[currentDbName] = relationsManifest;
 
-        final Database db = await openDatabase(
+        if (group.inMemory && group.readOnly) {
+          FluentLog.issue(
+            FluentIssueKind.configFallback,
+            'Database "$currentDbName" is in memory and read-only; it is opened writable (an empty read-only database is useless).',
+            database: currentDbName,
+            tag: 'FluentDb:init',
+            hint: 'Remove readOnly: true, or drop inMemory: true to open a prebuilt file read-only.',
+          );
+        }
+        final bool readOnly = group.readOnly && !group.inMemory;
+
+        if (readOnly && !await databaseFactory.databaseExists(path)) {
+          throw FluentConfigException(
+            'Read-only database "$currentDbName" does not exist${FluentLog.showSqlArguments ? ' at $path' : ''}.',
+            code: FluentErrorCode.databaseNotFound,
+            hint: 'Copy the prebuilt database file to FluentGroup.resolvePath() before init, or set readOnly: false to create it.',
+          );
+        }
+
+        if (group.directory != null && !group.inMemory) {
+          await Directory(group.directory!).create(recursive: true);
+        }
+
+        final Database db = readOnly
+            ? await openDatabase(path, readOnly: true, onConfigure: (db) => _applyPerformanceConfig(db, group.config))
+            : await openDatabase(
           path,
           version: 1,
-          onConfigure: (db) => _applyPerformanceConfig(db, group.performanceConfig, isFullConfig: true),
-          onCreate: (db, version) async {
-            FluentLog.info('First run for $currentDbName. Building initial schema...', tag: 'FluentDb:init');
-            for (final FluentProvider dao in sortedDaos) {
-              await dao.createTable(db);
-            }
-          },
+          // Every in-memory group is its own database (a shared instance would mix the groups).
+          singleInstance: !group.inMemory,
+          // Tables are created by the schema sync below (no separate onCreate pass).
+          onConfigure: (db) => _applyPerformanceConfig(db, group.config, isFullConfig: true),
         );
 
         dbNameWithDb[currentDbName] = db;
@@ -188,78 +217,319 @@ extension FluentDbLifecycle on FluentDb {
           dao.setDb(db);
         }
 
-        FluentLog.info('Syncing schema and maintenance for $currentDbName', tag: 'FluentDb:init');
-        await _syncSchema(db, group, sortedProviders: sortedDaos);
-        await _runInitialMaintenance(group);
+        if (readOnly) {
+          FluentLog.info('Database "$currentDbName" opened read-only: schema sync, migrations and maintenance skipped.', tag: 'FluentDb:init');
+          await FluentRelationSchema.keepOneToOneSides(db, group.providerList);
+          // The full-text index the file was built with is used as it is (it cannot be created here).
+          for (final FluentProvider dao in group.providerList) {
+            await dao.adoptFullText(db, group.config.fullText);
+          }
+        } else {
+          FluentLog.debug('Syncing schema and maintenance for $currentDbName', tag: 'FluentDb:init');
+          final bool danglingReferences = await _syncSchema(db, group, sortedProviders: sortedDaos);
+          await _runInitialMaintenance(group, cleanOrphans: danglingReferences || !group.config.enableForeignKeys);
+          if (!group.inMemory) {
+            if ((group.config.diagnostics ?? config.diagnostics).costModel) {
+              stats[currentDbName] = await _loadStats(db, currentDbName);
+              persistStats.add(currentDbName);
+            }
+          }
+        }
       } catch (e, st) {
-        FluentLog.error(
-          'Critical error while initializing group "$currentDbName"',
-          e,
-          st,
+        const String keepHint =
+            'The database file was left untouched. Fix the cause and start again; for throw-away caches '
+            'FluentGroup(resetOnSchemaError: true) recreates the file automatically.';
+        final FluentException failure = e is FluentException
+            ? e
+            : FluentConfigException(
+                'Database "$currentDbName" could not be opened: ${FluentLog.redact('$e')}',
+                hint: 'Usually a corrupted or locked file, or a constraint the existing data violates. $keepHint',
+                cause: e,
+                stackTrace: st,
+              );
+        // Logged once, as the issue: it carries the error, so nothing logs the exception again on its way to the caller.
+        FluentLog.issue(
+          FluentIssueKind.initFailed,
+          'Initialization of database "$currentDbName" failed (${failure.code.name}).',
+          database: currentDbName,
           tag: 'FluentDb:init',
-          hint:
-              'The initialization of database "$currentDbName" failed. '
-              'Check if the database file is corrupted, if there are pending migrations, '
-              'or if a schema mismatch occurred between your DAO models and the physical disk. '
-              'If this is a development environment, consider deleting the database file to trigger a clean recreation.',
-          context: {'isRetry': isRetry, 'dbName': currentDbName, 'path': '$databasesPath/$currentDbName.db'},
+          hint: failure.hint ?? keepHint,
+          context: {'isRetry': isRetry},
+          error: failure,
+          stackTrace: st,
         );
 
-        if (_isDevMod && !isRetry) {
-          FluentLog.warning(
-            'DevMode: Recreating database "$currentDbName" due to initialization failure.',
+        // A refused plan is a decision, a busy / locked file is in use, a read-only file is prebuilt: none of them is a
+        // broken file, so none deletes the database.
+        if (group.resetOnSchemaError && !isRetry && _recreateFixes(failure, group)) {
+          // Every database this call opened is closed (the retry opens them again), then the failing file is deleted.
+          await _closeAll(dbs: {for (final Database db in dbNameWithDb.values) if (db.isOpen) db});
+          final Object? left = await _deleteDatabaseFile(group);
+          if (left != null) {
+            // The file is still there: opening it again would fail the same way, and nothing was recreated.
+            FluentLog.issue(
+              FluentIssueKind.fileDeleteFailed,
+              'The file of database "$currentDbName" could not be deleted, so it was not recreated (resetOnSchemaError: true).',
+              database: currentDbName,
+              tag: 'FluentDb:init',
+              hint: 'Another process or connection probably holds the file. Close it, or delete the file by hand, and start again.',
+              error: left,
+            );
+            Error.throwWithStackTrace(failure, st);
+          }
+          FluentLog.issue(
+            FluentIssueKind.databaseRecreated,
+            'Recreated database "$currentDbName" after an initialization failure (resetOnSchemaError: true). All its data was deleted.',
+            database: currentDbName,
             tag: 'FluentDb:init',
-            hint:
-                'This is an automatic recovery mechanism triggered because "isDevMod" is true. '
-                'The engine detected a corrupted or incompatible database state and is performing a hard reset '
-                'by deleting the file. This ensures a clean schema environment for development.',
+            hint: 'Only use resetOnSchemaError for data that can be downloaded again (caches).',
             context: {'dbName': currentDbName},
           );
-          await databaseFactory.deleteDatabase('$databasesPath/$currentDbName.db');
 
           uniqueGroupsMap.clear();
-          reset();
+          _reset();
 
-          return await init(groups, isDev: isDev, isRetry: true);
+          return await _init(groupList, config, isRetry: true);
         } else {
           stopwatch.stop();
-          rethrow;
+          // Nothing stays half open: the databases this call opened before the failure are closed again.
+          await _closeAll(dbs: {for (final Database db in dbNameWithDb.values) if (db.isOpen) db});
+          Error.throwWithStackTrace(failure, st);
         }
       }
     }
 
-    FluentLog.info('Registry: Spawning FluentDb...', tag: 'FluentDb:init');
+    FluentLog.debug('Registry: Spawning FluentDb...', tag: 'FluentDb:init');
 
-    await FluentEngine().initMultiple(configs: performanceConfigs, dbTables: dbTables, dbRelationsCount: dbRelationsCount, dbNameWithDb: dbNameWithDb, engineConfig: engineConfig);
+    try {
+      await FluentEngine().initMultiple(
+        configs: dbConfigs,
+        dbRelationsCount: dbRelationsCount,
+        dbNameWithDb: dbNameWithDb,
+        stats: stats,
+        persistStats: persistStats,
+      );
+      for (final FluentGroup group in uniqueGroupsMap.values) {
+        final Database? main = dbNameWithDb[group.dbKey.dbName];
+        if (main == null) continue;
+        final List<Database> readers = await _openReadConnections(group, main, config);
+        FluentEngine().attachReaders(group.dbKey.dbName, readers);
+        FluentLog.debug(
+          'Database "${group.dbKey.dbName}" ready',
+          tag: 'FluentDb:init',
+          context: {'readConnections': readers.length, 'diagnostics': '${group.config.diagnostics ?? config.diagnostics}'},
+        );
+      }
+      await FluentTuner().start(dbNameWithDb);
+    } catch (e, st) {
+      // Nothing stays half started: the engine stops and the databases this call opened are closed again.
+      final FluentException failure = e is FluentException
+          ? e
+          : FluentEngineException('The databases could not be started: $e', hint: 'Usually a file another process holds. Fix the cause and call FluentDb.init again.', cause: e, stackTrace: st);
+      FluentLog.report(failure, tag: 'FluentDb:init');
+      await _closeAll(dbs: {for (final Database db in dbNameWithDb.values) if (db.isOpen) db});
+      Error.throwWithStackTrace(failure, st);
+    }
+    unawaited(_deleteLegacyStatsDb(uniqueGroupsMap.values.toList()));
 
     _isInitialized = true;
     stopwatch.stop();
     FluentLog.info('Registry: Initialization complete in ${stopwatch.elapsedMilliseconds}ms', tag: 'FluentDb:init', context: {'totalGroups': uniqueGroupsMap.length});
 
     unawaited(_purgeSoftDeletedGlobal());
+    _restartTimers(config);
   }
 
-  /// Performs a topological sort of [providers] to ensure parent-child dependencies
-  /// are respected during table creation and migration.
-  ///
-  /// Uses a Depth-First Search (DFS) algorithm to order entities such that
-  /// any entity is created only after its dependencies (related tables) are
-  /// initialized. Circular dependencies are detected and handled to prevent
-  /// infinite recursion.
+  /// Whether deleting the file of [group] can fix [failure] (`resetOnSchemaError`): not for a refused plan, a missing
+  /// read-only file, a read-only group, or a file another connection holds (busy / locked).
+  bool _recreateFixes(FluentException failure, FluentGroup group) {
+    if (group.readOnly && !group.inMemory) return false;
+    if (group.inMemory) return false; // no file to recreate
+    if (failure.code == FluentErrorCode.migrationRefused || failure.code == FluentErrorCode.databaseNotFound) return false;
+    final RegExp inUse = RegExp(r'database is locked|database table is locked|SQLITE_BUSY|SQLITE_LOCKED|\bbusy\b', caseSensitive: false);
+    return !inUse.hasMatch('${failure.message} ${failure.cause ?? ''}');
+  }
+
+  /// (Re)starts the periodic trash purge and `PRAGMA optimize` of [config] (only while initialized).
+  void _restartTimers(FluentConfig config) {
+    _trashPurgeTimer?.cancel();
+    _optimizeTimer?.cancel();
+    _trashPurgeTimer = _optimizeTimer = null;
+    if (!_isInitialized) return;
+    final Duration? purgeEvery = config.trashPurgeInterval;
+    if (purgeEvery != null) _trashPurgeTimer = Timer.periodic(purgeEvery, (_) => unawaited(_purgeSoftDeletedGlobal()));
+    final Duration? optimizeEvery = config.optimizeInterval;
+    if (optimizeEvery != null) _optimizeTimer = Timer.periodic(optimizeEvery, (_) => unawaited(_optimizeAll()));
+  }
+
+  /// Opens the read pool of [group] (`readConnections` of the group, else of `FluentConfig`): only for a database
+  /// file in WAL mode. Any problem leaves the pool empty (reads use the main connection) with a warning.
+  Future<List<Database>> _openReadConnections(FluentGroup group, Database main, FluentConfig config) async {
+    final FluentDbConfig cfg = group.config;
+    final int count = (cfg.readConnections ?? config.readConnections ?? FluentTuner.readConnections(group, config)).clamp(0, 4);
+    if (group.inMemory || count == 0) return const [];
+    final List<Database> readers = [];
+    try {
+      final List<Map<String, Object?>> mode = await main.rawQuery('PRAGMA journal_mode');
+      if (mode.isEmpty || mode.first.values.first.toString().toLowerCase() != 'wal') {
+        FluentLog.debug('No read pool for "${group.dbKey.dbName}": the database is not in WAL mode', tag: 'FluentDb:readers');
+        return const [];
+      }
+      final String path = await group.resolvePath();
+      for (int i = 0; i < count; i++) {
+        readers.add(await openDatabase(path, readOnly: true, singleInstance: false, onConfigure: (db) => _applyPerformanceConfig(db, cfg)));
+      }
+      return readers;
+    } catch (e, st) {
+      for (final Database r in readers) {
+        await r.close();
+      }
+      FluentLog.issue(
+        FluentIssueKind.readPoolFallback,
+        'Read connections of "${group.dbKey.dbName}" could not be opened; reads run on the main connection.',
+        database: group.dbKey.dbName,
+        tag: 'FluentDb:readers',
+        hint: 'Everything keeps working, only reads do not run in parallel. Set FluentDbConfig(readConnections: 0) to skip them.',
+        error: e,
+        stackTrace: st,
+      );
+      return const [];
+    }
+  }
+
+  /// The measured query costs kept in [db] (its `__fluent_stats` table, created when missing). A failure only means the
+  /// costs are measured again.
+  Future<List<Map<String, Object?>>> _loadStats(Database db, String dbName) async {
+    try {
+      try {
+        return await db.query(FluentTableStatsTracker.table);
+      } on DatabaseException {
+        // First start: no measurements yet.
+        await db.execute(FluentTableStatsTracker.createTableSql);
+        return const [];
+      }
+    } catch (e) {
+      FluentLog.debug('Query stats of "$dbName" not loaded (measured again): $e', tag: 'FluentDb:stats');
+      return const [];
+    }
+  }
+
+  /// Deletes the telemetry file of earlier versions (`fluent_system.db`); it only held measurements. Earlier versions
+  /// only ever wrote it to the default databases folder, so a file of that name in a group's own directory (which
+  /// may be shared with other code) is left alone, and so is a file one of [groups] resolves to (a database that is
+  /// itself named `fluent_system`).
+  Future<void> _deleteLegacyStatsDb(List<FluentGroup> groups) async {
+    try {
+      final String path = join(await getDatabasesPath(), legacyStatsDbName);
+      for (final FluentGroup g in groups) {
+        if (!g.inMemory && _samePath(await g.resolvePath(), path)) return;
+      }
+      if (await databaseFactory.databaseExists(path)) await databaseFactory.deleteDatabase(path);
+    } catch (e) {
+      FluentLog.debug('Old telemetry file not deleted: ${FluentLog.redact('$e')}', tag: 'FluentDb:stats');
+    }
+  }
+
+  /// Whether [a] and [b] name the same file (absolute, `.` / `..` resolved).
+  bool _samePath(String a, String b) => Directory(a).absolute.uri.normalizePath() == Directory(b).absolute.uri.normalizePath();
+
+  /// Refuses a provider instance listed in two groups (in [groups], or already registered in another open database):
+  /// it holds one database name and connection, so the last group would silently win.
+  void _refuseSharedProviders(Iterable<FluentGroup> groups, {required String tag}) {
+    final Map<FluentProvider, String> owner = Map<FluentProvider, String>.identity();
+    for (final MapEntry<String, _FluentProviderIndex> e in _groupedRegistry.entries) {
+      for (final FluentProvider p in e.value.all) {
+        owner[p] = e.key;
+      }
+    }
+    for (final FluentGroup g in groups) {
+      final String name = g.dbKey.dbName;
+      for (final FluentProvider p in g.providerList) {
+        final String? other = owner[p];
+        if (other != null && other != name) {
+          throw FluentLog.raise(
+            FluentConfigException(
+              'The provider ${p.runtimeType} (table "${p.tableName}") is listed in two databases ("$other" and "$name"); one instance can only belong to one.',
+              hint: 'Create one provider instance per group, e.g. CacheNotes() and MainNotes(), or two instances of the same class.',
+            ),
+            tag: tag,
+          );
+        }
+        owner[p] = name;
+      }
+    }
+  }
+
+  /// Deletes the file of [group] and checks that it is really gone (sqflite swallows delete errors). Returns `null`
+  /// when it is gone, else the error (or a description) of why it stayed. An in-memory group has no file.
+  Future<Object?> _deleteDatabaseFile(FluentGroup group) async {
+    if (group.inMemory) return null;
+    Object? error;
+    String? path;
+    try {
+      path = await group.resolvePath();
+      await FluentLifecycleHooks.deleteFile(path);
+    } catch (e) {
+      error = e;
+    }
+    if (path == null) return error;
+    try {
+      if (await _fileStillThere(path)) return error ?? 'the file is still there after the delete';
+    } catch (e) {
+      return error ?? e;
+    }
+    return null;
+  }
+
+  /// Whether a file exists at [path] (any content: a damaged file is not a database for sqflite, but it is a file).
+  Future<bool> _fileStillThere(String path) async {
+    if (await databaseFactory.databaseExists(path)) return true;
+    final RegExp separator = RegExp(r'[\\/]');
+    final String name = path.split(separator).last;
+    final Directory folder = Directory(path).parent;
+    if (!folder.existsSync()) return false;
+    await for (final entity in folder.list()) {
+      if (entity.path.split(separator).last == name) return true;
+    }
+    return false;
+  }
+
+  /// One model type stored by several providers (in different tables) works through the providers themselves, but not
+  /// through calls that find the provider by model type (`FluentDb.find<T>()`, relations to `T`): warn once at init.
+  void _warnSharedModelTypes(FluentGroup group) {
+    final Map<Type, List<FluentProvider>> byType = {};
+    for (final FluentProvider p in group.providerList) {
+      byType.putIfAbsent(p.modelType, () => []).add(p);
+    }
+    for (final MapEntry<Type, List<FluentProvider>> e in byType.entries.where((e) => e.value.length > 1)) {
+      final String providers = e.value.map((p) => '${p.runtimeType} → ${p.tableName}').join(', ');
+      FluentLog.issue(
+        FluentIssueKind.sharedModelType,
+        '${e.key} is stored in ${e.value.length} tables of "${group.dbKey.dbName}" ($providers).',
+        database: group.dbKey.dbName,
+        tag: 'FluentDb:init',
+        hint: 'This works through each provider (FluentDb.provider<${e.value.first.runtimeType}>().find(...)). Calls by model type '
+            '(FluentDb.find<${e.key}>(), model.save(), relations to ${e.key}) cannot choose a table and fail. If that is not intended, '
+            'give each table its own model type (class Archived${e.key} extends ${e.key}).',
+      );
+    }
+  }
+
+  /// [providers] ordered so that referenced tables come before the tables referencing them (depth-first). A cycle is
+  /// reported (`circularReference`) and broken where it is found.
   List<FluentProvider> _getSortedProviders(Set<FluentProvider> providers) {
     final List<FluentProvider> sorted = [];
-    final Set<Type> visited = {};
-    final Set<Type> visiting = {};
-
-    final Map<Type, FluentProvider> typeToProvider = {for (final FluentProvider p in providers) p.modelType: p};
+    final Set<FluentProvider> visited = {};
+    final Set<FluentProvider> visiting = {};
 
     void visit(FluentProvider provider) {
-      final type = provider.modelType;
-      if (visited.contains(type)) return;
+      if (visited.contains(provider)) return;
 
-      if (visiting.contains(type)) {
-        FluentLog.warning(
+      if (visiting.contains(provider)) {
+        FluentLog.issue(
+          FluentIssueKind.circularReference,
           'Circular dependency detected for table "${provider.tableName}"',
+          table: provider.tableName,
           tag: 'FluentDb:getSorted',
           hint: 'The model graph contains a cycle. Ensure that foreign key constraints are not mutually dependent.',
           context: {'table': provider.tableName},
@@ -267,19 +537,17 @@ extension FluentDbLifecycle on FluentDb {
         return;
       }
 
-      visiting.add(type);
+      visiting.add(provider);
       FluentLog.debug('Visiting provider', tag: 'FluentDb:getSorted', context: {'table': provider.tableName});
 
-      if (provider is FluentRelationsMixin) {
-        final Map<Type, FluentDbRelation> relations = provider.resolvedRelations;
-        for (final Type targetType in relations.keys) {
-          final targetProvider = typeToProvider[targetType];
-          if (targetProvider != null) visit(targetProvider);
-        }
+      // Referenced tables first (Article.author → people is created before articles).
+      for (final FluentRelationLink link in provider.relationLinks) {
+        if (!link.isReference || identical(link.target, provider)) continue;
+        if (providers.contains(link.target)) visit(link.target);
       }
 
-      visiting.remove(type);
-      visited.add(type);
+      visiting.remove(provider);
+      visited.add(provider);
       sorted.add(provider);
 
       FluentLog.debug('Sorted provider appended', tag: 'FluentDb:getSorted', context: {'table': provider.tableName});
@@ -287,266 +555,156 @@ extension FluentDbLifecycle on FluentDb {
 
     FluentLog.debug('Starting topological sort of providers', tag: 'FluentDb:getSorted', context: {'count': providers.length});
     providers.forEach(visit);
-    FluentLog.info('Topological sort completed', tag: 'FluentDb:getSorted');
+    FluentLog.debug('Topological sort completed', tag: 'FluentDb:getSorted');
     return sorted;
   }
 
-  /// Verifies the relational integrity between a source DAO and its target models.
-  ///
-  /// This method acts as a self-healing schema validator:
-  /// 1. **PK Verification:** Ensures the target of a relationship is actually a Primary Key.
-  /// 2. **Auto-Correction:** If the target isn't a PK but allows auto-correction,
-  ///    it forces the property and refreshes the schema.
-  /// 3. **Fault Isolation:** If correction is impossible or the model is missing,
-  ///    it disables the relation to prevent runtime SQL failures.
-  void _verifyAndFixIntegrity(FluentProvider dao, String dbName) {
-    if (dao is! FluentRelationsMixin) return;
-
-    final Map<Type, FluentDbRelation> relations = dao.resolvedRelations;
-
-    relations.forEach((targetType, relation) {
-      try {
-        final FluentProvider<FluentStorable> targetProvider = FluentDb.providerForType(targetType, dbName: dbName);
-        final FluentDbColumn targetCol = targetProvider.primaryKeyColumn;
-
-        if (!targetCol.isPrimaryKey) {
-          if (targetCol.autoCorrectAllowed) {
-            targetCol.isPrimaryKey = true;
-            targetProvider.refreshSchema();
-            FluentLog.info('AUTO-FIX: Forced PRIMARY KEY on "${targetProvider.tableName}.${targetCol.name}"', tag: 'FluentDb:verifyAndFix');
-          } else {
-            relation.disable('Target column is not a PK and auto-correct is disabled');
-            FluentLog.error(
-              'Integrity violation: Target column is not a PK',
-              FluentConstraintException('Constraint violation in ${dao.tableName}', originalError: 'SQLITE_CONSTRAINT'),
-              StackTrace.current,
-              tag: 'FluentDb:verifyAndFix',
-              hint:
-                  'The relation setup requires the referenced column to be a Primary Key. '
-                  '1) Ensure the target column has @PrimaryKey annotation. '
-                  '2) If you cannot change the schema, enable "autoCorrectAllowed" on the column definition to force the fix. '
-                  '3) Verify if you are referencing the correct model type.',
-              context: {'table': dao.tableName, 'targetTable': targetProvider.tableName, 'dbName': dbName},
-            );
-          }
-        }
-      } catch (e, s) {
-        relation.disable('Target column is not a PK and auto-correct is disabled');
-        FluentLog.error(
-          'Broken relation in "${dao.tableName}": Model "$targetType" is not registered.',
-          e,
-          s,
-          tag: 'FluentDb:verifyAndFix',
-          hint:
-              'The relation cannot be resolved because the target model "$targetType" is not found in the current registry. '
-              '1) Ensure the model "$targetType" is included in your FluentGroup definition. '
-              '2) Verify that the model belongs to the same database group ("$dbName"). '
-              '3) Check for typos in the relation type definition.',
-          context: {'table': dao.tableName, 'targetModel': targetType.toString(), 'dbName': dbName},
-        );
-      }
-    });
-  }
-
-  /// Performs a soft-restart of the database engine by tearing down existing
-  /// connections and re-initializing with the current (or updated) configuration.
-  ///
-  /// This is particularly useful for hot-reloading schema changes in development,
-  /// switching between database modes, or applying runtime migration updates
-  /// without restarting the entire application process.
-  ///
-  /// [updateConfig] An optional callback to modify the [FluentGroup] configuration
-  /// before re-initialization (e.g., adding a new DAO or changing connection flags).
-  Future<void> restart({List<FluentGroup> Function(List<FluentGroup> currentConfig)? updateConfig}) async {
+  /// [FluentDb.restart]: closes everything and opens the groups of the last init again (changed by [updateConfig]).
+  Future<void> _restart(List<FluentGroup> Function(List<FluentGroup> groups)? updateConfig) async {
     if ((FluentDb._lastConfig?.isEmpty ?? true)) {
-      FluentLog.warning(
+      FluentLog.issue(
+        FluentIssueKind.ignoredCall,
         'Restart failed: No previous configuration found.',
         tag: 'FluentDb:restart',
         hint: 'Ensure that init() has been called successfully at least once before requesting a restart.',
       );
       return;
     }
-    FluentLog.info('Restarting database engine...', tag: 'db:registry', linesBefore: 2);
+    FluentLog.info('Restarting database engine...', tag: 'db:registry');
 
+    // The app's callback runs first: when it throws, the databases stay open as they were.
+    final List<FluentGroup> configToUse;
+    try {
+      configToUse = updateConfig != null ? updateConfig(List.of(FluentDb._lastConfig ?? const [])) : List.of(FluentDb._lastConfig ?? const []);
+    } catch (e, st) {
+      throw FluentLog.raise(
+        FluentConfigException('restart: the update callback threw: $e', hint: 'The databases were left open as they were; fix the callback and call restart again.', cause: e, stackTrace: st),
+        tag: 'FluentDb:restart',
+      );
+    }
+    await _closeAll();
+    await _init(configToUse, FluentDb._lastFluentConfig, isRetry: false);
+  }
+
+  /// [FluentDb.close]: stops the timers and the engine (calls already made finish first), runs `PRAGMA optimize` and
+  /// closes [dbs] (every open database of the registry without it), then forgets the registered providers.
+  Future<void> _closeAll({Set<Database>? dbs}) async {
+    FluentLog.debug('Closing all database connections...', tag: 'FluentDb:close');
+    _trashPurgeTimer?.cancel();
+    _trashPurgeTimer = null;
+    _optimizeTimer?.cancel();
+    _optimizeTimer = null;
+    // Stop the engine first: calls already made finish, later ones fail clearly; then the files are closed.
     await FluentEngine().shutdown();
 
-    final List<FluentGroup> configToUse = updateConfig != null ? updateConfig(List.from(FluentDb._lastConfig ?? [])) : FluentDb._lastConfig ?? [];
-    await closeAll();
-    await init(configToUse, isDev: _isDevMod);
-  }
-
-  /// Hot-swaps the performance configuration for the database associated with the provided provider type.
-  ///
-  /// This method allows for dynamic adjustment of SQLite pragmas (such as cache size or
-  /// synchronization modes) at runtime without requiring a full engine restart.
-  ///
-  /// Note: Only dynamic settings are applied. Structural settings that require a
-  /// fresh connection are ignored in this hot-swap.
-  Future<void> changeCurrentPerformanceConfig<T extends FluentProvider>(SQLitePerformanceConfig newConfig, {FluentDbKey? dbKey}) async {
-    final Database db = FluentDb.provider<T>(dbName: dbKey?.dbName).db;
-
-    FluentLog.debug('Attempting hot-swap of performance config', tag: 'FluentDb:changePerformance', context: {'provider': T.toString()});
-    await _applyPerformanceConfig(db, newConfig, isFullConfig: false);
-
-    FluentLog.info('Performance settings hot-swapped successfully', tag: 'FluentDb:changePerformance', context: {'provider': T.toString()});
-  }
-
-  /// Gracefully shuts down all active database connections and resets the registry state.
-  ///
-  /// [dbs] An optional set of specific databases to close. If not provided,
-  /// all currently open databases in the registry will be shut down.
-  /// This method performs the following steps:
-  /// 1. **De-duplication:** Identifies unique open database connections from all providers.
-  /// 2. **Teardown:** Safely closes each connection to prevent file corruption or handle leaks.
-  /// 3. **Reset:** Clears all registered providers and sets the initialization flag to false.
-  Future<void> closeAll({Set<Database>? dbs}) async {
-    FluentLog.debug('Closing all database connections...', tag: 'FluentDb:close');
-
-    final Set<Database> uniqueDbs = dbs ?? _groupedRegistry.values.expand((group) => group.values).map((p) => p.db).where((db) => db.isOpen).toSet();
+    final Set<Database> uniqueDbs = dbs ?? _groupedRegistry.values.expand((group) => group.all).map((p) => p.dbOrNull).whereType<Database>().where((db) => db.isOpen).toSet();
 
     for (final Database db in uniqueDbs) {
       try {
         final String dbPath = db.path;
+        await _optimize(db);
         await db.close();
-        FluentLog.debug('Database closed successfully', tag: 'FluentDb:close', context: {'path': dbPath});
+        // The path only appears when the log may show it (showSqlArguments).
+        FluentLog.debug('Database closed successfully', tag: 'FluentDb:close', context: FluentLog.showSqlArguments ? {'path': dbPath} : null);
       } catch (e, st) {
-        FluentLog.error('Error closing database', e, st, tag: 'FluentDb:close', hint: 'The database connection may have already been closed or became unresponsive during teardown.');
+        FluentLog.issue(FluentIssueKind.closeFailed, 'Error closing database', error: e, stackTrace: st, tag: 'FluentDb:close', hint: 'The database connection may have already been closed or became unresponsive during teardown.');
       }
     }
     _groupedRegistry.clear();
     _isInitialized = false;
-    await FluentEngine().shutdown();
     FluentLog.info('Registry reset: All connections closed and providers cleared.', tag: 'FluentDb:close');
   }
 
-  /// Safely shuts down all database operations, closes connections, and permanently
-  /// deletes all database files from the file system.
-  ///
-  /// This method is intended for use cases like user logout or complete app reset.
-  /// It ensures that no file locks remain before attempting deletion.
-  Future<void> destroyAllDatabases() async {
-    FluentLog.warning('Initiating total data wipe. All databases will be destroyed.', tag: 'FluentDb:destroyAll');
-
-    await FluentEngine().pauseQueue();
-
-    for (final Map<Type, FluentProvider<FluentStorable>> group in _groupedRegistry.values) {
-      for (final FluentProvider<FluentStorable> provider in group.values) {
-        FluentEngine().broadcastSystemAction(FluentDbAction.wipeAll, modelType: provider.runtimeType);
-      }
-    }
-
-    // Added delay for UI to render new states
-    await Future<void>.delayed(const Duration(milliseconds: 50));
-
-    final Set<Database> uniqueDbs = _groupedRegistry.values.expand((group) => group.values).map((p) => p.db).where((db) => db.isOpen).toSet();
-    final List<String> pathsToDelete = uniqueDbs.map((db) => db.path).toList();
-
-    await closeAll(dbs: uniqueDbs);
-
-    for (final String path in pathsToDelete) {
-      try {
-        FluentLog.debug('Deleting physical database file', tag: 'FluentDb:destroyAll', context: {'path': path});
-        await databaseFactory.deleteDatabase(path);
-      } catch (e, st) {
-        FluentLog.error('Failed to delete database file', e, st, tag: 'FluentDb:destroyAll', context: {'path': path});
-      }
-    }
-
-    await FluentEngine().destroy();
-
-    FluentLog.info('Total data wipe completed successfully. Engine is reset.', tag: 'FluentDb:destroyAll');
-  }
-
-  /// Performs a complete wipe of all data, notifies the UI to clear its state,
-  /// and then immediately re-initializes the database engine using the last known configuration.
-  ///
-  /// This is the recommended method for handling "User Logout" scenarios, ensuring
-  /// that no previous user's data remains in memory or on disk, while leaving
-  /// the app ready for a new user to log in.
-  Future<void> destroyAllDatabasesAndRestart({List<FluentGroup> Function(List<FluentGroup> currentConfig)? updateConfig}) async {
-    FluentLog.info('Executing Wipe & Restart sequence...', tag: 'FluentDb:wipeAndRestart');
-
-    await destroyAllDatabases();
-
-    FluentLog.debug('Re-initializing engine with clean state', tag: 'FluentDb:wipeAndRestart');
-    await restart(updateConfig: updateConfig);
-
-    FluentLog.info('Wipe & Restart sequence completed successfully.', tag: 'FluentDb:wipeAndRestart');
-  }
-
-  /// Permanently removes a specific database file from the file system.
-  ///
-  /// This method locates the database by name within the application's
-  /// default database directory and performs an irreversible deletion.
-  ///
-  /// [dbName] The identifier of the database to be dropped.
-  @visibleForTesting
-  Future<void> dropDatabase(FluentDbKey dbKey) async {
-    FluentLog.warning(
-      'Dropping database: "${dbKey.dbName}". All data will be permanently deleted.',
-      tag: 'FluentDb:drop',
-      hint: 'This operation is destructive and cannot be undone.',
-      context: {'dbName': dbKey.dbName},
-    );
-
-    try {
-      final String databasesPath = await getDatabasesPath();
-      final String path = '$databasesPath/${dbKey.dbName}';
-
-      await FluentEngine().hardReset();
-
-      FluentLog.debug('Deleting database file', tag: 'FluentDb:drop', context: {'path': path});
-      await databaseFactory.deleteDatabase(path);
-
-      FluentLog.info('Database file successfully removed', tag: 'FluentDb:drop', context: {'dbName': dbKey.dbName});
-    } catch (e, st) {
-      FluentLog.error(
-        'Failed to drop database: "${dbKey.dbName}"',
-        e,
-        st,
-        tag: 'FluentDb:drop',
-        hint: 'Verify that the database file is not currently locked by an active connection or operating system process.',
+  /// [FluentDb.deleteDatabases]: tells watchers the tables are empty, closes everything, deletes the files of
+  /// [dbName] (all without it) and, with [reopen], opens the groups again.
+  Future<void> _deleteDatabases(String? dbName, {required bool reopen}) async {
+    // Only open databases: groups of the last init that are closed (or were deleted before) have no files to delete.
+    final List<FluentGroup> groups = [for (final FluentGroup g in FluentDb._lastConfig ?? const <FluentGroup>[]) if (_groupedRegistry.containsKey(g.dbKey.dbName)) g];
+    final List<FluentGroup> requested = [for (final FluentGroup g in groups) if (dbName == null || g.dbKey.dbName == dbName) g];
+    if (requested.isEmpty) {
+      throw FluentLog.raise(
+        FluentConfigException(
+          dbName == null ? 'No database is open, so none can be deleted.' : 'Database "$dbName" is not open, so it cannot be deleted.',
+          code: FluentErrorCode.databaseNotFound,
+          hint: 'Use the dbKey of a group passed to FluentDb.init([...]).',
+        ),
+        tag: 'FluentDb:delete',
       );
     }
-  }
-
-  /// Wipes all registered databases from the file system and resets the background worker coordinator.
-  ///
-  /// This method is intended for test environments and emergency recovery. It iterates
-  /// through all registered providers, deletes their corresponding database files,
-  /// and performs a hard reset on the coordinator to clear stale tasks and connection states.
-  @visibleForTesting
-  Future<void> dropAll() async {
-    FluentLog.warning('Executing hard reset: Dropping all databases.', tag: 'FluentDb:dropAll', hint: 'This will irreversibly delete all local data. Ensure this is intentional.');
-    await FluentEngine().hardReset();
-
-    final Set<String> pathsToDelete = _groupedRegistry.values.expand((group) => group.values).map((p) => p.db.path).toSet();
-
-    for (final String path in pathsToDelete) {
-      try {
-        FluentLog.debug('Deleting database file', tag: 'FluentDb:dropAll', context: {'path': path});
-        await databaseFactory.deleteDatabase(path);
-      } catch (e, st) {
-        FluentLog.error('Failed to drop database file for $path', e, st, tag: 'FluentDb:dropAll');
+    // A read-only (prebuilt) file is not the library's data: it is kept, and the group stays open as it is.
+    final List<FluentGroup> deleted = [];
+    for (final FluentGroup g in requested) {
+      if (g.readOnly && !g.inMemory) {
+        FluentLog.info('Database "${g.dbKey.dbName}" is read-only (prebuilt), so its file was kept.', tag: 'FluentDb:delete');
+      } else {
+        deleted.add(g);
       }
     }
-    FluentLog.info('Resetting FluentDb...', tag: 'FluentDb:dropAll');
-    await FluentEngine().hardReset();
+    if (deleted.isEmpty) return;
+    FluentLog.info('Deleting database files: ${deleted.map((g) => g.dbKey.dbName).join(', ')}', tag: 'FluentDb:delete');
 
-    FluentLog.info('DropAll procedure completed successfully.', tag: 'FluentDb:dropAll');
+    for (final FluentGroup group in deleted) {
+      for (final FluentProvider<FluentStorable> provider in _groupedRegistry[group.dbKey.dbName]?.all ?? const <FluentProvider>[]) {
+        FluentEngine().broadcastSystemAction(FluentDbAction.wipeAll, provider);
+      }
+    }
+
+    await _closeAll();
+    // Stats of deleted databases must not be written back to the new files.
+    for (final FluentGroup g in deleted) {
+      FluentTableStatsTracker().discard(g.dbKey.dbName);
+    }
+    // The delete is checked: sqflite does not report a file it could not delete (a lock), and the old rows would stay.
+    final List<FluentGroup> failed = [];
+    Object? firstCause;
+    for (final FluentGroup g in deleted) {
+      final Object? left = await _deleteDatabaseFile(g);
+      if (left == null) continue;
+      failed.add(g);
+      firstCause ??= left;
+      if (!reopen) {
+        FluentLog.issue(
+          FluentIssueKind.fileDeleteFailed,
+          'The file of database "${g.dbKey.dbName}" could not be deleted; it keeps its data.',
+          database: g.dbKey.dbName,
+          tag: 'FluentDb:delete',
+          hint: 'Another process or connection probably holds the file. Close it and call FluentDb.deleteDatabases again.',
+          error: left,
+        );
+      }
+    }
+
+    // reopen: every group except the ones whose file stayed (they would show the old rows). Without reopen: the groups
+    // that were not deleted, plus the ones whose delete failed (they still hold their data, nothing is lost).
+    final List<FluentGroup> reopened = reopen ? [for (final FluentGroup g in groups) if (!failed.contains(g)) g] : [for (final FluentGroup g in groups) if (!deleted.contains(g) || failed.contains(g)) g];
+    if (reopened.isNotEmpty) await _init(reopened, FluentDb._lastFluentConfig, isRetry: false);
+    // A later restart() opens what stayed open: a deleted database is not created again behind the app's back.
+    FluentDb._lastConfig = reopen ? groups : reopened;
+    if (reopen && failed.isNotEmpty) {
+      throw FluentLog.raise(
+        FluentConfigException(
+          'The file of database ${failed.map((g) => '"${g.dbKey.dbName}"').join(', ')} could not be deleted, so ${failed.length == 1 ? 'it was' : 'they were'} not opened again (the old data is still there).',
+          hint: 'Another process or connection probably holds the file. Close it, then call FluentDb.deleteDatabases() or FluentDb.restart() again.',
+          cause: firstCause,
+        ),
+        tag: 'FluentDb:delete',
+      );
+    }
+    if (failed.isEmpty) FluentLog.info('Database files deleted${reopen ? ' and opened again' : ''}.', tag: 'FluentDb:delete');
   }
 
-  /// Configures SQLite runtime parameters to optimize I/O, concurrency, and data integrity.
-  ///
-  /// [db] The database instance to configure.
-  /// [cfg] The performance settings defining cache size, journaling, and synchronization.
-  /// [isFullConfig] If true, applies structural settings (e.g., `journal_mode`, `foreign_keys`)
-  /// that require a fresh connection or re-opening of the database.
-  Future<void> _applyPerformanceConfig(Database db, SQLitePerformanceConfig cfg, {bool isFullConfig = false}) async {
+  /// Applies the pragmas of [cfg] to [db] when it is opened (`onConfigure`): `synchronous`, `cache_size`,
+  /// `busy_timeout`, `temp_store`. [isFullConfig] (the main writable connection only, not read-only ones or the read
+  /// pool) also sets `foreign_keys` and `journal_mode`.
+  Future<void> _applyPerformanceConfig(Database db, FluentDbConfig cfg, {bool isFullConfig = false}) async {
     FluentLog.debug('Applying SQLite performance pragmas', tag: 'FluentDb:cfg', context: {'synchronous': cfg.synchronous.value, 'cacheSize': cfg.cacheSize.rawValue, 'isFullConfig': isFullConfig});
 
     await db.execute('PRAGMA synchronous = ${cfg.synchronous.value};');
     await db.execute('PRAGMA cache_size = ${cfg.cacheSize.rawValue};');
+
+    if (cfg.busyTimeout != null) {
+      await db.rawQuery('PRAGMA busy_timeout = ${cfg.busyTimeout!.inMilliseconds};');
+    }
 
     if (cfg.tempStoreInMemory) {
       await db.execute('PRAGMA temp_store = MEMORY;');
@@ -560,19 +718,33 @@ extension FluentDbLifecycle on FluentDb {
     }
   }
 
-  /// Validates that the provided database name is safe for file system operations.
-  ///
-  /// Database names must be restricted to alphanumeric characters and underscores
-  /// to prevent:
-  /// * Path traversal vulnerabilities (e.g., using '/' or '..').
-  /// * Conflicts with reserved file system characters across different platforms (Android/iOS).
-  /// * Encoding issues in database file paths.
-  ///
-  /// **Constraints:**
-  /// * Allowed: `a-z`, `A-Z`, `0-9`, and `_`.
-  /// * Disallowed: Spaces, hyphens, dots, path separators, or any special characters.
+  /// Whether the name of [dbKey] is safe as a file name: only `a-z`, `A-Z`, `0-9` and `_` (no path separators, dots,
+  /// spaces or other characters).
   bool _isSafeDbName(FluentDbKey dbKey) {
     final RegExp safeNameRegex = RegExp(r'^[a-zA-Z0-9_]+$');
     return safeNameRegex.hasMatch(dbKey.dbName);
+  }
+
+  /// Lets SQLite refresh the statistics of its query planner (cheap; it only analyzes what needs it).
+  Future<void> _optimize(Database db) async {
+    if (!db.isOpen) return; // already closed; on a read-only database the statement fails and is ignored below
+    try {
+      await db.execute('PRAGMA optimize');
+    } catch (e) {
+      FluentLog.debug('PRAGMA optimize skipped: $e', tag: 'FluentDb:optimize');
+    }
+  }
+
+  /// [_optimize] for every open database, queued like a write so it never overlaps the app's own work.
+  Future<void> _optimizeAll() async {
+    for (final MapEntry<String, _FluentProviderIndex> entry in List.of(_groupedRegistry.entries)) {
+      final _FluentProviderIndex group = entry.value;
+      if (group.all.isEmpty || _isReadOnly(entry.key) || FluentTuner().defersMaintenance(entry.key)) continue;
+      try {
+        await group.all.first.execute('PRAGMA optimize', policy: ExecutionPolicy.background);
+      } catch (e) {
+        FluentLog.debug('PRAGMA optimize skipped: $e', tag: 'FluentDb:optimize');
+      }
+    }
   }
 }

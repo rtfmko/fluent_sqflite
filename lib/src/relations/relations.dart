@@ -1,1 +1,2 @@
-export 'fluent_relations_mixin.dart';
+export 'fluent_relation.dart';
+export 'fluent_relations.dart';

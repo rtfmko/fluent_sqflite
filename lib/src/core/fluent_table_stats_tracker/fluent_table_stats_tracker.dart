@@ -4,317 +4,340 @@
 
 part of '../fluent_sqlite_internal.dart';
 
-/// A singleton tracker responsible for aggregating and caching database
-/// performance metrics and schema metadata in-memory.
+/// The stats table of every writable database file: one row per measured query shape (and per mapped table).
+const String _statsTable = '__fluent_stats';
+
+/// The `action` of the rows holding the cost of turning one row into a model (`avg_ms` = microseconds per row).
+const String _mappingAction = 'map';
+
+/// One measured query shape.
+class _QueryCost {
+  _QueryCost(this.db, this.table, this.action, this.shape, {this.averageMs = 0, this.averageRows, this.samples = 0, this.failures = 0, this.lastUsed = 0});
+
+  final String db;
+  final String table;
+  final String action;
+  final String shape;
+  double averageMs;
+  double? averageRows;
+  int samples;
+  int failures;
+
+  /// Epoch milliseconds of the last run.
+  int lastUsed;
+
+  String get key => '$db|$rowKey';
+
+  /// The key inside the database's own stats table.
+  String get rowKey => '$table|$action|$shape';
+
+  bool get isMapping => action == _mappingAction;
+
+  FluentQueryCost get public => FluentQueryCost(database: db, table: table, action: action, shape: shape, averageMs: averageMs, averageRows: averageRows, samples: samples, failures: failures);
+
+  Map<String, Object?> get row => {'key': rowKey, 'tbl': table, 'action': action, 'shape': shape, 'avg_ms': averageMs, 'avg_rows': averageRows, 'samples': samples, 'failures': failures, 'last_used': lastUsed};
+}
+
+/// The cost model of the engine: how long each query shape takes, learned from real runs.
 ///
-/// This tracker serves as the central hub for the `SystemStatsProvider`,
-/// collecting telemetry from the worker and maintaining a
-/// synchronized view of table performance across the entire database group.
+/// * A shape is table + operation + condition without values (+ order, limit, relation depth), so measurements of
+///   the same query with different values add up, and different queries of one table do not mix.
+/// * Also kept: the rows a read returned (moving average) and, per table, the cost of turning one row into a model
+///   (`isolateMapping: smart` decides with it right after a restart).
+/// * Forgetting: a moving average (a new run weighs 20 %, 30 % for mapping costs) follows changes of the data; shapes unused for [retention]
+///   are dropped; at most [capacity] shapes are kept (least recently used go).
+/// * Persisted in each database's own `__fluent_stats` table: only changed shapes, when that database is idle, at
+///   most every few minutes, and on close. So weights are accurate right after a restart, and the numbers go away
+///   with the database. In-memory and read-only databases keep them in memory only. Nothing scans user tables.
+/// * Feeds read weights (after [minSamples] runs), the analyzer (slow shapes), the optimization report
+///   ([measuredHints]) and `FluentDb.queryStats()`.
 class FluentTableStatsTracker {
-  /// Internal singleton instance.
   static final FluentTableStatsTracker _instance = FluentTableStatsTracker._internal();
 
-  /// Returns the singleton instance of the tracker.
+  /// The shared tracker.
   factory FluentTableStatsTracker() => _instance;
 
   FluentTableStatsTracker._internal();
 
-  /// Local cache of table schema definitions to avoid repeated disk introspection.
-  final Map<String, List<Map<String, Object?>>> _schemaCache = {};
+  /// Maximum number of shapes kept.
+  static const int capacity = 500;
 
-  /// In-memory store of performance snapshots, keyed by database and table name.
-  final Map<String, TableStats> _statsMap = {};
+  /// Runs needed before a shape's average is trusted for weights and hints.
+  static const int minSamples = 3;
 
-  /// Exposes the current performance snapshots for all tracked tables.
-  List<TableStats> get getAllStats => _statsMap.values.toList();
+  /// A read shape slower than this (ms, on average) is handed to the analyzer, once per run (again after [forgetKey]).
+  static const double slowReadMs = FluentAnalyzer.slowReadMs + 0.0;
 
-  /// Flag indicating if the in-memory stats have changed and require a disk flush.
-  bool _isDirty = false;
+  /// Shapes not run for this long are forgotten (dropped when a database is opened).
+  static const Duration retention = Duration(days: 30);
 
-  /// Returns true if there are pending stats updates that haven't been persisted yet.
-  bool get isDirty => _isDirty;
+  /// SQL creating the stats table of a database (run at init, before any read task).
+  static const String createTableSql =
+      'CREATE TABLE IF NOT EXISTS "$_statsTable" (key TEXT PRIMARY KEY, tbl TEXT NOT NULL, action TEXT NOT NULL, shape TEXT NOT NULL, '
+      'avg_ms REAL NOT NULL, avg_rows REAL, samples INTEGER NOT NULL, failures INTEGER NOT NULL, last_used INTEGER NOT NULL)';
 
-  /// Creates a unique composite key for indexing [TableStats] or schema data.
-  String _makeKey(String dbName, String tableName) => '$dbName:$tableName';
+  /// Name of the stats table.
+  static const String table = _statsTable;
 
-  /// Registers a successful [FluentTask] execution, updating the table's telemetry
-  /// metrics such as latency averages, throughput counts, and row-count state.
-  ///
-  /// This method serves as the primary hook for the [FluentEngine] to
-  /// report task completion, facilitating real-time performance monitoring.
-  void registerSuccess({required FluentTask task, required int elapsedMs, required bool isWrite}) {
-    if (task.isSystem) return;
+  final Map<String, _QueryCost> _costs = {};
 
-    final String key = task.statsKey;
-    final TableStats stats = _statsMap.putIfAbsent(key, () => TableStats(task: task));
+  /// Keys ([_QueryCost.key]) of shapes changed since they were last written.
+  final Set<String> _changed = {};
 
-    stats.recordMetrics(currentWeight: task.staticWeight, elapsedMs: elapsedMs, isWrite: isWrite);
-    stats.incrementSessionStats(isWrite: isWrite);
+  /// Row keys to delete, per database.
+  final Map<String, Set<String>> _removed = {};
+  final Set<String> _hinted = {};
 
-    markAsDirty();
+  /// Whether any measurement was not written yet (cheap: no allocation; see [dirtyDatabases]).
+  bool get hasChanges => _changed.isNotEmpty || _removed.isNotEmpty;
 
-    FluentLog.debug(
-      'Task ${task.action} completed on ${task.table}',
-      tag: 'FluentTableStats:register',
-      context: {
-        'elapsed': '${elapsedMs}ms',
-        'isWrite': isWrite,
-        'new_avg': isWrite ? stats.avgWriteTimeMs.toStringAsFixed(1) : stats.avgReadTimeMs.toStringAsFixed(1),
-        'current_row_count': stats.rowCount,
-      },
-    );
+  /// Databases with measurements not written yet.
+  Set<String> get dirtyDatabases => {for (final String key in _changed) key.substring(0, key.indexOf('|')), ..._removed.keys};
+
+  void _remove(_QueryCost cost) {
+    _costs.remove(cost.key);
+    _changed.remove(cost.key);
+    (_removed[cost.db] ??= {}).add(cost.rowKey);
   }
 
-  /// Resets the performance statistics for the specified table to their default
-  /// baseline values.
-  ///
-  /// This method should be called when the table's underlying structure changes
-  /// (e.g., adding an index) or when historical metrics become invalid due to
-  /// significant data model refactoring. Resetting ensures that the adaptive
-  /// metrics (AEMA) do not carry over "toxic" latencies from previous
-  /// unoptimized state, allowing the engine to re-learn the table's performance
-  /// characteristics from a clean slate.
-  void resetPerformanceStats(String dbName, String tableName) {
-    final TableStats? stats = _statsMap[_makeKey(dbName, tableName)];
-    if (stats != null) {
-      stats.resetPerformanceStats();
-      markAsDirty();
+  static final RegExp _paramList = RegExp(r'\?(\s*,\s*\?)+');
+
+  /// The shape of [task] (condition without values, order, limit, relation depth).
+  static String shapeOf(FluentTask task) {
+    final TableHelper? h = task.helper;
+    final StringBuffer shape = StringBuffer((h?.shape ?? h?.where ?? '').replaceAll(_paramList, '?…'));
+    if (h?.orderBy != null) shape.write(' ORDER BY ${h!.orderBy}');
+    if (h?.limit != null) shape.write(' LIMIT');
+    if (!task.isWriteOp && (task.maxDepth != 1 || task.ignoreLazy)) shape.write(' depth=${task.maxDepth}${task.ignoreLazy ? '+lazy' : ''}');
+    return shape.toString().trim();
+  }
+
+  /// Whether the cost model runs for database [db] (`FluentDiagnostics.costModel`).
+  static bool _measures(String db) => FluentEngine().diagnosticsOf(db).costModel;
+
+  /// The key of [task]'s shape (database, table, action, shape).
+  static String keyOf(FluentTask task) => '${task.dbName}|${task.table}|${task.action.name}|${shapeOf(task)}';
+
+  /// Forgets the measurements of one shape [key] (an index changed it: measure it again).
+  void forgetKey(String key) {
+    final _QueryCost? cost = _costs.remove(key);
+    if (cost == null) return;
+    _changed.remove('${cost.db}|${cost.rowKey}');
+    (_removed[cost.db] ??= {}).add(cost.rowKey);
+    _hinted.remove(key);
+  }
+
+  _QueryCost _entry(FluentTask task) => _costs[task.costKey] ??= _QueryCost(task.dbName, task.table, task.action.name, shapeOf(task));
+
+  /// Records a successful run of [task] that took [elapsedMs] (per item for writes of several items); [rows] is the
+  /// number of rows a read returned, when it returned a list.
+  void record(FluentTask task, int elapsedMs, {int? rows}) {
+    if (task.action == FluentDbAction.transaction || task.table.isEmpty || !_measures(task.dbName)) return;
+    final int items = task.isWriteOp && task.data is List ? math.max(1, (task.data as List).length) : 1;
+    final double ms = elapsedMs / items;
+    final _QueryCost cost = _entry(task);
+    cost.averageMs = cost.samples == 0 ? ms : cost.averageMs * 0.8 + ms * 0.2;
+    if (rows != null && !task.isWriteOp) cost.averageRows = cost.averageRows == null ? rows.toDouble() : cost.averageRows! * 0.8 + rows * 0.2;
+    cost.samples++;
+    cost.lastUsed = FluentClock.millis;
+    _changed.add(cost.key);
+    _evictOverflow();
+    if (!task.isWriteOp && cost.samples >= minSamples) FluentTuner().onMeasured(cost.key, cost.averageMs);
+    if (!task.isWriteOp && cost.samples >= minSamples && cost.averageMs >= slowReadMs && _hinted.add(cost.key)) {
+      FluentAnalyzer().onSlowShape(task, cost.averageMs, cost.samples);
     }
   }
 
-  /// Resets all performance statistics for every table associated with the
-  /// specified database to their default baseline values.
-  ///
-  /// This operation performs a cascading reset of all metrics (row counts,
-  /// latency averages, execution weights) within the given database.
-  ///
-  /// **When to use:**
-  /// - During a full database wipe ([FluentDbAction.clearDatabase]).
-  /// - After major schema migrations that invalidate historical performance data.
-  /// - When resetting the application state to ensure the engine re-evaluates
-  ///   the database's performance characteristics from a fresh, unbiased state.
-  ///
-  /// If any stats were modified, this method automatically triggers [markAsDirty]
-  /// to ensure the changes are persisted to the system telemetry storage.
-  void resetDatabaseStats(String dbName) {
-    bool hasChanges = false;
-    for (final TableStats stats in _statsMap.values) {
-      if (stats.dbName == dbName) {
-        stats.resetAllStats();
-        hasChanges = true;
+  /// Records a failed run of [task].
+  void recordFailure(FluentTask task) {
+    if (task.table.isEmpty || !_measures(task.dbName)) return;
+    final _QueryCost cost = _entry(task)..failures += 1;
+    cost.lastUsed = FluentClock.millis;
+    _changed.add(cost.key);
+  }
+
+  /// Records that turning one row of [table] into a model took [microsPerRow] on the UI isolate (moving average).
+  void recordMapping(String db, String table, double microsPerRow) {
+    if (!_measures(db)) return;
+    final _QueryCost cost = _costs['$db|$table|$_mappingAction|'] ??= _QueryCost(db, table, _mappingAction, '');
+    cost.averageMs = cost.samples == 0 ? microsPerRow : cost.averageMs * 0.7 + microsPerRow * 0.3;
+    cost.samples++;
+    cost.lastUsed = FluentClock.millis;
+    _changed.add(cost.key);
+  }
+
+  /// The measured cost (microseconds) of turning one row of [table] into a model, `null` before it was measured.
+  double? mappingMicros(String db, String table) => _costs['$db|$table|$_mappingAction|']?.averageMs;
+
+  /// The trusted average duration (ms) of [task]'s shape, or `null` before [minSamples] runs.
+  double? averageMs(FluentTask task) {
+    final _QueryCost? cost = _costs[task.costKey];
+    return cost == null || cost.samples < minSamples ? null : cost.averageMs;
+  }
+
+  void _evictOverflow() {
+    if (_costs.length <= capacity) return;
+    final List<_QueryCost> byAge = _costs.values.toList()..sort((a, b) => a.lastUsed.compareTo(b.lastUsed));
+    byAge.take(_costs.length - capacity).forEach(_remove);
+  }
+
+  /// Loads the persisted shapes of [db] (rows of its stats table); those unused for longer than [retention] are
+  /// dropped (and deleted on the next write).
+  void load(String db, List<Map<String, Object?>> rows) {
+    final int cutoff = FluentClock.now().subtract(retention).millisecondsSinceEpoch;
+    for (final Map<String, Object?> r in rows) {
+      final _QueryCost cost = _QueryCost(
+        db,
+        '${r['tbl']}',
+        '${r['action']}',
+        '${r['shape']}',
+        averageMs: (r['avg_ms'] as num?)?.toDouble() ?? 0,
+        averageRows: (r['avg_rows'] as num?)?.toDouble(),
+        samples: (r['samples'] as int?) ?? 0,
+        failures: (r['failures'] as int?) ?? 0,
+        lastUsed: (r['last_used'] as int?) ?? 0,
+      );
+      if (cost.lastUsed < cutoff) {
+        (_removed[db] ??= {}).add(cost.rowKey);
+      } else {
+        _costs[cost.key] = cost;
       }
     }
-    if (hasChanges) markAsDirty();
+    _evictOverflow();
   }
 
-  /// Resets the performance statistics and structural metadata for all tracked
-  /// database tables to their default baseline values.
-  ///
-  /// This is a global "hard reset" operation that should be invoked during
-  /// maintenance events such as a full database wipe or schema re-initialization.
-  /// By clearing all metrics—including row counts, relational depth, and
-  /// accumulated execution latencies—it ensures that the [FluentEngine] starts
-  /// with a completely clean slate, preventing stale or inconsistent telemetry
-  /// from influencing task scheduling and priority calculations after a
-  /// structural data reset.
-  void resetAllPerformanceStats() {
-    for (final TableStats stats in _statsMap.values) {
-      stats.resetAllStats();
-    }
-    markAsDirty();
+  /// The changed shapes of [db] (rows to write) and its removed ones (keys to delete) since the last call.
+  ({List<Map<String, Object?>> upserts, List<String> deletes}) takeChanges(String db) {
+    final String prefix = '$db|';
+    final List<String> keys = [for (final String key in _changed) if (key.startsWith(prefix)) key];
+    _changed.removeAll(keys);
+    return (upserts: [for (final String key in keys) ?_costs[key]?.row], deletes: (_removed.remove(db) ?? const <String>{}).toList());
   }
 
-  /// Records a failed [FluentTask] execution, incrementing the error counter
-  /// for the associated table and marking the tracker as 'dirty'.
-  ///
-  /// Tracking failures is critical for identifying unstable database operations,
-  /// such as schema mismatches, transaction rollbacks, or constraint violations.
-  void registerFailure(FluentTask task) {
-    final String key = task.statsKey;
-    final TableStats stats = _statsMap.putIfAbsent(key, () => TableStats(task: task));
-
-    stats.failedQueries++;
-    markAsDirty();
-
-    FluentLog.warning(
-      'Task failed on table: ${task.table}',
-      tag: 'FluentTableStats:failure',
-      context: {'db': task.dbName, 'action': task.action.toString(), 'total_failures': stats.failedQueries},
-      hint:
-          'Check if this task is causing frequent constraint violations or if '
-          'the schema is out of sync with the data model.',
-    );
+  /// Puts changes of [db] back after a failed write, so the next flush retries them.
+  void restoreChanges(String db, ({List<Map<String, Object?>> upserts, List<String> deletes}) changes) {
+    _changed.addAll([for (final Map<String, Object?> r in changes.upserts) '$db|${r['key']}']);
+    (_removed[db] ??= {}).addAll(changes.deletes);
   }
 
-  /// Hydrates the in-memory statistics registry with previously saved data from disk.
-  ///
-  /// This method is intended to be called during application startup (e.g., in
-  /// [FluentEngine.init]) to restore telemetry state across app sessions.
-  void importFromDisk(List<TableStats> loadedStats) {
-    for (final TableStats stats in loadedStats) {
-      _statsMap[_makeKey(stats.dbName, stats.tableName)] = stats;
-    }
-    clearDirtyFlag();
-    FluentLog.info('Stats tracker hydrated with ${loadedStats.length} entries.', tag: 'FluentTableStats:import');
+  /// Forgets measurements of [table] of [db], of all tables of [db], or of everything (deleted on the next write).
+  void forget({String? db, String? table}) {
+    _costs.values.where((c) => (db == null || c.db == db) && (table == null || c.table == table)).toList().forEach(_remove);
   }
 
-  /// Exports only the pending (dirty) statistics to a serializable JSON format.
-  ///
-  /// Used primarily by the background worker when flushing data to the
-  /// `__fluent_table_stats` internal table. If the tracker is clean, this
-  /// returns an empty list to prevent unnecessary database write cycles.
-  List<Map<String, dynamic>> exportDirtyData() {
-    if (!_isDirty) {
-      FluentLog.debug('Export skipped: no dirty data to persist.', tag: 'FluentTableStats:export');
-      return [];
-    }
-    FluentLog.debug('Exporting ${_statsMap.length} entries for persistence.', tag: 'FluentTableStats:export');
-    return _statsMap.values.map((s) => s.buildJson()).toList();
+  /// Drops everything of [db] from memory without writing anything (its file is gone or is not written).
+  void discard(String db) {
+    _costs.removeWhere((_, c) => c.db == db);
+    _changed.removeWhere((key) => key.startsWith('$db|'));
+    _removed.remove(db);
   }
 
-  /// Explicitly resets the dirty flag after a successful disk commit.
-  ///
-  /// This should be called immediately after the [SystemStatsProvider] finishes
-  /// its batch save operation to prevent redundant writes.
-  void clearDirtyFlag() {
-    _isDirty = false;
-    FluentLog.debug('Dirty flag cleared.', tag: 'FluentTableStats:cleanup');
+  /// The measured query shapes of [db] and / or [table] (all when `null`), slowest first.
+  List<FluentQueryCost> costs({String? db, String? table}) {
+    final List<_QueryCost> picked = _costs.values.where((c) => !c.isMapping && (db == null || c.db == db) && (table == null || c.table == table)).toList()
+      ..sort((a, b) => b.averageMs.compareTo(a.averageMs));
+    return [for (final _QueryCost c in picked) c.public];
   }
 
-  /// Marks the stats tracker as 'dirty', indicating that pending changes
-  /// need to be persisted to the system storage.
-  void markAsDirty() {
-    _isDirty = true;
-    FluentLog.debug('Stats marked as dirty. Pending changes queued for next sync.', tag: 'FluentTableStats:dirty');
+  /// The [count] slowest read shapes (trusted averages only).
+  List<FluentQueryCost> slowest([int count = 5]) {
+    final List<_QueryCost> reads = _costs.values.where((c) => c.samples >= minSamples && !c.isMapping && !_isWrite(c.action)).toList()
+      ..sort((a, b) => b.averageMs.compareTo(a.averageMs));
+    return [for (final _QueryCost c in reads.take(count)) c.public];
   }
 
-  /// Generates a formatted ASCII diagnostic report for a database table.
-  ///
-  /// This method performs an on-demand reconciliation of current [TableStats]
-  /// and live schema metadata. It leverages the internal schema cache
-  /// where possible, falling back to a system task request if the schema
-  /// is not already held in memory.
-  ///
-  /// The report is ideal for console debugging or for attaching to
-  /// remote crash logs to provide immediate context on table health.
-  Future<String> dumpReport(String dbName, String tableName) async {
-    FluentLog.info('Generating diagnostic dump for $tableName...', tag: 'FluentTableStats:report');
+  static bool _isWrite(String action) => _writeActionNames.contains(action);
 
-    final StringBuffer buffer = StringBuffer();
-    const int lineWidth = 70;
-    final String cacheKey = '$dbName:$tableName';
-    final TableStats? stats = _statsMap[cacheKey];
+  /// Names of the write actions (looked up per cost entry by [slowest] and the hints).
+  static final Set<String> _writeActionNames = {for (final FluentDbAction a in FluentDbAction.values) if (a.isWriteOp) a.name};
 
-    buffer.writeln('\n┌${'─' * (lineWidth - 2)}┐');
-    buffer.writeln('│ 📊 TELEMETRY & DIAGNOSTICS REPORT: ${tableName.toUpperCase().padRight(31)} │');
-    buffer.writeln('├${'─' * (lineWidth - 2)}┤');
+  // ---------------------------------------------------------------------------
+  // Hints and the optimization report
+  // ---------------------------------------------------------------------------
 
-    buffer.writeln('│ 📈 LIVE PERFORMANCE METRICS:');
-    if (stats != null) {
-      buffer.writeln('│   • Rows count (Disk):   ${stats.rowCount.toString().padRight(42)} │');
-      buffer.writeln('│   • Table Complexity:    ${stats.complexity.toString().split('.').last.toUpperCase().padRight(42)} │');
-      buffer.writeln('│   • Active Relations:    ${stats.relationsCount.toString().padRight(42)} │');
-      buffer.writeln('│   • Avg Read Speed:      ${'${stats.avgReadTimeMs.toStringAsFixed(2)} ms'.padRight(42)} │');
-      buffer.writeln('│   • Avg Write Speed:     ${'${stats.avgWriteTimeMs.toStringAsFixed(2)} ms'.padRight(42)} │');
-    } else {
-      buffer.writeln('│   [No active performance telemetry recorded for this session]      │');
-    }
+  static final RegExp _filteredColumn = RegExp(r'"([A-Za-z_][A-Za-z0-9_]*)"\s*(=|<|>|<=|>=|IN\b|BETWEEN\b|IS\b)', caseSensitive: false); // no LIKE: a leading % cannot use an index
 
-    buffer.writeln('├${'─' * (lineWidth - 2)}┤');
+  /// Columns a shape filters on that no index starts with (the shape holds only the caller's condition).
+  List<String> _unindexedColumns(_QueryCost cost) {
+    final FluentProvider? provider = _providerOf(cost);
+    if (provider == null) return const [];
+    final Set<String> known = {for (final FluentDbColumn c in provider.getFullSchema) c.name};
+    final Set<String> leading = {
+      for (final FluentIndex index in provider.tableIndexes) index.columns.first,
+      ...provider.keyColumnNames.take(1),
+      for (final FluentDbColumn c in provider.getFullSchema)
+        if (c.isUnique) c.name,
+    };
+    final String condition = cost.shape.split(' ORDER BY ').first;
+    final List<String> columns = {
+      for (final RegExpMatch m in _filteredColumn.allMatches(condition))
+        if (known.contains(m.group(1))) m.group(1)!,
+    }.toList();
+    return columns.any(leading.contains) ? const [] : columns;
+  }
 
-    buffer.writeln('│ 📋 PHYSICAL TABLE STRUCTURE (PRAGMA):');
+  FluentProvider? _providerOf(_QueryCost cost) => FluentDbInternals.lookupByTable(cost.table, cost.db);
 
-    List<Map<String, Object?>>? columns = _schemaCache[cacheKey];
-    bool isFromCache = true;
-
-    if (columns == null) {
-      isFromCache = false;
-      try {
-        FluentLog.debug('Fetching schema for $tableName via system task...', tag: 'FluentTableStats:report');
-        final dynamic result = await FluentEngine()._executeSystemTask(FluentTask(dbName: dbName, table: tableName, isSystem: true, action: FluentDbAction.readSchema));
-
-        if (result is List) {
-          columns = result.cast<Map<String, Object?>>();
-          if (columns.isNotEmpty) {
-            _schemaCache[cacheKey] = columns;
-          }
-        }
-      } catch (e, s) {
-        FluentLog.error('Failed to retrieve schema for $tableName', e, s, tag: 'FluentTableStats:report');
-        buffer.writeln('│   ❌ Failed to query database schema: ${e.toString().padRight(31)} │');
+  /// Hints from the measured shapes (this run and earlier ones): indexes for slow filters, lighter relation loading,
+  /// paging, batched saves. Same keys as the analyzer's live hints, so the report shows each once.
+  List<FluentIssue> measuredHints() {
+    final List<FluentIssue> hints = [];
+    final List<_QueryCost> measured = _costs.values.where((c) => c.samples >= minSamples).toList()..sort((a, b) => (b.averageMs * b.samples).compareTo(a.averageMs * a.samples));
+    for (final _QueryCost c in measured) {
+      if (c.isMapping || _isWrite(c.action) || c.averageMs < FluentAnalyzer.slowReadMs) continue;
+      final String model = _providerOf(c)?.modelType.toString() ?? c.table;
+      final List<String> columns = _unindexedColumns(c);
+      if (columns.isNotEmpty) {
+        hints.add(
+          FluentIssue(
+            kind: FluentIssueKind.missingIndex,
+            database: c.db,
+            subject: columns.join(','),
+            table: c.table,
+            title: 'Add an index on ${c.table}(${columns.join(', ')})',
+            details: '${c.action} with ${c.shape} takes ~${c.averageMs.round()} ms on average (${c.samples} runs); no index starts with ${columns.join(', ')}.',
+            code: FluentAnalyzer.indexExample(model, columns),
+          ),
+        );
+      } else if (c.shape.contains('depth=') && !c.shape.contains('depth=1')) {
+        hints.add(
+          FluentIssue(
+            kind: FluentIssueKind.relations,
+            database: c.db,
+            table: c.table,
+            title: 'Load fewer relation levels of "${c.table}"',
+            details: '${c.action} loads relations several levels deep (${c.shape}) and takes ~${c.averageMs.round()} ms on average.',
+            code: 'await FluentDb.find<$model>(maxDepth: 1); // or relations: FluentLoad.none, or mark big relations lazy: FluentRelation.many(..., lazy: true)',
+          ),
+        );
+      } else if (c.action == FluentDbAction.find.name && !c.shape.contains('LIMIT')) {
+        hints.add(
+          FluentIssue(
+            kind: FluentIssueKind.bigRead,
+            database: c.db,
+            table: c.table,
+            title: 'Read "${c.table}" in pages',
+            details: 'Reading all matching rows at once takes ~${c.averageMs.round()} ms (${c.samples} runs).',
+            code: "FluentPage<$model> page = await FluentDb.findPage<$model>(orderBy: 'id', limit: 50, after: previous?.next);",
+          ),
+        );
       }
     }
-
-    if (columns != null && columns.isNotEmpty) {
-      final String sourceInfo = isFromCache ? '[CACHE_HIT]' : '[QUEUE_FETCH]';
-      buffer.writeln('│   Source: ${sourceInfo.padRight(57)} │');
-      buffer.writeln('│   ┌─────┬────────────────┬────────────┬─────┬──────────┐           │');
-      buffer.writeln('│   │ CID │ NAME           │ TYPE       │ PK  │ NOT NULL │           │');
-      buffer.writeln('│   ├─────┼────────────────┼────────────┼─────┼──────────┤           │');
-
-      for (final Map<String, Object?> col in columns) {
-        final String cid = col['cid'].toString().padRight(3);
-        final String name = col['name'].toString().padRight(14);
-        final String type = col['type'].toString().padRight(10);
-        final String pk = col['pk'] == 1 ? '[X]' : '[ ]';
-        final String nn = col['notnull'] == 1 ? '[X]' : '[ ]';
-        buffer.writeln('│   │ $cid │ $name │ $type │ $pk │   $nn    │           │');
+    for (final _QueryCost c in measured) {
+      if (c.action == FluentDbAction.save.name && c.samples >= 200 && c.averageMs >= 2) {
+        final String model = _providerOf(c)?.modelType.toString() ?? c.table;
+        hints.add(
+          FluentIssue(
+            kind: FluentIssueKind.saveLoop,
+            database: c.db,
+            table: c.table,
+            title: 'Save "${c.table}" rows with saveAll instead of one by one',
+            details: '${c.samples} single saves were measured (~${c.averageMs.toStringAsFixed(1)} ms per row); saveAll writes many rows in one transaction.',
+            code: 'await FluentDb.saveAll<$model>(items);\n// or: await FluentDb.transaction(() async { for (final i in items) await FluentDb.save<$model>(i); });',
+          ),
+        );
       }
-      buffer.writeln('│   └─────┴────────────────┴────────────┴─────┴──────────┘           │');
-    } else if (columns?.isEmpty ?? true) {
-      buffer.writeln('│   ⚠️ Table does not exist or schema could not be resolved.        │');
     }
-
-    buffer.writeln('└${'─' * (lineWidth - 2)}┘\n');
-    FluentLog.debug('Diagnostic report generated for $tableName.', tag: 'FluentTableStats:report');
-    return buffer.toString();
-  }
-
-  /// Prints a comprehensive, human-readable summary of all accumulated
-  /// database table statistics to the console.
-  ///
-  /// This method iterates over the `_statsMap` and generates a formatted
-  /// ASCII table, complete with color-coded complexity badges for quick
-  /// assessment of performance health across the entire database schema.
-  void printStatsTable() {
-    FluentLog.debug('Rendering console dashboard for ${_statsMap.length} tables.', tag: 'FluentTableStats:ui', linesBefore: 1);
-
-    if (_statsMap.isEmpty) {
-      final StringBuffer buffer = StringBuffer()
-        ..writeln('┌──────────────────────────────────────────────────────────────┐')
-        ..writeln('│            No database stats accumulated yet.                │')
-        ..writeln('└──────────────────────────────────────────────────────────────┘');
-      FluentLog.info(buffer.toString(), tag: 'FluentTableStats:ui', linesBefore: 1);
-      return;
-    }
-
-    final buffer = StringBuffer()
-      ..writeln('┌─────────────────┬─────────────┬─────────────┬─────────────┬─────────────────┬──────────────────────┐')
-      ..writeln('│ Table (DB)      │ Row Count   │ Active (S)  │ Avg Read    │ Avg Write       │ Weight (Complexity)  │')
-      ..writeln('├─────────────────┼─────────────┼─────────────┼─────────────┼─────────────────┼──────────────────────┤');
-
-    _statsMap.forEach((_, s) {
-      final String displayTitle = '${s.tableName} (${s.dbName})';
-      final String tableInfo = displayTitle.length > 15 ? '${displayTitle.substring(0, 12)}...' : displayTitle.padRight(15);
-
-      final String rows = s.rowCount.toString().padLeft(11);
-      final String active = 'R:${s.readsSession}/W:${s.writesSession}'.padLeft(11);
-      final String avgRead = '${s.avgReadTimeMs.toStringAsFixed(1)} ms'.padLeft(11);
-      final String avgWrite = '${s.avgWriteTimeMs.toStringAsFixed(1)} ms'.padLeft(15);
-
-      final String complexityName = s.complexity.name.toUpperCase();
-      final String levelBadge = switch (s.complexity) {
-        TableComplexity.low => '🟢 $complexityName',
-        TableComplexity.medium => '🟡 $complexityName',
-        TableComplexity.high => '🟠 $complexityName',
-        TableComplexity.extreme => '🔴 $complexityName 🔥',
-      }.padRight(20);
-
-      buffer.writeln('│ $tableInfo │ $rows │ $active │ $avgRead │ $avgWrite │ $levelBadge │');
-    });
-
-    buffer.write('└────────────────┴─────────────┴─────────────┴─────────────┴─────────────────┴──────────────────────┘');
-
-    FluentLog.info(buffer.toString(), tag: 'FluentTableStats:ui', linesBefore: 1);
+    return hints;
   }
 }

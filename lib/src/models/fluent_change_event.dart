@@ -1,40 +1,40 @@
 import '../utils/utils.dart';
 
-/// Represents a database change event dispatched by the [FluentEngine].
-///
-/// This event is emitted whenever a write operation (Save, Update, Delete)
-/// successfully completes. It carries the metadata about the operation,
-/// the affected model type, and the modified data payload.
+/// One change of one table, published after a write that changed rows (after the commit inside a transaction; a
+/// rolled-back write publishes nothing). Tables a write changes besides its own (relations, cascades) get an event
+/// too. Subscribe with `FluentDb.onEvent`, or use the watch calls, which re-read on these events.
 class FluentChangeEvent<T> {
   /// The [Type] of the model affected by the operation (e.g., `User`).
   final Type modelType;
 
-  /// The type of operation performed on the database (e.g., [FluentDbAction.save]).
-  final FluentDbAction action;
+  /// What happened: saved, updated, deleted, restored or cleared.
+  final FluentChangeKind kind;
 
-  /// The list of items affected by this database operation.
-  ///
-  /// Always returns a [List], even if only a single item was saved/deleted.
+  /// The models the call wrote, as far as known; empty when the rows are not known (deletes by key or filter, clears,
+  /// cascades, raw SQL).
   final List<T> items;
 
-  /// An optional custom identifier or tag used to filter events.
-  ///
-  /// This is useful for distinguishing between different sources of updates,
-  /// such as 'api_sync', 'background_worker', or UI-triggered events.
-  final Object? customTag;
+  /// The `tag:` of the call that made the change (e.g. `'api_sync'`), to tell sources of changes apart.
+  final Object? tag;
+
+  /// The table that changed (one model type may be stored in several tables).
+  final String table;
+
+  /// The database of [table].
+  final String dbName;
 
   /// Creates a [FluentChangeEvent] instance.
-  FluentChangeEvent({required this.modelType, required this.action, this.items = const [], this.customTag});
+  FluentChangeEvent({required this.modelType, required this.table, required this.dbName, required this.kind, this.items = const [], this.tag});
 
   @override
   String toString() {
     final StringBuffer sb = StringBuffer('FluentChangeEvent{');
-    sb.write('model: ${modelType.toString()}');
-    sb.write(', action: ${action.name}');
+    sb.write('model: ${modelType.toString()}, table: $dbName/$table');
+    sb.write(', kind: ${kind.name}');
     sb.write(', itemsCount: ${items.length}');
 
-    if (customTag != null) {
-      sb.write(', tag: $customTag');
+    if (tag != null) {
+      sb.write(', tag: $tag');
     }
 
     sb.write('}');

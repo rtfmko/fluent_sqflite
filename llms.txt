@@ -1,0 +1,48 @@
+# fluent_sqflite
+
+> A model-driven database layer for Flutter on top of sqflite: declare a model (FluentStorable) and its table
+> (FluentProvider); the library creates and migrates the schema, loads relations in batches, keeps a soft-delete
+> trash, streams live queries, pages with cursors, syncs with servers and explains every error with a code and a hint.
+> Version 2.0.0. Never write SQL for model tables; raw SQL (rawQuery / execute) is only an escape hatch.
+
+## Start here
+
+- [README](README.md): install, quick start (model → provider → FluentDb.init → save / find / watch / findPage)
+- [AI overview and rules](doc/ai/README.md): the ten rules, which skill to use when
+- [AGENTS.md snippet](doc/ai/agents-snippet.md): rules to paste into a project
+
+## Agent skills (install: dart run skills@ get -p fluent_sqflite)
+
+- [Models](skills/fluent-sqflite-models/SKILL.md): FluentStorable, FluentProvider, keys, column types and options, enums, converters, expiry, mixins
+- [Setup and lifecycle](skills/fluent-sqflite-setup/SKILL.md): FluentDb.init, FluentGroup, FluentConfig / FluentDbConfig (pragmas) / FluentTableConfig, diagnostics and tuner, ExecutionPolicy, pauseQueue, close / restart / deleteDatabases
+- [Reading](skills/fluent-sqflite-queries/SKILL.md): find, FluentFilter, relation filters, search, aggregates, findPage / FluentCursor, watch, rawQuery
+- [Writing](skills/fluent-sqflite-writes/SKILL.md): save strategies, FluentSaveResult, conflictOn, updates, soft delete, transactions, clear
+- [Relations](skills/fluent-sqflite-relations/SKILL.md): one, oneOwned, many, manyToMany, through, oneOf, auto, relations found in buildJson, loading, attach / detach
+- [Schema changes](skills/fluent-sqflite-schema/SKILL.md): automatic sync, FluentDbMigration, archive, quarantine, planMigrations / onMigrationPlan, schemaReport
+- [Sync](skills/fluent-sqflite-sync/SKILL.md): watchRemote, FluentSyncable push / pull, conflicts, server keys, remote deletes, tombstones, watchSyncStatus
+- [Testing](skills/fluent-sqflite-testing/SKILL.md): fluent_sqflite_test (FluentTestDb, db.clock, db.settle, issues), benchmark
+- [Troubleshooting](skills/fluent-sqflite-troubleshooting/SKILL.md): FluentErrorCode, FluentIssue kinds, logging, report, performance
+- [Upgrading](skills/fluent-sqflite-upgrade/SKILL.md): renamed / removed members and how to rewrite them
+
+## Reference
+
+- [Migrations](doc/ai/migrations.md): every renamed or removed member (search text, before → after), behaviour changes
+- [Error codes](doc/ai/error-codes.md): every FluentErrorCode with meaning, cause and fix
+- [Issues](doc/ai/issues.md): every FluentIssueKind (hints, automatic changes, warnings) and how to route or mute them
+
+## Guide
+
+- [Models](doc/models.md)
+- [Reading](doc/reading.md)
+- [Writing](doc/writing.md)
+- [Relations](doc/relations.md)
+- [Schema and migrations](doc/schema.md)
+- [Sync](doc/sync.md)
+- [Performance](doc/performance.md)
+- [Errors and logging](doc/errors-and-logging.md)
+- [Testing](doc/testing.md)
+
+## Optional
+
+- [Example app](example/lib/main.dart): REST → cache → paged list with watchRemote and findPage, on-device benchmark
+- [Changelog](CHANGELOG.md)

@@ -1,0 +1,23 @@
+name: fluent_sqflite_test
+description: "Test helpers for fluent_sqflite: databases in memory, a clock you can move, waiting for streams, and the issues a test raised."
+version: 2.0.0-dev.1
+homepage: https://github.com/rtfmko/fluent_sqflite
+# Until fluent_sqflite 2.0.0 is on pub.dev: then remove this line and depend on fluent_sqflite: 2.0.0.
+publish_to: none
+
+environment:
+  sdk: ^3.12.0
+  flutter: '>=3.44.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_test:
+    sdk: flutter
+  # Uses the library's internals (clock, registry reset): always the same version.
+  fluent_sqflite:
+    path: ../..
+  sqflite_common_ffi: ^2.4.5
+
+dev_dependencies:
+  flutter_lints: ^6.0.0

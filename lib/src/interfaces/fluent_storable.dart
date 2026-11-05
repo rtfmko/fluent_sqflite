@@ -2,45 +2,44 @@
 // Use of this source code is governed by an Apache-2.0 license that can be
 // found in the LICENSE file.
 
+import 'dart:ui' show Color, Locale;
+
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
+// Only TimeOfDay comes from material; Color / Locale are dart:ui.
+import 'package:flutter/material.dart' show TimeOfDay;
 
-import '../../fluent_sqflite.dart';
-import '../core/fluent_sqlite_internal.dart';
+import '../internal.dart';
 
-/// The base abstract class for all database-persistable entities.
+/// The base class of every stored model.
 ///
-/// [FluentStorable] defines the contract for models that can be stored in the
-/// database, providing mechanisms for schema inference, dynamic field storage,
-/// relationship management, and data lifecycle tracking (expiry).
+/// A model describes its table: the columns come from [buildJson] (types inferred from the values, see
+/// [tableSchema]), keys from [primaryKey] / [primaryKeys], plus [indexes], [checks], [enumValues], [migrations] and
+/// [tableConfig]. Mixins add soft delete (`FluentSoftDeletable`), timestamps (`FluentTimestamps`), relations
+/// (`FluentRelations`) and sync (`FluentSyncable`). A `FluentProvider` reads and writes it.
+///
+/// ```dart
+/// class Note extends FluentStorable {
+///   Note({this.id, required this.title});
+///
+///   int? id;
+///   String title;
+///
+///   @override
+///   Map<String, dynamic> buildJson() => {'id': id, 'title': title};
+/// }
+/// ```
 abstract class FluentStorable {
-  /// The column name used to track record expiration, default is "expiry_date".
-  ///
-  /// This field enables the engine to automatically identify and prune
-  /// expired records based on your defined business logic (e.g., cache TTL,
-  /// temporary sessions, or expiring feature flags).
-  ///
-  /// ### Usage Example:
-  /// ```dart
-  /// // Override to specify a custom column for TTL tracking
-  /// @override
-  /// String get expiryColumn => "session_expires_at";
-  /// ```
+  /// The column that holds when a row expires (epoch milliseconds, set from [timeToLive]), default `expiry_date`.
+  /// Every table has it; override the name when it collides with a field:
+  /// `@override String get expiryColumn => 'session_expires_at';`.
   String get expiryColumn => "expiry_date";
 
   /// Internal cache mapping model [Type]s to their resolved [FluentDbColumn] schema.
   static final Map<Type, List<FluentDbColumn>> _schemaCache = {};
 
-  /// Defines the primary key column configuration for the model.
+  /// The primary key column. Defaults to an auto-incremented INTEGER `id`; override it for another name, a text key
+  /// or ids given by a server. For a composite key override [primaryKeys] instead.
   ///
-  /// This method allows full control over the primary key's identity, including
-  /// its name, data type, and auto-increment behavior.
-  ///
-  /// Defaults to an integer 'id' column with [isAutoIncrement] enabled.
-  /// Override this in your [FluentStorable] model to customize the primary key
-  /// (e.g., for tables with external IDs or non-integer keys).
-  ///
-  /// ### Usage Examples:
   ///
   /// **Using a custom ID name:**
   /// ```dart
@@ -64,27 +63,94 @@ abstract class FluentStorable {
   /// ```
   FluentDbColumn get primaryKey => FluentDbColumn(name: 'id', type: FluentDbDataType.integer, isPrimaryKey: true, isAutoIncrement: true);
 
-  /// Retrieves the physical value of the primary key for this instance.
+  /// The primary key value of this instance (a [FluentKey] for composite keys).
   ///
-  /// **Automatic Fallback:** By default, this dynamically extracts the value
-  /// using `buildJson()[primaryKey.name]`. This provides maximum convenience
-  /// without requiring manual boilerplate in every model.
+  /// Taken from [buildJson]; when the field is still `null` because the database generated the id on insert,
+  /// the generated id is returned — so a freshly saved model can be used for `loadRelations`, `attach`, deletes, ...
   ///
-  /// **Performance Tip:** For high-frequency operations (like bulk deletes or
-  /// mass updates), override this getter in your model to return the ID directly
-  /// (e.g., `=> id;`). This bypasses JSON serialization and achieves O(1) zero-allocation performance.
+  /// **Performance:** the key columns are resolved once per instance, but [buildJson] runs on every call.
+  /// In hot paths override it to return the field directly: `@override Object? get primaryKeyValue => id;`
+  /// (keep a fallback to the generated id if your model is saved with `id: null`).
   dynamic get primaryKeyValue {
-    final Map<String, dynamic> json = buildJson();
-    return json[primaryKey.name];
+    final List<String> names = _keyColumnNames;
+    if (names.length > 1) return key;
+    final String name = names.first;
+    return _keyValue(name, buildJson()[name]);
   }
 
-  /// Provides a mapping for Enum fields to ensure proper database serialization.
+  /// The value of key column [name]: [given] (from [buildJson]) wins, the kept value fills a `null`. A key the
+  /// library replaced (a `conflictOn` save matched another row) wins while [buildJson] still returns the value it
+  /// replaced; once the model's own key changes, the model wins again.
+  Object? _keyValue(String name, Object? given) {
+    final ({Object? replaced, Object? value})? forced = _forcedKeys[name];
+    if (forced != null && given != null && fluentSameKeyValue(given, forced.replaced)) return forced.value;
+    return given ?? _metadata[name];
+  }
+
+  static final Expando<List<String>> _keyNamesCache = Expando<List<String>>('fluentKeyColumnNames');
+
+  /// Key column names, resolved once per instance ([primaryKeys] builds new column objects on every call).
+  /// An empty [primaryKeys] falls back to `id`, like the provider does.
+  List<String> get _keyColumnNames => _keyNamesCache[this] ??= switch (primaryKeys) {
+    final List<FluentDbColumn> keys when keys.isNotEmpty => [for (final FluentDbColumn c in keys) c.name],
+    _ => const ['id'],
+  };
+
+
+  /// The primary key columns of the table.
   ///
-  /// This map tells the [FluentProvider] which [Enum] type corresponds to each
-  /// database column, enabling automatic conversion between database values
-  /// (int or string) and Dart [Enum] instances.
+  /// Defaults to the single [primaryKey]. Override it to declare a **composite key**:
+  /// ```dart
+  /// @override
+  /// List<FluentDbColumn> get primaryKeys => [
+  ///   FluentDbColumn.integer('user_id'),
+  ///   FluentDbColumn.text('day'),
+  /// ];
+  /// ```
+  /// The columns are created as `PRIMARY KEY (user_id, day)`; they do not need to be marked with
+  /// `isPrimaryKey`. A row is then addressed with a [FluentKey]:
+  /// `FluentDb.findById<DailyStats>(FluentKey({'user_id': 7, 'day': '2026-10-20'}))`.
+  List<FluentDbColumn> get primaryKeys => [primaryKey];
+
+  /// The key of this instance, built from the values of [primaryKeys] in [buildJson].
   ///
-  /// ### Usage Example:
+  /// Override it to compute the key yourself (e.g. `FluentKey({'user_id': userId, 'day': day})`),
+  /// which also avoids serializing the whole model.
+  FluentKey get key {
+    final Map<String, dynamic> json = buildJson();
+    return FluentKey({for (final String name in _keyColumnNames) name: _keyValue(name, json[name])});
+  }
+
+  /// Additional indexes of the table: multi-column, unique or partial.
+  ///
+  /// ```dart
+  /// @override
+  /// List<FluentIndex> get indexes => [FluentIndex.unique(['email']), FluentIndex(['last_name', 'first_name'])];
+  /// ```
+  /// For a simple index on one column, `indexed: true` on the column is enough.
+  List<FluentIndex> get indexes => const [];
+
+  /// Settings of the table: how dates and enums are stored, and overrides of the database (`FluentGroup.config`) and
+  /// global (`FluentDb.init(config:)`) settings — trash retention, reference indexes, full-text mode, background
+  /// mapping. A value set here wins over the database's, which wins over the global one.
+  ///
+  /// ```dart
+  /// @override
+  /// FluentTableConfig get tableConfig => const FluentTableConfig(trashRetention: Duration(days: 90));
+  /// ```
+  FluentTableConfig get tableConfig => const FluentTableConfig();
+
+  /// Table-level `CHECK` constraints (applied when the table is created).
+  List<FluentCheck> get checks => const [];
+
+  /// Creates the table `WITHOUT ROWID` — smaller and faster for tables with a composite or text
+  /// primary key that are looked up by key. Not compatible with `AUTOINCREMENT`.
+  bool get withoutRowId => false;
+
+  /// The enum type of each enum column (column -> `MyEnum.values`): such columns store and read their values through
+  /// a `FluentEnumConverter`, so models and maps get enum values back. Without an entry, an enum field is read back
+  /// as its stored name / index (a `schemaFallback` issue says so).
+  ///
   /// ```dart
   /// enum UserStatus { active, inactive, banned }
   /// enum UserRole { admin, editor, guest }
@@ -98,153 +164,69 @@ abstract class FluentStorable {
   /// }
   /// ```
   ///
-  /// **Note:** Ensure that `tableConfig.storeEnumsAsNames` matches your
-  /// database schema strategy. If `true`, the engine expects and stores
-  /// string representations (e.g., 'active'). If `false` (default), it
-  /// uses the enum index (e.g., `0`).
+  /// Values are stored by name (`'active'`); with `FluentTableConfig(storeEnumsAsNames: false)` by index. Reading
+  /// accepts both, so switching keeps old rows readable. Filters take the enum itself:
+  /// `FluentFilter.eq('status', UserStatus.active)`.
   Map<String, List<Enum>> get enumValues => {};
 
-  /// Defines columns that should be manually included in the schema, overriding
-  /// automatic inference or adding fields not present in `buildJson()`.
+  /// Columns declared explicitly: they replace the inferred column of the same `buildJson()` field (constraints,
+  /// converters, or a type inference cannot tell, e.g. a field that is `null` in the provider's `modelSample`) or
+  /// add columns the model has no field for (filled by defaults, triggers or raw SQL).
   ///
-  /// This is useful for columns managed exclusively by database triggers,
-  /// default value constraints, or legacy fields that you do not want to map
-  /// to your Dart entity class.
-  ///
-  /// ### Usage Example:
   /// ```dart
   /// @override
   /// List<FluentDbColumn> get missingColumns => [
-  ///   // Include a column that is populated by a SQLite trigger
-  ///   FluentDbColumn(
-  ///     name: 'last_modified_timestamp',
-  ///     type: FluentDbDataType.integer,
-  ///     isNullable: false,
-  ///     defaultValue: 'CURRENT_TIMESTAMP',
-  ///   ),
-  ///   // Include a hidden indexing column
-  ///   FluentDbColumn.text('search_vector_idx'),
+  ///   FluentDbColumn.text('email', isUnique: true), // replaces the inferred 'email'
+  ///   FluentDbColumn.text('nickname'),               // null in the sample: the type cannot be inferred
+  ///   FluentDbColumn(name: 'created', type: FluentDbDataType.text, defaultValue: FluentSqlExpression.currentTimestamp),
   /// ];
   /// ```
   List<FluentDbColumn> get missingColumns => [];
 
-  /// Stores internal file-system or synchronization metadata.
-  @internal
-  final Map<String, dynamic> fsMetadataInternal = {};
-
-  /// Tracks relationship keys that have not yet been fetched from the database.
-  @internal
-  final Set<String> unloadedRelations = {};
-
-  /// Checks if a field has been loaded into memory.
-  bool isFieldLoaded(String key) => !unloadedRelations.contains(key);
-
-  /// Internal storage for fields not explicitly defined in the model structure.
-  final Map<String, dynamic> _dynamicStore = {};
-
-  /// Retrieves a dynamic/runtime-only field by key, with type casting.
-  R? getDynamicValue<R>(String key) => _dynamicStore[key] as R?;
-
-  /// List of [FluentDbMigration] objects associated with this model's schema evolution.
+  /// One-time migration steps of this table, run once per database in declaration order.
   ///
-  /// Override this getter to define incremental structural changes to your database table.
-  /// The [FluentDb] orchestrator will automatically iterate through these definitions,
-  /// applying new columns and executing custom SQL commands to keep the schema in sync.
+  /// Structural changes need no step: the schema is synchronized from the model on every start. Steps are for data
+  /// changes and explicit drops; each needs a unique `version` or `id`, and an applied step must never be edited.
   ///
-  /// ### Usage Example:
   /// ```dart
   /// @override
   /// List<FluentDbMigration> get migrations => [
-  ///   // Migration step for version 2: Adding new metadata columns
-  ///   FluentDbMigration(
-  ///     columns: [
-  ///       FluentDbColumn(name: 'age', type: FluentDbDataType.integer, isNotNull: false),
-  ///       FluentDbColumn(name: 'bio', type: FluentDbDataType.text, isNotNull: true),
-  ///     ],
-  ///   ),
+  ///   FluentDbMigration(id: 'fill_status', rawSql: ["UPDATE posts SET status = 'draft' WHERE status IS NULL"]),
+  ///   FluentDbMigration(version: 3, dropColumns: ['legacy_flag']),
   /// ];
   /// ```
   List<FluentDbMigration> get migrations => const [];
 
-  /// The timestamp when this record expires.
+  /// How long the row lives after it is saved: once the time has passed, every read hides it and `clearExpired`
+  /// (also run at start) deletes it. `null` (default): the save leaves the expiry alone — a new row never expires,
+  /// an existing row keeps the expiry it has (a model read back has no `timeToLive`, so saving it again does not make
+  /// it permanent). To make an existing row permanent, clear its expiry column:
+  /// `provider.updateById(id, {'expiry_date': null})`.
   ///
-  /// If set, the [FluentEngine] will automatically filter or prune this
-  /// record once the current time exceeds this value.
-  DateTime? expiryDate;
+  /// Set it per instance (`Session(token: t)..timeToLive = const Duration(hours: 1)`) or for the whole table:
+  /// `@override Duration? get timeToLive => const Duration(days: 30);` (then every save extends the life).
+  Duration? timeToLive;
 
-  /// The duration after which this record should be considered expired.
-  ///
-  /// Override this getter to define a default Time-To-Live (TTL) for instances
-  /// of this model. When initializing a new record, the engine can use this
-  /// to automatically calculate the [expiryDate].
-  Duration? expiryDuration;
+  /// Values the library keeps for this instance (the key generated on insert, ...), never written as columns.
+  final Map<String, dynamic> _metadata = {};
 
-  /// Internal storage for loaded relational data.
-  final Map<String, dynamic> _extras = {};
+  /// Key values the library replaced, with the value of the model they replace (see [_keyValue]).
+  final Map<String, ({Object? replaced, Object? value})> _forcedKeys = {};
 
-  /// Retrieves a related entity by its key.
-  dynamic getRelation(String key) => _extras[key];
+  /// Relations that were not loaded when this instance was read (lazy ones, or reads with `relations: none`).
+  final Set<String> _unloaded = {};
 
-  /// Initializes the base database-storable entity.
-  ///
-  /// This constructor allows for immediate definition of TTL (Time-To-Live)
-  /// properties, which are used by the persistence layer to automatically
-  /// expire or invalidate records.
-  ///
-  /// [expiryDate] A specific point in time after which this record is considered stale.
-  /// [expiryDuration] A relative time span used to calculate the expiration
-  /// starting from the moment of record creation or last update.
-  FluentStorable({this.expiryDate, this.expiryDuration});
+  /// Whether relation [name] was loaded when this instance was read (`false` for lazy relations and reads with
+  /// `relations: FluentLoad.none`; load them with `loadRelations`).
+  bool isRelationLoaded(String name) => !_unloaded.contains(name);
 
-  /// Stores a temporary, runtime-only field that is not persisted in the database.
-  ///
-  /// This is useful for UI state, calculated properties, or transient data
-  /// that should exist on the model instance but not in the schema.
-  @internal
-  void setDynamicField(String key, dynamic value) {
-    _dynamicStore[key] = value;
-    FluentLog.debug('Dynamic field updated', tag: 'FluentStorable:setDynamic', context: {'key': key});
-  }
+  /// Creates a model; [timeToLive] makes the row expire that long after it is saved.
+  FluentStorable({this.timeToLive});
 
-  /// Marks a collection of relationship keys as "unloaded" (lazy-loading).
-  ///
-  /// The [FluentProvider] will use this to track which relationships need to be
-  /// fetched on-demand when accessed by the application.
-  @internal
-  void setUnloaded(List<String> keys) {
-    unloadedRelations.addAll(keys);
-    FluentLog.debug('Relations marked as unloaded', tag: 'FluentStorable:setUnloaded', context: {'keys': keys.join(', ')});
-  }
-
-  /// Injects a resolved entity into the internal storage.
-  ///
-  /// This is typically called by the [FluentProvider] after a lazy-load operation
-  /// successfully fetches the related model from the database.
-  @internal
-  void setRelation(String key, dynamic data) {
-    _extras[key] = data;
-    FluentLog.debug('Relation injected', tag: 'FluentStorable:setRelation', context: {'key': key});
-  }
-
-  /// Injects a raw identifier or foreign key into the internal metadata storage.
-  ///
-  /// Useful for tracking internal synchronization state or foreign key references
-  /// that are not part of the primary model's data payload.
-  @internal
-  void injectRelationId(String key, dynamic value) {
-    fsMetadataInternal[key] = value;
-    FluentLog.debug('Internal relation ID injected', tag: 'FluentStorable:injectRelation', context: {'key': key, 'value': value});
-  }
-
-  /// Generates the full database schema for the current model.
-  ///
-  /// This method performs a multi-step resolution process:
-  /// 1. **Cache Lookup:** Returns cached schema if available for the type.
-  /// 2. **Inference:** Iterates through `buildJson()` to infer types for standard fields.
-  /// 3. **Validation:** Identifies ambiguous fields and triggers a schema report if fields cannot be typed.
-  /// 4. **Merge:** Combines inferred columns with explicit `missingColumns` definitions,
-  ///    ensuring `missingColumns` take precedence to allow for schema overrides.
-  /// 5. **Persistence:** Caches the final schema for subsequent calls.
+  /// The columns of the model (cached per model type): the [primaryKeys], a column per `buildJson()` field with its
+  /// type inferred from the value (stored models are relations, not columns), and [missingColumns], which win over
+  /// inferred columns of the same name. A field whose type cannot be inferred (e.g. `null`) and that is not in
+  /// [missingColumns] throws a [FluentSchemaException] with a report and copy-paste `missingColumns` code.
   List<FluentDbColumn> get tableSchema {
     final Type currentType = runtimeType;
     if (_schemaCache.containsKey(currentType)) {
@@ -252,14 +234,16 @@ abstract class FluentStorable {
     }
 
     final Map<String, dynamic> json = buildJson();
-    final FluentDbColumn pkColumn = primaryKey;
-    final String pkName = pkColumn.name;
-    final List<FluentDbColumn> detected = [pkColumn];
+    final List<FluentDbColumn> keyColumns = primaryKeys;
+    final Set<String> keyNames = {for (final FluentDbColumn c in keyColumns) c.name};
+    final List<FluentDbColumn> detected = [...keyColumns];
     final List<Map<String, String>> unknownFields = [];
 
     // Infer column types based on the structure returned by buildJson()
     json.forEach((key, value) {
-      if (key == pkName) return;
+      if (keyNames.contains(key)) return;
+      // Other stored models are relations (declared, or found by the provider), never columns.
+      if (value is FluentStorable || value is Iterable<FluentStorable>) return;
 
       try {
         detected.add(_inferColumnType(key, value));
@@ -274,7 +258,7 @@ abstract class FluentStorable {
       final List<Map<String, String>> actuallyUnknown = unknownFields.where((f) => !missingKeys.contains(f['field'])).toList();
 
       if (actuallyUnknown.isNotEmpty) {
-        FluentLog.info('  🔎 ${actuallyUnknown.length} ambiguous field(s) found. Generating Schema Report...', tag: 'FluentStorable:tableSchema');
+        FluentLog.debug('  🔎 ${actuallyUnknown.length} ambiguous field(s) found. Generating Schema Report...', tag: 'FluentStorable:tableSchema');
         _throwSchemaReport(actuallyUnknown);
       }
     }
@@ -288,7 +272,8 @@ abstract class FluentStorable {
 
     for (final FluentDbColumn column in missingColumns) {
       if (uniqueColumns.containsKey(column.name)) {
-        FluentLog.warning(
+        FluentLog.issue(
+          FluentIssueKind.schemaFallback,
           'Duplicate column "${column.name}" detected in model "$currentType".',
           tag: 'FluentStorable:tableSchema',
           hint:
@@ -311,29 +296,8 @@ abstract class FluentStorable {
     return finallySchema;
   }
 
-  /// Clears the global schema cache for all [FluentStorable] models.
-  ///
-  /// This method is intended for use in test suites to ensure a clean state
-  /// between individual test runs, preventing cross-test interference
-  /// caused by cached schema definitions.
-  @visibleForTesting
-  static void clearSchemaCache() {
-    _schemaCache.clear();
-  }
-
-  /// Infers the database column definition based on the runtime type of a value.
-  ///
-  /// This method serves as the core type-mapper for the schema builder. It
-  /// maps common Dart primitives to their corresponding SQLite [FluentDbDataType]
-  /// counterparts.
-  ///
-  /// ### Logic:
-  /// - **Primary Keys:** Specifically handled to enforce auto-incrementing integers or text IDs.
-  /// - **Primitives:** Maps Dart types (`int`, `double`, `bool`, `DateTime`, `String`) to standard SQL types.
-  /// - **Collections & Complex:** Maps `List`, `Map`, `Enum`, `Uri`, etc., to `TEXT`.
-  ///
-  /// @throws [FluentSchemaException] if the type is unrecognized, prompting the
-  /// user to define it explicitly in `missingColumns`.
+  /// The column of field [key] inferred from the runtime type of [value] (with its [FluentValueKind]); throws a
+  /// [FluentSchemaException] for a type SQLite cannot store (and for `null`).
   FluentDbColumn _inferColumnType(String key, dynamic value) {
     // --- Direct type-to-SQL mapping (Primitives) ---
     if (value is int) return FluentDbColumn.integer(key);
@@ -344,44 +308,45 @@ abstract class FluentStorable {
     if (value is Uint8List) return FluentDbColumn.blob(key);
 
     // --- Dart Core Types ---
-    if (value is Duration) return FluentDbColumn.integer(key);
-    if (value is BigInt) return FluentDbColumn.text(key);
+    if (value is Duration) return FluentDbColumn.integer(key).copyWith(valueKind: FluentValueKind.duration);
+    if (value is BigInt) return FluentDbColumn.text(key).copyWith(valueKind: FluentValueKind.bigInt);
     if (value is RegExp) return FluentDbColumn.text(key);
-    if (value is Uri) return FluentDbColumn.text(key);
+    if (value is Uri) return FluentDbColumn.text(key).copyWith(valueKind: FluentValueKind.uri);
 
     // --- Flutter Specific Types ---
-    if (value is Color) return FluentDbColumn.integer(key);
-    if (value is Locale) return FluentDbColumn.text(key);
-    if (value is TimeOfDay) return FluentDbColumn.text(key);
+    if (value is Color) return FluentDbColumn.integer(key).copyWith(valueKind: FluentValueKind.color);
+    if (value is Locale) return FluentDbColumn.text(key).copyWith(valueKind: FluentValueKind.locale);
+    if (value is TimeOfDay) return FluentDbColumn.text(key).copyWith(valueKind: FluentValueKind.timeOfDay);
 
     // --- Collections & Enums ---
     // Serialized as TEXT (JSON or String representation)
-    if (value is List || value is Map || value is Enum) {
-      return FluentDbColumn.text(key);
+    if (value is List || value is Map) {
+      return FluentDbColumn.text(key).copyWith(valueKind: FluentValueKind.json);
+    }
+    if (value is Enum) {
+      if (!enumValues.containsKey(key)) {
+        FluentLog.issue(
+          FluentIssueKind.schemaFallback,
+          'Enum field "$key" of $runtimeType is stored (by ${tableConfig.storeEnumsAsNames ? 'name' : 'index'}) but cannot be read back as ${value.runtimeType}: enumValues has no entry for it.',
+          tag: 'FluentStorable:tableSchema',
+          hint: 'Add it to enumValues (`{"$key": ${value.runtimeType}.values}`) or declare the column with '
+              'FluentDbColumn.converted("$key", FluentEnumConverter(${value.runtimeType}.values)) in missingColumns.',
+        );
+      }
+      return FluentDbColumn.text(key).copyWith(valueKind: FluentValueKind.enumValue);
     }
 
     throw FluentSchemaException(
+      'Field "$key" of $runtimeType has a type SQLite cannot store: ${value.runtimeType}.',
       modelName: runtimeType.toString(),
       columnName: key,
-      details:
-          'Unknown SQL type for field "$key" (${value.runtimeType}). '
-          'Please define this column explicitly in missingColumns.',
-      stackTrace: StackTrace.current,
+      hint: "Declare the column in missingColumns, e.g. FluentDbColumn.text('$key'), or store it with a converter: "
+          "FluentDbColumn.converted('$key', MyConverter()).",
     );
   }
 
-  /// Generates a comprehensive, human-readable schema diagnostic report and
-  /// throws a [FluentSchemaException] to halt execution.
-  ///
-  /// This method is triggered when the schema inference engine encounters
-  /// fields with unknown types, ensuring that the developer is alerted
-  /// immediately with actionable "Quick Fix" code snippets.
-  ///
-  /// ### Report Contents:
-  /// - **Table Summary:** Visual list of problematic fields.
-  /// - **Action Suggestions:** Clear instructions on how to resolve the ambiguity.
-  /// - **Code Generation:** Provides a ready-to-copy-paste `missingColumns`
-  ///   override block for the specific model.
+  /// Throws a [FluentSchemaException] for the fields of [unknowns] whose type cannot be inferred; its hint is a
+  /// report with a copy-paste `missingColumns` override.
   void _throwSchemaReport(List<Map<String, String>> unknowns) {
     final StringBuffer buffer = StringBuffer();
     final String modelName = runtimeType.toString();
@@ -432,22 +397,18 @@ abstract class FluentStorable {
     buffer.writeln(' ${'━' * (lineWidth - 2)}');
 
     buffer.writeln('\n ℹ️  Hint: Use FluentDbColumn.integer(), .real(), or .blob() if needed.');
+    buffer.writeln(' ℹ️  A field that holds another stored model is a relation: give it a value in modelSample');
+    buffer.writeln('    (e.g. posts: const [], author: Person(name: \'\')) or declare it in relations.');
     buffer.writeln('═' * lineWidth + '\n');
 
-    throw FluentSchemaException(modelName: runtimeType.toString(), details: buffer.toString(), stackTrace: StackTrace.current);
+    throw FluentSchemaException(
+      'The column types of ${unknowns.length} field(s) of $modelName cannot be inferred: ${unknowns.map((f) => f['field']).join(', ')}.',
+      modelName: modelName,
+      hint: buffer.toString(),
+    );
   }
 
-  /// Maps a Dart runtime type string to its corresponding [FluentDbColumn] factory method.
-  ///
-  /// This helper method is used by the diagnostic generator to suggest appropriate
-  /// column definitions when the schema builder encounters unknown field types.
-  ///
-  /// ### Mapping Logic:
-  /// - **Numbers/Complex (Int based):** `int`, `Color`, and `Duration` -> `integer`; `double` -> `real`.
-  /// - **Booleans/Dates:** Map to `boolean` and `timestamp` respectively.
-  /// - **Binary:** `Uint8List` maps to `blob` for efficient binary storage.
-  /// - **Complex/Default:** `List`, `Map`, `String`, `Locale`, `Uri`, `TimeOfDay`,
-  ///   and unknown types default to `text` (typically handled as serialized strings).
+  /// The [FluentDbColumn] factory the schema report suggests for the Dart type name [dartType] (`text` by default).
   String _mapDartTypeToMethod(String? dartType) {
     switch (dartType) {
       case 'int':
@@ -474,16 +435,14 @@ abstract class FluentStorable {
     }
   }
 
-  /// Converts the model instance into a map suitable for SQLite operations.
+  /// The fields of the model by column name, as Dart values; the table's columns are inferred from it.
   ///
-  /// This method should include fields defined in your table schema.
-  /// The library automatically handles type conversion for:
-  /// * **bool**: Converted to `1` or `0`.
-  /// * **DateTime**: Converted to an ISO8601 string.
-  /// * **List/Map**: Automatically encoded into a JSON string.
-  ///
-  /// **Note:** Do not include related models directly in this map.
-  /// Complex objects will trigger an [InvalidSqlTypeException].
+  /// The library stores Dart values itself: `bool` as `1` / `0`, `DateTime` as epoch milliseconds (ISO text with
+  /// `FluentTableConfig.dateTimeFormat`), enums by name, `List` / `Map` as JSON, and `Duration`, `BigInt`, `Uri`,
+  /// `Color`, `Locale`, `TimeOfDay`; columns with a converter go through it. Fields holding other stored models (one
+  /// or a list) are relations (declared in `FluentRelations.relations`, or found automatically), never columns.
+  /// Values of other types fail on save with a [FluentArgumentException] ([FluentErrorCode.unsupportedValue]).
+  /// Library columns (soft-delete stamp, timestamps, sync versions) are written by the library, not from here.
   ///
   /// **Example:**
   /// ```dart
@@ -491,25 +450,14 @@ abstract class FluentStorable {
   /// Map<String, dynamic> buildJson() => {
   ///   'id': id,
   ///   'title': title,
-  ///   'is_completed': isCompleted, // Automatically handled as 1/0
-  ///   'created_at': createdAt,     // Automatically handled as String
-  ///   'tags': tags,                // Automatically JSON encoded
+  ///   'is_completed': isCompleted, // stored as 1 / 0
+  ///   'due': due,                  // DateTime, stored as epoch milliseconds
+  ///   'tags': tags,                // List<String>, stored as JSON
   /// };
   /// ```
   Map<String, dynamic> buildJson();
 
-  /// A helper to restore a model from a database [json] while preserving metadata.
-  ///
-  /// 1. Uses the [creator] to build the model instance.
-  /// 2. Automatically extracts and assigns the [expiryDate] from the map.
-  static R fromJsonWithExpiry<R extends FluentStorable>(Map<String, dynamic> json, R Function(Map<String, dynamic>) creator) {
-    final R model = creator(json);
-    model.expiryDate = json.tryGetDateTime(model.expiryColumn);
-    return model;
-  }
-
-  /// Helper to format the object's state in a clean, consistent way.
-  /// Skips null values to keep logs readable.
+  /// `Type{key: value, ...}` of [fields] for `toString`, without `null` and empty values.
   @protected
   String formatToString(Map<String, Object?> fields) {
     final StringBuffer sb = StringBuffer('$runtimeType{');
@@ -531,10 +479,34 @@ abstract class FluentStorable {
 
   @override
   String toString() => formatToString({
-    'expiryDate': expiryDate,
-    'expiryDuration': expiryDuration,
-    'unloadedRelations': unloadedRelations.isNotEmpty ? unloadedRelations : null,
-    'dynamicFields': _dynamicStore.isNotEmpty ? _dynamicStore : null,
-    'primaryKey': primaryKey,
+    'timeToLive': timeToLive,
+    'unloadedRelations': _unloaded.isNotEmpty ? _unloaded : null,
+    'key': primaryKeyValue,
   });
 }
+
+/// Members the library itself uses; not part of the public API.
+extension FluentStorableInternals on FluentStorable {
+  /// Values the library keeps for this instance (e.g. the key generated on insert).
+  Map<String, dynamic> get metadata => _metadata;
+
+  /// Relations that were not loaded when this instance was read.
+  Set<String> get unloadedRelations => _unloaded;
+
+  /// Remembers [value] of column [key] that the model has no field for (the generated id, a reference column).
+  void injectRelationId(String key, Object? value) => _metadata[key] = value;
+
+  /// The stored row of this instance has key [value] in column [key] although the model carries [replaced] (a
+  /// `conflictOn` save matched another row): reads of the key and later saves use [value] while the model still
+  /// carries [replaced].
+  void forceKey(String key, Object? value, {required Object? replaced}) {
+    _metadata[key] = value;
+    _forcedKeys[key] = (replaced: replaced, value: value);
+  }
+
+  /// The key value of column [name] given the [buildJson] value [given] (forced and generated keys applied).
+  Object? keyValueOf(String name, Object? given) => _keyValue(name, given);
+}
+
+/// Whether two key values are the same key (`1` and `'1'` too: SQLite affinity stores them alike).
+bool fluentSameKeyValue(Object? a, Object? b) => a == b || '$a' == '$b';

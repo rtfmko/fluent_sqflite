@@ -2,214 +2,295 @@
 // Use of this source code is governed by an Apache-2.0 license that can be
 // found in the LICENSE file.
 
-// ignore_for_file: avoid_redundant_argument_values
-
 part of '../fluent_sqlite_internal.dart';
 
-/// A centralized logging utility for the database layer.
+/// The library's logger: one entry point for every log line, error report and issue.
 ///
-/// [FluentLog] provides a structured facade for tracking database operations,
-/// lifecycle events, and error states. It supports dual-channel logging:
-/// * **User Logger:** For surface-level application events or developer-defined logging.
-/// * **Internal Logger:** For low-level framework telemetry, performance profiling,
-///   and deep diagnostic traces.
+/// Configured through `FluentDb.setupLogging`. Rules:
+/// * records below [level] are dropped (default: info in debug / profile, warning in release);
+/// * issues ([FluentIssue]: hints, automatic changes, warnings, errors nobody receives) all go through [issue] /
+///   [publish]: muted keys are dropped, hints only while the diagnostics of their database collect them, hints and
+///   warnings once per run (automatic changes and errors every time); each is kept for the report, published on
+///   [issues] (whatever the level) and logged at the level of its type;
+/// * an error thrown to a caller is logged once, as a warning (the caller decides what it means), not as an issue;
+/// * SQL arguments and database paths are hidden unless `showSqlArguments` is on.
 class FluentLog {
   FluentLog._();
 
-  /// The primary logger instance for application-level monitoring.
-  static FluentTelemetry? _userLogger;
+  static bool _enabled = true;
+  static FluentLogLevel? _level;
+  static void Function(FluentLogRecord record)? _onRecord;
+  static bool _console = true;
+  static bool? _colors;
+  static bool _showSqlArguments = false;
+  static Set<String> _muted = const {};
+  static final Map<String, FluentIssue> _seen = {};
+  static final List<FluentIssue> _repeated = [];
+  static final StreamController<FluentIssue> _issueBus = StreamController<FluentIssue>.broadcast();
 
-  /// The high-fidelity logger instance for internal framework diagnostics.
-  static FluentTelemetry? _internalLogger;
+  /// How many repeating issues (automatic changes, errors) the report keeps.
+  static const int _repeatedLimit = 200;
 
-  /// Global toggle for the logging system.
-  ///
-  /// When `false`, all logging calls are short-circuited to minimize overhead
-  /// in production-critical environments.
-  static bool _isEnabled = true;
+  /// The lowest level that is logged.
+  static FluentLogLevel get level => _level ?? (kReleaseMode ? FluentLogLevel.warning : FluentLogLevel.info);
 
-  /// Returns whether logging is currently active.
-  static bool get isEnabled => _isEnabled;
+  /// Whether logging is on at all.
+  static bool get isEnabled => _enabled;
 
-  /// Dynamically toggles the global state of the database logging system.
-  ///
-  /// This method provides an administrative interface to suspend or resume
-  /// telemetry, which is useful for reducing log noise during high-volume
-  /// background tasks or sensitive operations.
-  ///
-  /// ### Example:
-  /// ```dart
-  /// // Temporarily silence database logs for a noisy batch migration
-  /// FluentLog.isGloballyEnabled(false);
-  /// await performBulkMigration();
-  /// FluentLog.isGloballyEnabled(true);
-  /// ```
-  static void isGloballyEnabled(bool enabled) {
-    if (_isEnabled == enabled) return;
+  /// Whether SQL arguments and database paths are shown in logs and error texts.
+  static bool get showSqlArguments => _showSqlArguments;
 
-    if (!enabled && _shouldLog(FluentLogLevel.info)) {
-      _userLogger?.info('Database logging session suspended by the supervisor.', tag: 'System');
+  /// Every issue as it happens (muted ones excepted), whatever the log level.
+  static Stream<FluentIssue> get issues => _issueBus.stream;
+
+  /// Muted issue keys; an entry ending in `*` mutes every key starting with the rest (`missingIndex:*`).
+  static Set<String> get mute => _muted;
+
+  /// The issues of this run (muted ones excepted): each hint / warning once, the latest automatic changes and errors.
+  static List<FluentIssue> get seen => [for (final FluentIssue i in [..._seen.values, ..._repeated]) if (!isMuted(i.key)) i];
+
+  /// The hints of this run (muted ones excepted), in the order they were found.
+  static List<FluentIssue> get shownHints => [for (final FluentIssue i in seen) if (i.type == FluentIssueType.hint) i];
+
+  /// Whether [key] is muted ([mute]).
+  static bool isMuted(String key) => _muted.any((m) => m.endsWith('*') ? key.startsWith(m.substring(0, m.length - 1)) : key == m);
+
+  /// Changes the logging setup; `null` keeps the current value.
+  static void configure({
+    bool? enabled,
+    FluentLogLevel? level,
+    void Function(FluentLogRecord record)? onRecord,
+    bool? console,
+    bool? colors,
+    bool? showSqlArguments,
+    Set<String>? mute,
+  }) {
+    if (mute != null) _muted = Set.unmodifiable(mute);
+    if (enabled != null) _enabled = enabled;
+    if (level != null) _level = level;
+    if (onRecord != null) _onRecord = onRecord;
+    if (console != null) _console = console;
+    if (colors != null) _colors = colors;
+    if (showSqlArguments != null) _showSqlArguments = showSqlArguments;
+  }
+
+  /// Forgets which issues were shown, so "once per run" issues are reported again (the test package does it for
+  /// every test database).
+  static void forgetIssues() {
+    _seen.clear();
+    _repeated.clear();
+  }
+
+  /// Back to the defaults (used by tests).
+  @visibleForTesting
+  static void reset() {
+    _enabled = true;
+    _level = null;
+    _onRecord = null;
+    _console = true;
+    _colors = null;
+    _showSqlArguments = false;
+    _muted = const {};
+    _seen.clear();
+    _repeated.clear();
+  }
+
+  /// Whether a record of [level] would be logged.
+  static bool isOn(FluentLogLevel level) => _enabled && level.index >= FluentLog.level.index;
+
+  // ANSI colors only where the console shows them (desktop terminals); Xcode / logcat print the escape codes.
+  static bool get _useColors =>
+      _colors ?? (!kIsWeb && (defaultTargetPlatform == TargetPlatform.windows || defaultTargetPlatform == TargetPlatform.linux || defaultTargetPlatform == TargetPlatform.macOS));
+
+  /// Delivers [record] to the console and the sink with SQL arguments and paths hidden in its texts (message, hint,
+  /// context values); [FluentLogRecord.error] is the original object only with `showSqlArguments` on, else a
+  /// [FluentRedactedError] (a [FluentException] stays, it redacts its own texts).
+  static void _emit(FluentLogRecord record) {
+    final FluentLogRecord shown = _showSqlArguments ? record : _redacted(record);
+    if (_console) debugPrint(shown.format(colors: _useColors, redact: redact));
+    _sink(shown);
+  }
+
+  static FluentLogRecord _redacted(FluentLogRecord r) => FluentLogRecord(
+    level: r.level,
+    message: redact(r.message),
+    time: r.time,
+    tag: r.tag,
+    hint: r.hint == null ? null : redact(r.hint!),
+    context: r.context?.map((k, v) => MapEntry(k, v is String ? redact(v) : v)),
+    error: _redactedError(r.error),
+    stackTrace: r.stackTrace,
+    issue: r.issue,
+  );
+
+  /// [error] as handed to sinks: a foreign error becomes a [FluentRedactedError] (its text can carry SQL arguments)
+  /// unless `showSqlArguments` is on; a [FluentException] redacts its own texts.
+  static Object? _redactedError(Object? error) {
+    if (error == null || _showSqlArguments || error is FluentException || error is FluentRedactedError) return error;
+    return FluentRedactedError(type: '${error.runtimeType}', message: redact('$error'));
+  }
+
+  static FluentIssue _redactedIssue(FluentIssue i) {
+    final Object? error = _redactedError(i.error);
+    if (identical(error, i.error)) return i;
+    return FluentIssue(
+      kind: i.kind,
+      title: i.title,
+      details: i.details,
+      fix: i.fix,
+      code: i.code,
+      database: i.database,
+      table: i.table,
+      subject: i.subject,
+      impact: i.impact,
+      error: error,
+      stackTrace: i.stackTrace,
+    );
+  }
+
+  static void _sink(FluentLogRecord record) {
+    final void Function(FluentLogRecord)? sink = _onRecord;
+    if (sink == null) return;
+    try {
+      sink(record);
+    } catch (e) {
+      // A failing user sink must not break the database call that logged.
+      if (_console) debugPrint('fluent_sqflite: the onRecord callback of setupLogging threw: $e');
     }
+  }
 
-    _isEnabled = enabled;
+  static void _log(FluentLogLevel level, String message, {String? tag, String? hint, Map<String, dynamic>? context, Object? error, StackTrace? stackTrace}) {
+    if (!isOn(level)) return;
+    _emit(FluentLogRecord(level: level, message: message, time: FluentClock.now(), tag: tag, hint: hint, context: context, error: error, stackTrace: stackTrace));
+  }
 
-    if (enabled && _shouldLog(FluentLogLevel.info)) {
-      _userLogger?.info('Database logging session successfully resumed.', tag: 'System');
+  /// Logs normal operation (init, migrations, maintenance).
+  static void info(String message, {String? tag, Map<String, dynamic>? context}) => _log(FluentLogLevel.info, message, tag: tag, context: context);
+
+  /// Logs internal details for troubleshooting.
+  static void debug(String message, {String? tag, Map<String, dynamic>? context}) => _log(FluentLogLevel.debug, message, tag: tag, context: context);
+
+  /// Logs a SQL statement; [arguments] are hidden unless `showSqlArguments` is on.
+  static void sql(String message, {List<Object?>? arguments, String? tag}) {
+    if (!isOn(FluentLogLevel.sql)) return;
+    final String args = arguments == null || arguments.isEmpty ? '' : (_showSqlArguments ? ' | Args: $arguments' : ' | Args: ${arguments.length} hidden');
+    _log(FluentLogLevel.sql, '$message$args', tag: tag);
+  }
+
+  /// Reports an issue of [kind]: [message] says what happened, [hint] how to fix it (required: every issue tells how).
+  ///
+  /// [table] / [database] / [subject] make its key; [code] is code to copy. The type comes from [kind].
+  static void issue(
+    FluentIssueKind kind,
+    String message, {
+    required String hint,
+    String? details,
+    String? code,
+    String? table,
+    String? database,
+    String? subject,
+    String? tag,
+    Map<String, dynamic>? context,
+    Object? error,
+    StackTrace? stackTrace,
+  }) {
+    if (error is FluentException) error.reported = true;
+    publish(
+      FluentIssue(kind: kind, title: message, details: details, fix: hint, code: code, database: database, table: table, subject: subject, error: error, stackTrace: stackTrace),
+      tag: tag,
+      context: context,
+    );
+  }
+
+  /// Reports [issue] (see the class rules): kept for the report, published on [issues], logged at its type's level.
+  static void publish(FluentIssue original, {String? tag, Map<String, dynamic>? context}) {
+    final FluentIssue issue = _redactedIssue(original);
+    final List<FluentIssue>? captured = Zone.current[_captureKey] as List<FluentIssue>?;
+    if (captured != null) {
+      captured.add(issue); // a migration plan: collected, not reported (the real start reports them)
+      return;
+    }
+    if (isMuted(issue.key)) return;
+    if (issue.type == FluentIssueType.hint && !FluentAnalyzer().collects(issue.database)) return;
+    if (issue.kind.repeats) {
+      _repeated.add(issue);
+      if (_repeated.length > _repeatedLimit) _repeated.removeAt(0);
+    } else {
+      // Once per key and title without its numbers: a title with a count in it ("3 rows", "4 rows") does not repeat
+      // the issue nor grow the memory, while different situations of one kind without a subject stay apart.
+      final String id = '${issue.key}|${issue.title.replaceAll(_numbers, '#')}';
+      if (_seen.containsKey(id)) return;
+      _seen[id] = issue;
+    }
+    if (_issueBus.hasListener) _issueBus.add(issue);
+    final FluentLogLevel level = switch (issue.type) {
+      FluentIssueType.hint => FluentLogLevel.hint,
+      FluentIssueType.autoFix => FluentLogLevel.autoFix,
+      FluentIssueType.warning => FluentLogLevel.warning,
+      FluentIssueType.error => FluentLogLevel.error,
+    };
+    if (!isOn(level)) return;
+    _emit(
+      FluentLogRecord(
+        level: level,
+        message: issue.title,
+        time: FluentClock.now(),
+        tag: tag ?? (issue.table == null ? 'FluentDb:${issue.kind.name}' : '${issue.table}:${issue.kind.name}'),
+        hint: issue.fix,
+        context: context,
+        error: issue.error,
+        stackTrace: issue.stackTrace,
+        issue: issue,
+      ),
+    );
+  }
+
+  static final Object _captureKey = Object();
+
+  static final RegExp _numbers = RegExp(r'\d+(\.\d+)?');
+
+  /// Runs [body] collecting the issues it raises into [into] instead of reporting them (migration plans).
+  static Future<R> captureIssues<R>(List<FluentIssue> into, Future<R> Function() body) => runZoned(body, zoneValues: {_captureKey: into});
+
+  /// [captureIssues] for a synchronous [body].
+  static R captureIssuesSync<R>(List<FluentIssue> into, R Function() body) => runZoned(body, zoneValues: {_captureKey: into});
+
+  /// Whether an issue with [key] was already reported in this run.
+  static bool reported(String key) => _seen.values.any((i) => i.key == key) || _repeated.any((i) => i.key == key);
+
+  /// Zone marker of a running provider call: errors raised inside are logged where the call ends
+  /// (`FluentProvider.internalExecute`), which knows whether it is a merged batch that will be re-run.
+  @internal
+  static const Object deferKey = #fluentDeferReport;
+
+  /// Logs [exception] once (as a warning: the caller receives it) and returns it, for `throw FluentLog.raise(e)`.
+  ///
+  /// Inside a provider call the logging is left to the end of the call.
+  static T raise<T extends FluentException>(T exception, {String? tag, Map<String, dynamic>? context}) {
+    if (Zone.current[deferKey] != true) report(exception, tag: tag, context: context);
+    return exception;
+  }
+
+  /// Logs [error] on its way to the caller, once: a [FluentException] that was already logged is skipped.
+  static void report(Object error, {StackTrace? stackTrace, String? tag, Map<String, dynamic>? context}) {
+    if (error is FluentException) {
+      if (error.reported) return;
+      error.reported = true;
+      _log(FluentLogLevel.warning, error.message, tag: tag, hint: error.hint, context: context, error: error, stackTrace: error.stackTrace);
+    } else {
+      _log(FluentLogLevel.warning, 'Unexpected error: $error', tag: tag, context: context, error: error, stackTrace: stackTrace);
     }
   }
 
-  /// Initializes the logging system with a default [FluentLogger].
-  ///
-  /// This is the recommended entry point for standard applications,
-  /// providing color-coded terminal output for easier local debugging.
-  static void initDefault({bool useColors = true}) => _userLogger ??= FluentLogger(isLogOn: true, isDebug: false, useColors: useColors, tag: 'FluentSQFLite');
+  static final RegExp _ffiParameters = RegExp(r'parameters: .*?(?=\}\) |\) sql |\n|$)');
+  // From ` args [` to the end of the text (sqflite prints the arguments last, before `{details`, which `_details`
+  // already cut): the values may hold newlines, `]`, `}` or anything else, so nothing after the opening bracket stays.
+  static final RegExp _args = RegExp(r'args \[[\s\S]*');
+  static final RegExp _details = RegExp(r'\s*\{details: .*$', dotAll: true);
 
-  /// Initializes the logging system with a default [FluentLogger] with debug mode.
-  ///
-  /// This is the recommended entry point for standard applications debugging,
-  /// providing color-coded terminal output for easier local debugging.
-  static void initDefaultDebug({bool useColors = true}) => _userLogger ??= FluentLogger(isLogOn: true, isDebug: true, useColors: useColors, tag: 'FluentSQFLite');
-
-  /// Configures the logging infrastructure with custom logger instances.
-  ///
-  /// This should be called during app bootstrap to inject your preferred
-  /// logging implementations.
-  ///
-  /// ### Example:
-  /// ```dart
-  /// FluentLog.setup(
-  ///   userLogger: CrashlyticsLogger(),
-  ///   internalLogger: ConsoleLogger(),
-  ///   enable: kDebugMode,
-  /// );
-  /// ```
-  static void setup({FluentTelemetry? userLogger, FluentTelemetry? internalLogger, bool? enable}) {
-    if (userLogger != null) _userLogger = userLogger;
-    if (internalLogger != null) _internalLogger = internalLogger;
-    if (enable != null) isGloballyEnabled(enable);
-  }
-
-  /// Evaluates whether a log entry should be processed based on the current
-  /// global state and configuration.
-  ///
-  /// This acts as a primary filter to ensure that logging overhead is
-  /// minimized when the system is disabled, performing a lazy initialization
-  /// of the default logger if none is currently registered.
-  ///
-  /// Returns `true` if logging is enabled and the logger is active.
-  static bool _shouldLog(FluentLogLevel level) {
-    if (!_isEnabled) return false;
-    if (_userLogger == null) initDefault();
-    return _userLogger?.isLogOn ?? false;
-  }
-
-  /// Utility to inject vertical whitespace around log messages for improved
-  /// terminal readability.
-  ///
-  /// [message] The raw log message content.
-  /// [linesBefore] Number of newlines to prepend.
-  /// [linesAfter] Number of newlines to append.
-  static String _applySpacing(String message, int linesBefore, int linesAfter) {
-    final String prefix = '\n' * linesBefore;
-    final String suffix = '\n' * linesAfter;
-    return '$prefix$message$suffix';
-  }
-
-  /// Logs an informational message to the database logging system.
-  ///
-  /// Use this for tracking significant application events (e.g., initialization,
-  /// transaction starts, or configuration changes).
-  ///
-  /// ### Example:
-  /// ```dart
-  /// FluentLog.info('User profile saved successfully', tag: 'UserRepository', context: {'userId': 123});
-  /// ```
-  static void info(String message, {String? tag, int linesBefore = 0, int linesAfter = 0, Map<String, dynamic>? context}) {
-    if (!_shouldLog(FluentLogLevel.info)) return;
-    final String preparedMsg = _applySpacing(message, linesBefore, linesAfter);
-
-    _userLogger?.info(preparedMsg, tag: tag, context: context);
-    _internalLogger?.info(preparedMsg, tag: tag, context: context);
-  }
-
-  /// Logs a debug message, primarily used for diagnostic purposes.
-  ///
-  /// Debug logs are only propagated to the user-facing logger if the logger is
-  /// explicitly configured in debug mode, otherwise, they are captured
-  /// exclusively by the internal logger.
-  ///
-  /// ### Example:
-  /// ```dart
-  /// FluentLog.debug('Cache miss, fetching from disk...', tag: 'DiskCache', context: {'key': 'settings'});
-  /// ```
-  static void debug(String message, {String? tag, int linesBefore = 0, int linesAfter = 0, Map<String, dynamic>? context}) {
-    if (!_shouldLog(FluentLogLevel.debug)) return;
-    final String preparedMsg = _applySpacing(message, linesBefore, linesAfter);
-
-    _internalLogger?.debug(preparedMsg, tag: tag, context: context);
-    if (_userLogger?.isDebug ?? false) {
-      _userLogger?.debug(preparedMsg, tag: tag, context: context);
-    }
-  }
-
-  /// Logs raw SQL queries and their associated arguments.
-  ///
-  /// This is critical for performance tuning and resolving syntax errors in
-  /// complex SQLite queries.
-  ///
-  /// ### Example:
-  /// ```dart
-  /// FluentLog.sql('SELECT * FROM users WHERE id = ?', arguments: [123], tag: 'QueryLogger');
-  /// ```
-  static void sql(String message, {List<Object?>? arguments, String? tag, int linesBefore = 0, int linesAfter = 0}) {
-    if (!_shouldLog(FluentLogLevel.debug)) return;
-    final String preparedMsg = _applySpacing(message, linesBefore, linesAfter);
-
-    _internalLogger?.sql(preparedMsg, arguments: arguments, tag: tag);
-    _userLogger?.sql(preparedMsg, arguments: arguments, tag: tag);
-  }
-
-  /// Logs a warning message.
-  ///
-  /// Use this to signal non-critical issues that may require developer
-  /// attention, such as deprecated method usage or suboptimal performance.
-  ///
-  /// ### Example:
-  /// ```dart
-  /// FluentLog.warning(
-  ///   'Query returned no results, check input parameters',
-  ///   tag: 'QueryValidator',
-  ///   hint: 'Ensure foreign keys exist before fetching.'
-  /// );
-  /// ```
-  static void warning(String message, {String? tag, String? hint, int linesBefore = 0, int linesAfter = 0, Map<String, dynamic>? context}) {
-    if (!_isEnabled) return;
-    initDefault();
-
-    final String preparedMsg = _applySpacing(message, linesBefore, linesAfter);
-    _userLogger?.warning(preparedMsg, tag: tag, hint: hint, context: context);
-    _internalLogger?.warning(preparedMsg, tag: tag, hint: hint, context: context);
-  }
-
-  /// Logs a critical error, including the associated exception and stack trace.
-  ///
-  /// This is the primary method for capturing operational failures, database
-  /// connection drops, or malformed schema migrations.
-  ///
-  /// ### Example:
-  /// ```dart
-  /// try {
-  ///   await database.execute('...');
-  /// } catch (e, stack) {
-  ///   FluentLog.error('Critical database failure', e, stack, tag: 'FluentEngine', hint: 'Check disk space.');
-  /// }
-  /// ```
-  static void error(String message, Object error, StackTrace? stackTrace, {String? tag, String? hint, int linesBefore = 0, int linesAfter = 0, Map<String, dynamic>? context}) {
-    if (!_isEnabled) return;
-    initDefault();
-
-    final String preparedMsg = _applySpacing(message, linesBefore, linesAfter);
-    _userLogger?.error(preparedMsg, error, stackTrace, tag: tag, hint: hint, context: context);
-    _internalLogger?.error(preparedMsg, error, stackTrace, tag: tag, hint: hint, context: context);
+  /// Hides SQL arguments and the database path in an error [text], unless `showSqlArguments` is on.
+  static String redact(String text) {
+    if (_showSqlArguments) return text;
+    return text.replaceAll(_details, '').replaceAll(_args, 'args [hidden]').replaceAll(_ffiParameters, 'parameters: hidden');
   }
 }

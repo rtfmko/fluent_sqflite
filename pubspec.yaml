@@ -1,31 +1,23 @@
 name: fluent_sqflite
 description: "A powerful, developer-friendly DAO-based database engine for Flutter. Features automated schema synchronization, smart migrations, and built-in relation management for sqflite."
-version: 1.0.14+2
-homepage:
+version: 2.0.0-dev.1
+homepage: https://github.com/rtfmko/fluent_sqflite
 
 environment:
-  sdk: ^3.10.7
-  flutter: '>=3.3.0'
+  sdk: ^3.12.0
+  flutter: '>=3.44.0'
 
 dependencies:
   flutter:
     sdk: flutter
-  sqflite: ^2.4.2
+  sqflite: ^2.4.5
   path: ^1.9.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
-  sqflite_common_ffi: ^2.4.0+3
-
-flutter:
-  plugin:
-    platforms:
-      android:
-        package: dev.rtfm.fluent_sqflite
-        pluginClass: FluentSqflitePlugin
-      ios:
-        pluginClass: FluentSqflitePlugin
-      macos:
-        pluginClass: FluentSqflitePlugin
+  sqflite_common_ffi: ^2.4.5
+  # The test helpers the library's own tests use (the same ones apps use).
+  fluent_sqflite_test:
+    path: packages/fluent_sqflite_test

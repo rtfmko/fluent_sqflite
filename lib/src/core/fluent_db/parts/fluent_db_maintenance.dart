@@ -4,111 +4,66 @@
 
 part of '../fluent_db.dart';
 
-/// Provides automated and manual maintenance operations for the [FluentDb].
-///
-/// This extension orchestrates background storage hygiene and data integrity
-/// routines, ensuring the database remains performant and consistent over time.
-/// It encapsulates:
-///
-/// * **Automated Hygiene:** Routine maintenance tasks such as clearing expired records
-///   (TTL) and purging orphaned relational data.
-/// * **Manual Intervention:** Explicit triggers for manual orphan cleanup across
-///   database groups.
-///
-/// These operations are designed to run atomically within transactions to prevent
-/// data corruption and reduce I/O overhead during routine system upkeep.
-extension FluentDbMaintenance on FluentDb {
-  /// Executes a manual cleanup of orphaned records across all DAOs within a [FluentGroup].
-  ///
-  /// This method iterates through all registered [FluentRelationsMixin] providers and
-  /// executes their orphan cleanup logic within a single atomic database
-  /// transaction to maintain relational integrity and prevent partial cleanup state.
-  Future<void> cleanOrphans(FluentGroup group) async {
-    if (group.providerList.isEmpty) return;
-
-    FluentLog.info('Manual orphan cleanup started', tag: 'FluentDb:maintenance', context: {'dbName': group.dbKey.dbName});
-
+/// Maintenance of [FluentDb]: the start-up clean-up (expired rows, dangling references), [FluentDb.cleanOrphans] and
+/// the periodic trash purge.
+extension _FluentDbMaintenance on FluentDb {
+  /// [FluentDb.cleanOrphans] for one database: every table in one transaction (joined when one is open).
+  Future<void> _cleanOrphans(String dbName, List<FluentProvider> providers) async {
+    if (providers.isEmpty) return;
+    FluentLog.debug('Manual orphan cleanup started', tag: 'FluentDb:maintenance', context: {'dbName': dbName});
     try {
-      final Database db = group.providerList.first.db;
-
-      await db.transaction((txn) async {
-        for (final FluentProvider dao in group.providerList) {
-          if (dao is FluentRelationsMixin) {
-            FluentLog.debug('Cleaning orphans for table', tag: 'FluentDb:maintenance', context: {'table': dao.tableName});
-            await (dao as FluentProvider).cleanupOrphans(txn);
-          }
+      await FluentTransactionScope.inTransaction(providers.first.db, dbName, (txn) async {
+        for (final FluentProvider dao in providers) {
+          await dao.cleanupOrphans(txn);
         }
       });
-
-      FluentLog.info('Group "${group.dbKey.dbName}": All orphans removed successfully.', tag: 'FluentDb:maintenance');
+      FluentLog.info('Database "$dbName": dangling references removed.', tag: 'FluentDb:maintenance');
     } catch (e, st) {
-      FluentLog.error(
-        'Failed to execute manual orphan cleanup for "${group.dbKey.dbName}"',
-        e,
-        st,
-        tag: 'FluentDb:maintenance',
-        hint: 'Ensure that the database is not in a read-only state and that all transactions are committed correctly.',
-      );
+      // The caller receives the error: logged once on its way (nothing was changed).
+      FluentLog.report(e, stackTrace: st, tag: 'FluentDb:maintenance');
       rethrow;
     }
   }
 
-  /// Resets the performance statistics for the specified table to their default baseline values.
-  ///
-  /// **WARNING:** This method performs a destructive operation by clearing all historical
-  /// performance metrics for the given table, including adaptive execution weight,
-  /// latency averages, and operation counts.
-  ///
-  /// Calling this method forces the engine to "forget" its learned performance profile
-  /// for this table, effectively resetting its priority to the base level.
-  ///
-  /// **When to use:**
-  /// - Only after significant schema changes (e.g., adding or removing database indexes).
-  /// - When historical metrics have become "toxic" or stale due to past performance
-  ///   bottlenecks that have since been resolved.
-  ///
-  /// **Caution:** Frequent invocation of this method will lead to unstable scheduling
-  /// behavior. The engine will be forced into a "cold start" (re-learning) phase
-  /// every time this method is called, preventing it from making optimal
-  /// priority decisions based on historical data.
-  void resetPerformanceStats({required FluentDbKey dbKey, required String tableName}) {
-    FluentTableStatsTracker().resetPerformanceStats(dbKey.dbName, tableName);
-  }
-
-  /// Executes automated storage hygiene for a [FluentGroup].
-  ///
-  /// This maintenance routine ensures database health by:
-  /// 1. **TTL Management:** Purging records that have exceeded their time-to-live.
-  /// 2. **Referential Integrity:** Removing orphaned relations to keep the database graph clean.
-  ///
-  /// All operations are executed within a single transaction to minimize I/O overhead
-  /// and ensure global consistency across tables.
-  Future<void> _runInitialMaintenance(FluentGroup group) async {
+  /// The start-up clean-up of [group], in one transaction: deletes expired rows of every table and, with
+  /// [cleanOrphans], dangling references. A failure is reported (`maintenanceFailed`), never thrown: the database works
+  /// without it and the next start tries again.
+  Future<void> _runInitialMaintenance(FluentGroup group, {bool cleanOrphans = true}) async {
     if (group.providerList.isEmpty) return;
 
     final Database db = group.providerList.first.db;
-    FluentLog.info('Starting hygiene maintenance for group "${group.dbKey.dbName}"', tag: 'FluentDb:maintenance');
+    FluentLog.debug('Starting hygiene maintenance for group "${group.dbKey.dbName}"', tag: 'FluentDb:maintenance');
     try {
-      await db.transaction((txn) async {
+      // A scope (not a bare db.transaction): the provider calls below join it instead of queueing behind it.
+      await FluentTransactionScope.inTransaction(db, group.dbKey.dbName, (txn) async {
         int expiredCleaned = 0;
         int orphansCleaned = 0;
 
         for (final FluentProvider dao in group.providerList) {
           // 1. TTL Cleanup
           try {
-            await dao.clearExpiredItems(executor: txn, dbName: group.dbKey.dbName);
+            await dao.clearExpired();
             expiredCleaned++;
           } catch (e, st) {
-            FluentLog.error('Failed to clear expired items in "${dao.tableName}"', e, st, tag: 'FluentDb:maintenance', hint: 'Check if the TTL column is indexed properly for performance.');
+            // Logged by the failed call; expired rows stay hidden from reads and are removed on the next start.
+            FluentLog.report(e, stackTrace: st, tag: 'FluentDb:maintenance');
           }
 
-          // 2. Orphan Cleanup
-          if (dao is FluentRelationsMixin) {
+          // 2. Orphan Cleanup (only when SQLite does not guarantee integrity by itself)
+          if (cleanOrphans) {
             try {
-              await (dao as FluentProvider).cleanupOrphans(txn);
+              await dao.cleanupOrphans(txn);
               orphansCleaned++;
             } catch (e, st) {
-              FluentLog.error('Failed to cleanup orphans for "${dao.tableName}"', e, st, tag: 'FluentDb:maintenance');
+              FluentLog.issue(
+                FluentIssueKind.maintenanceFailed,
+                'Failed to clean up dangling references in "${dao.tableName}"',
+                error: e,
+                stackTrace: st,
+                table: dao.tableName,
+                tag: 'FluentDb:maintenance',
+                hint: 'Nothing was deleted; it is retried on the next start. Check the cause (often a locked database).',
+              );
             }
           }
         }
@@ -120,32 +75,39 @@ extension FluentDbMaintenance on FluentDb {
         );
       });
 
-      FluentLog.info('Maintenance for "${group.dbKey.dbName}" completed.', tag: 'FluentDb:maintenance');
+      FluentLog.debug('Maintenance for "${group.dbKey.dbName}" completed.', tag: 'FluentDb:maintenance');
     } catch (e, st) {
-      FluentLog.error('Critical storage error during maintenance of "${group.dbKey.dbName}"', e, st, tag: 'FluentDb:maintenance');
-      if (_isDevMod) rethrow;
+      FluentLog.issue(
+        FluentIssueKind.maintenanceFailed,
+        'Start-up maintenance of "${group.dbKey.dbName}" failed',
+        error: e,
+        stackTrace: st,
+        database: group.dbKey.dbName,
+        tag: 'FluentDb:maintenance',
+        hint: 'The database works without it (expired rows and dangling references are cleaned on the next start). '
+            'A disk-full or locked-file error is the usual cause.',
+      );
     }
   }
 
-  /// Iterates through all registered providers and triggers a background
-  /// maintenance task to purge soft-deleted records from models that
-  /// implement [FluentSoftDeletable].
-  ///
-  /// This method is typically invoked as part of system maintenance cycles
-  /// to reclaim storage and enforce data retention policies. It catches and
-  /// logs errors per-provider to ensure that a failure in one table does
-  /// not halt the cleanup process for others.
+  /// Whether [dbName] was opened read-only (maintenance never writes to it).
+  bool _isReadOnly(String dbName) =>
+      FluentDb._lastConfig?.any((g) => g.dbKey.dbName == dbName && g.readOnly && !g.inMemory) ?? false;
+
+  /// Deletes the trashed rows past their retention in every [FluentSoftDeletable] table (after `init` and on the
+  /// `trashPurgeInterval` timer). Databases the tuner keeps busy are skipped; a failing table does not stop the others.
   Future<void> _purgeSoftDeletedGlobal() async {
     FluentLog.debug('Starting global soft-delete purge procedure', tag: 'FluentDb:purge');
 
-    for (final Map<Type, FluentProvider> providersInGroup in _groupedRegistry.values) {
-      for (final FluentProvider provider in providersInGroup.values) {
-        if (provider.modelSample is FluentSoftDeletable) {
-          try {
-            await provider.purgeSoftDeleted(policy: ExecutionPolicy.background, dbName: provider.dbName);
-          } catch (e) {
-            FluentLog.warning('Auto-purge failed for ${provider.tableName}', tag: 'FluentDb:purge', context: {'error': e.toString()});
-          }
+    // A copy: close / init may change the registry while a purge waits.
+    for (final MapEntry<String, _FluentProviderIndex> group in List.of(_groupedRegistry.entries)) {
+      if (group.value.all.isEmpty || _isReadOnly(group.key) || FluentTuner().defersMaintenance(group.key)) continue;
+      for (final FluentProvider provider in group.value.all) {
+        try {
+          await provider.purgeTrash(); // nothing (no call queued) for tables without soft delete
+        } catch (e, s) {
+          // Already logged by the failed call, unless it failed before running; the rows stay for the next run.
+          FluentLog.report(e, stackTrace: s, tag: 'FluentDb:purge');
         }
       }
     }
