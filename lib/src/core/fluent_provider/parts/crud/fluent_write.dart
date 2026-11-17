@@ -41,7 +41,9 @@ extension FluentWrite<T extends FluentStorable> on FluentProvider<T> {
   /// the key or by `conflictOn`, a live row winning over a trashed one) is brought back by `upsert` / `insertOnly`
   /// (outcome `restored`; a row whose owner is still in the trash stays there, `skipped`) and skipped by
   /// `updateOnly` / `patch`. The same model (or key) twice in one call is written once: the last one wins, the first
-  /// for `insertOnly`.
+  /// for `insertOnly`. Expired rows (`timeToLive` passed, hidden from reads) count as missing for `updateOnly` /
+  /// `patch` (skipped); `insertOnly` writes over them (outcome `inserted`) and `upsert` updates them (renewed by the
+  /// model's `timeToLive`).
   ///
   /// Generated keys are written back into the models. A conflict on another UNIQUE column throws
   /// [FluentConstraintException] (`FluentErrorCode.uniqueViolation`) instead of losing the row.
@@ -80,8 +82,9 @@ extension FluentWrite<T extends FluentStorable> on FluentProvider<T> {
   Future<int> update(T item, {bool withRelations = false, FluentRelationSyncMode syncMode = FluentRelationSyncMode.preserveLocal, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) =>
       updateAll([item], withRelations: withRelations, syncMode: syncMode, tag: tag, policy: policy);
 
-  /// Updates the stored rows of [items] (strategy `updateOnly`, never inserts); items without a stored row or with
-  /// their row in the trash are skipped. Returns the number of updated rows.
+  /// Updates the stored rows of [items] (strategy `updateOnly`, never inserts); items without a stored row, with
+  /// their row in the trash or with an expired row (`timeToLive` passed: reads no longer see it) are skipped. Returns
+  /// the number of updated rows. To renew an expired row, [save] it.
   ///
   /// With [withRelations] the related models are saved too (upserted): [syncMode] `preserveLocal` (default) keeps
   /// related rows missing from the lists, `replace` removes them.
@@ -109,7 +112,8 @@ extension FluentWrite<T extends FluentStorable> on FluentProvider<T> {
   }
 
   /// Sets [fields] (column → Dart value, or a [FluentUpdate] computed by SQLite) on the row with key [id]; returns 1
-  /// when it exists, 0 otherwise (also for a row in the trash, like [FluentRead.findById]).
+  /// when it exists, 0 otherwise — like [FluentRead.findById]: a row in the trash or one whose `timeToLive` has
+  /// passed counts as missing ([includeExpired]: expired rows are updated too; their expiry stays as it is).
   ///
   /// Values are converted like on save; the updated-at time of `FluentTimestamps` models is set. Unknown or key
   /// columns and the columns the library keeps (soft delete, sync versions, expiry, `_fs_metadata`, archived
@@ -119,23 +123,24 @@ extension FluentWrite<T extends FluentStorable> on FluentProvider<T> {
   /// await users.updateById(42, {'last_login': DateTime.now(), 'active': true});
   /// await posts.updateById(7, {'views': FluentUpdate.increment(1)});
   /// ```
-  Future<int> updateById(Object? id, Map<String, Object?> fields, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
+  Future<int> updateById(Object? id, Map<String, Object?> fields, {bool includeExpired = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
     if (id == null || fields.isEmpty) return 0;
-    final String? deleted = _softDeleteColumn;
-    final FluentFilter where = deleted == null ? keyFilter(id) : keyFilter(id).and(FluentFilter.isNull(deleted.quotedIdentifier));
-    return _run<int>(FluentDbAction.updateFields, helper: _helperFor(where, dataMap: fields), policy: policy, tag: tag);
+    return _run<int>(FluentDbAction.updateFields, helper: _helperFor(_updatable(keyFilter(id), includeExpired), dataMap: fields), policy: policy, tag: tag);
   }
 
-  /// Sets [fields] on every row matching [where] that is not in the trash; returns the number of updated rows.
-  /// Values and errors as in [updateById].
+  /// Sets [fields] on every row matching [where] that reads see (not in the trash; not expired unless
+  /// [includeExpired]); returns the number of updated rows. Values and errors as in [updateById].
   ///
   /// ```dart
   /// await orders.updateWhere(FluentFilter.eq('status', 'new'), {'status': 'cancelled'});
   /// ```
-  Future<int> updateWhere(FluentFilter where, Map<String, Object?> fields, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
+  Future<int> updateWhere(FluentFilter where, Map<String, Object?> fields, {bool includeExpired = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
     if (fields.isEmpty) return 0;
-    final String? deleted = _softDeleteColumn;
-    final FluentFilter scope = deleted == null ? where : where.and(FluentFilter.isNull(deleted.quotedIdentifier));
-    return _run<int>(FluentDbAction.updateFields, helper: _helperFor(scope, dataMap: fields), policy: policy, tag: tag);
+    return _run<int>(FluentDbAction.updateFields, helper: _helperFor(_updatable(where, includeExpired), dataMap: fields), policy: policy, tag: tag);
   }
+
+  /// [where] narrowed to the rows field updates reach: never rows in the trash (whatever the trash scope of the
+  /// call), expired rows only with [includeExpired].
+  FluentFilter _updatable(FluentFilter where, bool includeExpired) =>
+      _scoped(where, _visibility(includeExpired: includeExpired, deletedOnly: false, includeDeleted: false));
 }

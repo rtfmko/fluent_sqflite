@@ -1,3 +1,99 @@
+## 2.0.0-dev.2 (pre-release for testing)
+
+No renames or removals; every call of 2.0.0-dev.1 still compiles. An app on dev.1 may notice these behaviour changes
+(listed in `doc/ai/migrations.md`, "Behaviour changes"):
+
+* `FluentDb.init(groups)` / `planMigrations(groups)` without `config:` keep the settings in use (last `configure` /
+  `init(config:)`) instead of resetting to the defaults.
+* `deletedAt` of a model changes after the commit for `delete` and `restore` (like `save`).
+* Expired rows: `updateById` / `updateWhere` / `update` / `updateAll` / `patch` skip them (new `includeExpired:` on the
+  first two); `insertOnly` writes a new row over one, `upsert` renews it.
+* A save removes fewer relation children / links (see "Relations" below).
+* Soft-delete stamps and ISO-8601 dates stored in an older form are rewritten once at start (`storedFormatAdopted`).
+* `fluent_sqflite_test` resets logging after every test; tests that move `db.clock`: see the timer note below.
+
+### 🐛 Fixed
+
+* `findPage`: a cursor that does not fit the table (a missing key column, a value SQLite cannot store, text for a
+  numeric column) fails at once with a `FluentArgumentException` and a hint instead of later in SQL.
+* Damaged type metadata (`_fs_metadata`) no longer loses the UTC flag of a `DateTime` when the tag is still readable
+  or other rows of the table show it.
+* The scheduler weighs a `find` without any filter or limit like any other unbounded find (it looked cheaper than a
+  filtered one).
+* The trash purge and `PRAGMA optimize` timers follow the library clock: `db.clock.advance` in `fluent_sqflite_test`
+  runs them without waiting. A test that moves the clock past `trashRetention` (and `trashPurgeInterval`) now sees
+  the trash purged; set `FluentConfig(trashPurgeInterval: null)` in such a test to keep the rows.
+
+### 🔧 Fixed and changed (second audit)
+
+**Relations**
+
+* A save never removes children / links for a relation with `limit`; with `where` only rows that match it; trashed or
+  expired children and targets are not treated as missing; relations in `unloadedRelations` (`FluentLoad.none`, lazy,
+  depth cut-off, failed load) remove nothing (new children are still saved). Children read from the trash are not
+  restored by saving the parent (use `trash.restore`). `insertOnly` on an existing row writes nothing for its relations.
+* `findParents` works for every type of a `oneOf` relation, also without `via`.
+* Start-up and manual orphan clean-up keep references into rows quarantined in `__fluent_rejected_*` and report them as
+  `danglingReferences`.
+
+**Engine and transactions**
+
+* Two saves of the same model instance are never merged (a double tap stores one row).
+* Keys generated in a transaction / savepoint that rolls back are taken back from the models.
+* `FluentDb.clear` inside `FluentDb.transaction` runs in it (a rollback keeps the rows, the `clear` event comes after the
+  commit). `clear`, `cleanOrphans` and `purgeArchivedColumns` called from inside another running task of the same
+  database are skipped with an `ignoredCall` warning; `purgeArchivedColumns` inside a transaction too.
+* `cleanOrphans` is ordered with other writes and publishes `update` events.
+* A transaction on database A opened inside one on B: writes to B join B's transaction.
+
+**Schema**
+
+* `oldName` plus a new column under the old name renames and adds the new column empty; two columns with the same
+  `oldName`: the first gets the data, the second stays empty (`schemaFallback`).
+* A migration step that leaves a model column missing fails the start (`schemaConflict`), nothing changes.
+* The fast start probes the full-text module (a copied file or restored backup); 1.x type values are adopted only when
+  their table was renamed; unquoted 1.x indexes are adopted as the model's, duplicate 1.x column indexes are dropped.
+* A `defaultValue` is stored like a saved value (converter, enum converter, table `dateTimeFormat`): existing databases
+  get the new `DEFAULT` text on the next sync. A NaN default throws `FluentSchemaException`; infinity is allowed.
+* Unquoted column names with spaces get a quoting hint.
+
+**Reading and writing**
+
+* The soft-delete stamp is always epoch milliseconds; old ISO-text stamps are converted once (`storedFormatAdopted`,
+  new `autoFix` issue kind). ISO-8601 text written by the library has six fraction digits; old three-digit values are
+  padded once at start (read-only databases get a `mappingValue` warning).
+* `deletedAt` changes only after the commit for delete and restore. `FluentDb.deleteAll`, `Iterable.deleteAll()` and
+  deletes through a base type set `deletedAt`.
+* New `includeExpired` parameter on `updateById` / `updateWhere` (provider and `FluentDb`).
+* Expired rows: `update` / `updateAll` / `patch` skip them, `insertOnly` writes a new row over one, `upsert` renews it
+  (the model's `timeToLive`, or clears the expiry).
+* `findPage` cursors on `DateTime` columns of iso8601 tables work; `FluentCursor` encode / decode round-trips bytes and
+  non-finite doubles, garbage text fails with `FluentArgumentException`. `aggregate` keeps the UTC flag.
+* `watch` expiry follows `db.clock`. Active-record `refresh` / `exists` / `restore` / `deleteForever` resolve the provider
+  by the runtime type.
+
+**Sync**
+
+* `FluentDb.clear()` and `clearTable()` drop pending deletions (tombstones) too (counted in `unsentChangesDiscarded`).
+* A local save of a key with a pending tombstone cancels the deletion (the push sends only the upsert).
+* `replaceLocally` / `clearLocally` (also used by `watchRemote`) keep parent rows that have unsynced descendants (foreign
+  key cascade and `oneOf`), so a refresh may leave a few old parents.
+
+**Lifecycle and logging**
+
+* `FluentDb.init(config:)` and `planMigrations(config:)` are nullable: omitted means the settings in use. `init` after a
+  queued `close` / `restart` runs in call order.
+* New `setupLogging(removeOnRecord: true)` / `FluentLog.configure(removeOnRecord:)` removes the `onRecord` sink.
+* Paths in messages show as `<path hidden>` unless `showSqlArguments`; `FluentGroup.toString` hides the directory.
+* Zero or negative `trashPurgeInterval`, `optimizeInterval`, `pauseWatchdog`, `transactionWatchdog` fall back to the
+  defaults (`configFallback`); `null` still switches them off.
+* `fluent_sqflite_test` resets logging after every test: configure logging in `setUp` or the test, not `setUpAll`.
+
+### Documentation
+
+* `FluentDbColumn(name:, type:, oldName:)` is the only way to set `oldName` (the factories have none); the README shows
+  how to depend on the pre-release; the schema skill lists the `renameTable` change kind.
+
 ## 2.0.0-dev.1 (pre-release for testing)
 
 **Note: This release has breaking changes.** Every rename and removal is listed in `doc/ai/migrations.md`.

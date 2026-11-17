@@ -349,6 +349,17 @@ class FluentDbColumn {
     if (isNotNull && !renderPk && !hasCustomNotNull) parts.add('NOT NULL');
     if (isUnique && !renderPk && !hasCustomUnique) parts.add('UNIQUE');
 
+    final Object? defaultIs = defaultValue;
+    if (defaultIs is double && defaultIs.isNaN && !hasCustomDefault) {
+      throw FluentLog.raise(
+        FluentSchemaException(
+          'The default value of column "$name" is NaN: SQLite cannot store NaN (it would become NULL).',
+          columnName: name,
+          hint: 'Use a finite number (or double.infinity) as defaultValue, or no default for "no value".',
+        ),
+        tag: 'FluentDbColumn',
+      );
+    }
     if (defaultValue != null && !hasCustomDefault) {
       parts.add('DEFAULT ${fluentSqlLiteral(defaultValue)}');
     }

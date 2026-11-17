@@ -51,6 +51,7 @@ use `findByIds`, which splits them.
 
 ## Paging
 
+
 **`findPage` (recommended):** keyset pagination. Each page starts right after the last row of the previous one, so
 rows added or deleted meanwhile never make pages repeat or skip rows, and page 100 is as fast as page 1.
 
@@ -62,7 +63,8 @@ if (!page.hasMore) print('the end');
 ```
 
 The key is added to the order, so equal `orderBy` values have a fixed order. A cursor can be kept as text
-(`page.next!.encode()`, `FluentCursor.decode(text)`). An index on the `orderBy` column makes big tables fast.
+(`page.next!.encode()`, `FluentCursor.decode(text)`; bytes and non-finite doubles survive the round trip, garbage text fails
+with a `FluentArgumentException`). A cursor on a `DateTime` column works for iso8601 tables too. An index on the `orderBy` column makes big tables fast.
 
 **`limit` / `offset`:** fine for small, rarely changing lists. Always pass `orderBy` — without it SQLite returns rows in no
 defined order, so pages can repeat or skip rows (the library prints a hint with the fix).

@@ -105,6 +105,9 @@ class FluentTuner with WidgetsBindingObserver {
         final List<Map<String, Object?>> rows = await e.value.rawQuery(r"SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' AND name LIKE 'fluent\_auto\_%' ESCAPE '\'");
         _autoIndexCount[e.key] = rows.length;
         for (final Map<String, Object?> r in rows) {
+          // Known as existing: a read proposing the same index again is served by it, it is neither created nor
+          // counted against the cap a second time.
+          _servedShapes.putIfAbsent('${e.key}|${r['name']}', () => {});
           FluentLog.debug('Automatic index "${r['name']}" on "${r['tbl_name']}" (created in an earlier run)', tag: 'FluentTuner:index');
         }
       } catch (_) {

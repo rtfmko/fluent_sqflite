@@ -53,19 +53,28 @@ class FluentDb {
   bool _isInitialized = false;
 
   /// Periodic trash purge while the app runs (`FluentConfig.trashPurgeInterval`).
-  Timer? _trashPurgeTimer;
+  FluentClockTimer? _trashPurgeTimer;
 
   /// Periodic `PRAGMA optimize` while the app runs (`FluentConfig.optimizeInterval`).
-  Timer? _optimizeTimer;
+  FluentClockTimer? _optimizeTimer;
 
   /// The [init] in progress: concurrent calls wait for it instead of registering every provider again.
   Future<void>? _pendingInit;
+
+  /// The number of lifecycle calls made so far, and the number at the moment [_pendingInit] was queued: a later
+  /// [init] shares the pending one only while no other lifecycle call was queued after it.
+  int _lifecycleCalls = 0;
+  int _pendingInitCall = 0;
+
+  /// Counts the calls of [FluentDb.configure]: an [FluentDb.init] that was called before one does not overwrite it.
+  static int _configEpoch = 0;
 
   /// The end of the last lifecycle call ([init], [close], [restart], [deleteDatabases]): they run one after another.
   Future<void> _lifecycleTail = Future<void>.value();
 
   /// Runs [action] after every lifecycle call made before it (its error goes to its caller only).
-  Future<R> _serialized<R>(Future<R> Function() action) {
+  Future<R> _serialized<R>(Future<R> Function() action, {bool counts = true}) {
+    if (counts) _lifecycleCalls++;
     final Future<R> result = _lifecycleTail.then((_) => action());
     _lifecycleTail = result.then<void>((_) {}, onError: (Object _) {});
     return result;
@@ -560,12 +569,12 @@ class FluentDb {
   }) async => _sum(await _perProvider<T, int>(items, dbKey, (p, group, _) => p.updateAll(group, withRelations: withRelations, syncMode: syncMode, tag: tag, policy: policy)));
 
   /// See [FluentWrite.updateById].
-  static Future<int> updateById<T extends FluentStorable>(Object? id, Map<String, Object?> fields, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) =>
-      Future.sync(() => _typed<T>(dbKey).updateById(id, fields, tag: tag, policy: policy));
+  static Future<int> updateById<T extends FluentStorable>(Object? id, Map<String, Object?> fields, {bool includeExpired = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) =>
+      Future.sync(() => _typed<T>(dbKey).updateById(id, fields, includeExpired: includeExpired, tag: tag, policy: policy));
 
   /// See [FluentWrite.updateWhere].
-  static Future<int> updateWhere<T extends FluentStorable>(FluentFilter where, Map<String, Object?> fields, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) =>
-      Future.sync(() => _typed<T>(dbKey).updateWhere(where, fields, tag: tag, policy: policy));
+  static Future<int> updateWhere<T extends FluentStorable>(FluentFilter where, Map<String, Object?> fields, {bool includeExpired = false, Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) =>
+      Future.sync(() => _typed<T>(dbKey).updateWhere(where, fields, includeExpired: includeExpired, tag: tag, policy: policy));
 
   /// See [FluentRemove.delete].
   static Future<int> delete<T extends FluentStorable>(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) =>
@@ -735,7 +744,8 @@ class FluentDb {
   /// Archives are also purged automatically at start-up after `FluentGroup.archiveRetention`.
   ///
   /// It is a write like any other (it may rebuild tables): calls made before it finish first, calls made after it
-  /// wait for it, and nothing runs beside it.
+  /// wait for it, and nothing runs beside it. Inside a transaction or task of a database it skips that database
+  /// (reported as an `ignoredCall` issue): a rebuild needs foreign keys off, which SQLite ignores inside a transaction.
   ///
   /// ```dart
   /// await FluentDb.purgeArchivedColumns(olderThan: const Duration(days: 7));
@@ -746,6 +756,9 @@ class FluentDb {
       if (group.readOnly) continue;
       final Database? db = _instance._groupedRegistry[group.dbKey.dbName]?.all.map((p) => p.dbOrNull).whereType<Database>().firstOrNull;
       if (db == null || !db.isOpen) continue;
+      // Never inside a transaction of this database: a rebuild needs foreign keys off, which SQLite ignores inside a
+      // transaction (rebuilding a parent would delete its children), and queued it would wait for the transaction.
+      if (_heldByTask(group.dbKey.dbName, 'purgeArchivedColumns')) continue;
       // Queued as a write: it holds the database alone, so switching foreign keys off for a rebuild affects no other call.
       await FluentEngine().dispatch(
         FluentTask(
@@ -784,12 +797,24 @@ class FluentDb {
   /// ```
   ///
   /// Concurrent calls share one initialization (that of the first call; like a call after [init] completed, a later
-  /// call changes nothing). [init], [close], [restart] and [deleteDatabases] run one after another, in call order.
-  static Future<void> init(Iterable<FluentGroup> groups, {FluentConfig config = const FluentConfig()}) {
+  /// call changes nothing), unless a [close], [restart] or [deleteDatabases] was called after the pending [init]: then
+  /// this call runs in call order, after it. [init], [close], [restart] and [deleteDatabases] run one after another,
+  /// in call order.
+  ///
+  /// Without [config] the settings in use stay (the last [configure] or `init(config:)`, else the defaults). A
+  /// [configure] called after this call (before it starts) wins over [config].
+  static Future<void> init(Iterable<FluentGroup> groups, {FluentConfig? config}) {
     final Future<void>? running = _instance._pendingInit;
-    if (running != null) return running;
-    final Future<void> started = _instance._serialized(() => _instance._init(groups, config, isRetry: false));
+    // Shared only while nothing was queued after the pending init: else a close() / restart() in between would
+    // drop this call (and its groups) for good.
+    if (running != null && _instance._pendingInitCall == _instance._lifecycleCalls) return running;
+    final int configEpoch = _configEpoch;
+    final Future<void> started = _instance._serialized(() {
+      final FluentConfig? given = configEpoch == _configEpoch ? config : null;
+      return _instance._init(groups, given ?? _lastFluentConfig, isRetry: false);
+    });
     _instance._pendingInit = started;
+    _instance._pendingInitCall = _instance._lifecycleCalls;
     return started.whenComplete(() {
       if (identical(_instance._pendingInit, started)) _instance._pendingInit = null;
     });
@@ -810,8 +835,8 @@ class FluentDb {
   ///   assert(!plan.losesData, 'This release would drop data of ${plan.database}');
   /// }
   /// ```
-  static Future<List<FluentMigrationPlan>> planMigrations(Iterable<FluentGroup> groups, {FluentConfig config = const FluentConfig(), bool runCode = false}) =>
-      _instance._serialized(() => _instance._planMigrations(groups, config, runCode: runCode));
+  static Future<List<FluentMigrationPlan>> planMigrations(Iterable<FluentGroup> groups, {FluentConfig? config, bool runCode = false}) =>
+      _instance._serialized(() => _instance._planMigrations(groups, config ?? _lastFluentConfig, runCode: runCode));
 
   /// Whether the database [dbKey] is open (without [dbKey]: whether [init] has completed).
   static bool isOpen({FluentDbKey? dbKey}) {
@@ -839,6 +864,8 @@ class FluentDb {
   /// Watchers receive an empty result right away.
   ///
   /// It is a write like any other: calls made before it finish first, calls made after it see the empty tables.
+  /// Inside [transaction] it runs in that transaction (a rollback keeps the rows; watchers hear of it after the
+  /// commit); inside another task of the database (a callback) it skips that database (an `ignoredCall` issue).
   /// Throws [FluentConfigException] ([FluentErrorCode.databaseNotFound]) when [dbKey] is not open, or ([FluentErrorCode.notInitialized]) when no database is open; a table that cannot be emptied (a restricting foreign key, a trigger) fails with a [FluentConstraintException] / [FluentQueryException], and nothing is reported as cleared.
   ///
   /// ```dart
@@ -866,6 +893,19 @@ class FluentDb {
       );
     }
     for (final String dbName in [if (dbKey != null) dbKey.dbName else ..._instance._groupedRegistry.keys]) {
+      // Inside a transaction of this database: run in it (queued, the clear would wait for the transaction, and the
+      // transaction for the clear). Its events follow the commit; a rollback keeps the rows.
+      final FluentTransactionScope? open = FluentTransactionScope.of(dbName);
+      if (open != null) {
+        try {
+          await FluentEngine().clearInTransaction(open, _instance._groupedRegistry[dbName]?.all ?? const <FluentProvider>[]);
+        } on FluentException catch (e) {
+          throw FluentLog.raise(e, tag: 'FluentDb:clear');
+        }
+        FluentLog.info('All rows of database "$dbName" deleted (committed with the transaction).', tag: 'FluentDb:clear');
+        continue;
+      }
+      if (_heldByTask(dbName, 'clear')) continue;
       final Object? cleared = await FluentEngine().dispatch(FluentTask(action: FluentDbAction.clearDatabase, dbName: dbName));
       if (cleared != true) {
         throw FluentLog.raise(
@@ -896,6 +936,25 @@ class FluentDb {
   /// ```
   static Future<void> deleteDatabases({FluentDbKey? dbKey, bool reopen = true}) =>
       _insideTask('deleteDatabases') ? Future<void>.value() : _instance._serialized(() => _instance._deleteDatabases(dbKey?.dbName, reopen: reopen));
+
+  /// Whether the caller runs inside a task or transaction of [dbName]: a queued [call] (a write of the whole database)
+  /// would wait for it, and it for the call. The call is skipped for that database and reported (`ignoredCall`).
+  static bool _heldByTask(String dbName, String call) {
+    if (FluentTransactionScope.of(dbName) == null && !FluentEngine().holdsDatabase(dbName)) return false;
+    FluentLog.issue(
+      FluentIssueKind.ignoredCall,
+      'FluentDb.$call was called from inside a running task or transaction of "$dbName"; nothing was done there.',
+      database: dbName,
+      subject: call,
+      tag: 'FluentDb:$call',
+      hint: call == 'clear'
+          ? 'Queued, it would wait for the running task, which waits for it. Call FluentDb.$call inside FluentDb.transaction '
+              '(it then runs in the transaction) or after the task completed.'
+          : 'It may rebuild tables, which needs foreign keys off: impossible inside a transaction. Call FluentDb.$call '
+              'after the transaction or callback completed.',
+    );
+    return true;
+  }
 
   /// Whether the caller runs inside a database task or transaction: closing waits for it, so the call would wait for itself.
   /// It is ignored and reported (`ignoredCall`); the databases stay as they were.
@@ -1041,18 +1100,24 @@ class FluentDb {
 
     final Database database = _instance._groupedRegistry[dbName]!.all.first.db;
     FluentTransactionScope? scope;
-    final Object? result = await FluentEngine().dispatch(
-      FluentTask(
-        action: FluentDbAction.transaction,
-        table: '',
-        dbName: dbName,
-        data: () => database.transaction((txn) {
-          final FluentTransactionScope open = scope = FluentTransactionScope(dbName, txn);
-          final Timer? watchdog = FluentEngine().watchTransaction(open);
-          return open.run(action).whenComplete(() => watchdog?.cancel());
-        }),
-      ),
-    );
+    final Object? result;
+    try {
+      result = await FluentEngine().dispatch(
+        FluentTask(
+          action: FluentDbAction.transaction,
+          table: '',
+          dbName: dbName,
+          data: () => database.transaction((txn) {
+            final FluentTransactionScope open = scope = FluentTransactionScope(dbName, txn);
+            final Timer? watchdog = FluentEngine().watchTransaction(open);
+            return open.run(action).whenComplete(() => watchdog?.cancel());
+          }),
+        ),
+      );
+    } catch (_) {
+      scope?.rolledBack(); // keys its inserts gave the models are taken back: SQLite reuses the rowids
+      rethrow;
+    }
     scope?.committed();
     for (final (FluentTask task, FluentProvider provider, Object? written) in scope?.pendingEvents ?? const <(FluentTask, FluentProvider, Object?)>[]) {
       FluentEngine().publishChange(task, provider, written);
@@ -1120,6 +1185,8 @@ class FluentDb {
   /// * [mute] — issue keys to drop everywhere (log, [onIssue], [report]); an entry ending in `*` mutes a prefix:
   ///   `{'unordered:*', 'missingIndex:app:logs:*'}`. Every printed issue shows its key. Mute what does not apply to
   ///   your app — the library cannot know everything.
+  /// * [removeOnRecord] — `true` removes the [onRecord] sink set earlier (`onRecord: null` keeps it, like every other
+  ///   `null`); an [onRecord] given in the same call is set after the removal.
   ///
   /// ```dart
   /// FluentDb.setupLogging(
@@ -1137,7 +1204,17 @@ class FluentDb {
     bool? showSqlArguments,
     bool? enabled,
     Set<String>? mute,
-  }) => FluentLog.configure(level: level, onRecord: onRecord, console: console, colors: colors, showSqlArguments: showSqlArguments, enabled: enabled, mute: mute);
+    bool removeOnRecord = false,
+  }) => FluentLog.configure(
+    level: level,
+    onRecord: onRecord,
+    console: console,
+    colors: colors,
+    showSqlArguments: showSqlArguments,
+    enabled: enabled,
+    mute: mute,
+    removeOnRecord: removeOnRecord,
+  );
 
   /// The global settings in use (`init(config:)`, or the last [configure]).
   static FluentConfig get config => FluentEngine().config;
@@ -1148,14 +1225,30 @@ class FluentDb {
   /// Settings read at `init` (`indexReferences`, `autoRelations`, `fullText`, `readConnections`) take effect on the
   /// next start ([restart]);
   /// the others (mapping, watchdogs, retention, default policy, maintenance intervals) right away.
+  ///
+  /// An interval that cannot work (zero or negative: `trashPurgeInterval`, `optimizeInterval`, the watchdogs) is
+  /// replaced by its default, with a `configFallback` warning.
   static void configure(FluentConfig config) {
-    _lastFluentConfig = config;
-    FluentEngine().applyConfig(config);
-    _instance._restartTimers(config);
+    _configEpoch++;
+    final FluentConfig safe = _checkedConfig(config);
+    _lastFluentConfig = safe;
+    FluentEngine().applyConfig(safe);
+    _instance._restartTimers(safe);
     // A running init (or restart) ends with the timers of the config it started with: afterwards the timers follow the
     // latest stored config again, so the stored settings and the timers always agree.
-    unawaited(_instance._serialized(() async => _instance._restartTimers(_lastFluentConfig)).catchError((Object _) {}));
+    unawaited(_instance._serialized(() async => _instance._restartTimers(_lastFluentConfig), counts: false).catchError((Object _) {}));
   }
+
+  /// [config] with every interval that cannot work replaced by its default (a `configFallback` warning each).
+  static FluentConfig _checkedConfig(FluentConfig config) => config.withSafeIntervals((String name, Duration bad, Duration fallback) {
+    FluentLog.issue(
+      FluentIssueKind.configFallback,
+      'FluentConfig.$name is ${bad.inMilliseconds} ms; a zero or negative interval would run its job without waiting, so the default (${fallback.inSeconds} s) is used.',
+      subject: name,
+      tag: 'FluentDb:config',
+      hint: 'Use a positive Duration, or null to switch it off: FluentConfig($name: null).',
+    );
+  });
 
   /// Pauses the task queue of [dbKey] (of every database without it): completes when the running tasks have
   /// finished; later calls wait until [resumeQueue]. Use it before copying the database file (backups).
@@ -1230,8 +1323,15 @@ extension FluentDbInternals on FluentDb {
   /// The provider of the model type [type] (in database [dbName] when given); throws when there is none.
   static FluentProvider providerForType(Type type, {String? dbName}) => FluentDb._resolveProvider(modelType: type, dbName: dbName);
 
+  /// The provider of [item] the way `FluentDb.save` / `delete` find it: by its runtime type when that is registered,
+  /// else by [T] (the active-record calls on a model use it, so every call of one model reaches the same table).
+  static FluentProvider<T> providerForItem<T extends FluentStorable>(T item, {FluentDbKey? dbKey}) => FluentDb._forItem<T>(item, dbKey);
+
   /// Forgets the registered providers and the last groups without closing anything (tests).
-  static void reset() => FluentDb._instance._reset();
+  static void reset() {
+    FluentDb._instance._reset();
+    FluentDb._lastFluentConfig = const FluentConfig();
+  }
 
   /// Which maintenance timers run now (the trash purge and `PRAGMA optimize` of `FluentConfig`; tests).
   static ({bool purge, bool optimize}) get maintenanceTimers => (purge: FluentDb._instance._trashPurgeTimer != null, optimize: FluentDb._instance._optimizeTimer != null);

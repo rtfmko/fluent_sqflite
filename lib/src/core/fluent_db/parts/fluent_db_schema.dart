@@ -51,7 +51,7 @@ extension _FluentDbSchema on FluentDb {
       for (final Map<String, Object?> row in await txn.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'")) row['name']! as String,
     };
     // Tables and link columns a 1.x database named with the old rule get their current names first.
-    await fluentAdoptLegacyNames(txn, providers, existing, ctx.changes);
+    final Map<String, String> renamedTables = await fluentAdoptLegacyNames(txn, providers, existing, ctx.changes);
     // Relations that changed their kind since the last start keep their data (see fluentMigrateRelations).
     final Map<String, FluentTableSnapshot> before = {for (final FluentTableSnapshot s in await readFluentSchemaSnapshots(txn)) s.table: s};
     await fluentMigrateRelations(txn, providers, before, beforeTables: true, changes: ctx.changes);
@@ -62,7 +62,8 @@ extension _FluentDbSchema on FluentDb {
       await dao.syncFullText(txn, group.config.fullText, changes: ctx.changes);
     }
     await fluentMigrateRelations(txn, providers, before, beforeTables: false, changes: ctx.changes);
-    await fluentAdoptLegacyTypeValues(txn, providers, ctx.changes);
+    // Only the values of tables renamed at this start: no scan on every full sync, and a free 1.x name is never rewritten.
+    await fluentAdoptLegacyTypeValues(txn, providers, ctx.changes, renamedTables: renamedTables);
   }
 
   /// What [_syncSchema] would change: the same pass in a transaction that is rolled back, its issues collected

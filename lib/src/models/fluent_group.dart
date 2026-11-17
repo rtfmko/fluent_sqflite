@@ -178,7 +178,8 @@ class FluentGroup {
     parts.add('dbKey: $dbKey');
     parts.add('providerCount: ${providerList.length}');
     parts.add('config: $config');
-    if (directory != null) parts.add('directory: $directory');
+    // The folder is a path: shown only when the log may show paths (showSqlArguments).
+    if (directory != null) parts.add(FluentLog.showSqlArguments ? 'directory: $directory' : 'directory: <path hidden>');
     if (readOnly) parts.add('readOnly: true');
 
     sb.write(parts.join(', '));

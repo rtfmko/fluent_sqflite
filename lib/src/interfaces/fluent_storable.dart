@@ -506,6 +506,18 @@ extension FluentStorableInternals on FluentStorable {
 
   /// The key value of column [name] given the [buildJson] value [given] (forced and generated keys applied).
   Object? keyValueOf(String name, Object? given) => _keyValue(name, given);
+
+  /// A function that puts the kept value of key column [key] (generated / forced key) back as it is now: undoes a
+  /// later [injectRelationId] / [forceKey] of a write that is rolled back.
+  void Function() keyRestorer(String key) {
+    final bool had = _metadata.containsKey(key);
+    final Object? value = _metadata[key];
+    final ({Object? replaced, Object? value})? forced = _forcedKeys[key];
+    return () {
+      had ? _metadata[key] = value : _metadata.remove(key);
+      forced == null ? _forcedKeys.remove(key) : _forcedKeys[key] = forced;
+    };
+  }
 }
 
 /// Whether two key values are the same key (`1` and `'1'` too: SQLite affinity stores them alike).

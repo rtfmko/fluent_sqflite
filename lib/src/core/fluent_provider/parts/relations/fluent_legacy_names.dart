@@ -100,11 +100,14 @@ void _recordLegacyNames(List<FluentProvider> all, Map<FluentProvider, _FluentGra
 /// statistics; a full-text index is rebuilt). [existing] (the tables on disk) is updated. Columns of the provider
 /// tables are renamed by the schema sync (`oldName` of the reference columns), polymorphic type values by
 /// [fluentAdoptLegacyTypeValues]. Each rename is reported (`legacyNameAdopted`) and recorded in [changes].
-Future<void> fluentAdoptLegacyNames(Transaction txn, Iterable<FluentProvider> providers, Set<String> existing, List<FluentSchemaChange> changes) async {
+///
+/// Returns the tables renamed by this call (1.x name → current name), for [fluentAdoptLegacyTypeValues].
+Future<Map<String, String>> fluentAdoptLegacyNames(Transaction txn, Iterable<FluentProvider> providers, Set<String> existing, List<FluentSchemaChange> changes) async {
   final List<FluentProvider> all = providers.toList(growable: false);
   final Set<String> claimed = {for (final FluentProvider p in all) p.tableName};
   // Old → new: rewrites the relation storage kept in the snapshots, so a renamed relation is not taken as changed.
   final Map<String, String> renamed = {};
+  final Map<String, String> renamedTables = {};
 
   Future<bool> renameTable(FluentProvider p, String from, String to) async {
     if (!existing.contains(from) || claimed.contains(from)) return false;
@@ -126,6 +129,7 @@ Future<void> fluentAdoptLegacyNames(Transaction txn, Iterable<FluentProvider> pr
       ..remove(from)
       ..add(to);
     renamed[from] = to;
+    renamedTables[from] = to;
     changes.add(FluentSchemaChange(kind: FluentSchemaChangeKind.renameTable, table: to, subject: from, description: 'renamed table "$from" (1.x name) to "$to"'));
     FluentLog.issue(
       FluentIssueKind.legacyNameAdopted,
@@ -163,6 +167,7 @@ Future<void> fluentAdoptLegacyNames(Transaction txn, Iterable<FluentProvider> pr
         await txn.execute('DROP TABLE IF EXISTS ${fts.quotedIdentifier}');
         await txn.rawDelete('DELETE FROM "__fluent_fts" WHERE tbl = ?', [old]);
       }
+      await _dropLegacyColumnIndexes(txn, old, now);
     }
     for (final MapEntry<String, String> link in names.linkTables.entries) {
       if (await renameTable(p, link.value, link.key)) {
@@ -187,7 +192,7 @@ Future<void> fluentAdoptLegacyNames(Transaction txn, Iterable<FluentProvider> pr
       renamed[c.value] = c.key; // renamed by the schema sync (oldName)
     }
   }
-  if (renamed.isEmpty || !await tableExists(fluentSchemaTable)) return;
+  if (renamed.isEmpty || !await tableExists(fluentSchemaTable)) return renamedTables;
   // The relation storage of the snapshots names tables and columns: written with the new names.
   for (final Map<String, Object?> row in await txn.rawQuery('SELECT "table_name", "snapshot" FROM ${fluentSchemaTable.quotedIdentifier}')) {
     final Map<String, dynamic> json = jsonDecode(row['snapshot']! as String) as Map<String, dynamic>;
@@ -198,6 +203,21 @@ Future<void> fluentAdoptLegacyNames(Transaction txn, Iterable<FluentProvider> pr
     json['relations'] = rewritten;
     await txn.rawUpdate('UPDATE ${fluentSchemaTable.quotedIdentifier} SET "snapshot" = ? WHERE "table_name" = ?', [jsonEncode(json), row['table_name']]);
   }
+  return renamedTables;
+}
+
+/// The column indexes 1.x created on table [old] (`CREATE INDEX idx_<old>_<column> ON <old> (<column>)`), after the
+/// table was renamed to [now]: dropped, the schema sync creates them under the current name (`idx_<now>_<column>`), so
+/// the table does not keep every index twice. Any other index (also one with another definition) is the app's and stays.
+Future<void> _dropLegacyColumnIndexes(Transaction txn, String old, String now) async {
+  final String prefix = 'idx_${old}_';
+  for (final Map<String, Object?> r in await txn.rawQuery("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL", [now])) {
+    final String index = r['name']! as String;
+    if (!index.startsWith(prefix)) continue;
+    final String column = index.substring(prefix.length);
+    if (!_sameIndexSql(r['sql']! as String, 'CREATE INDEX ${index.quotedIdentifier} ON ${now.quotedIdentifier} (${column.quotedIdentifier})')) continue;
+    await txn.execute('DROP INDEX IF EXISTS ${index.quotedIdentifier}');
+  }
 }
 
 /// [storage] (see `_storageOf`) with every table / column name in [renamed] replaced by its new name.
@@ -206,7 +226,12 @@ String _renamedStorage(String storage, Map<String, String> renamed) =>
 
 /// After the tables of [providers] are synchronized in [txn]: polymorphic type columns that hold a 1.x table name
 /// get the current one (`<relation>_type` stores the table of the referenced row).
-Future<void> fluentAdoptLegacyTypeValues(Transaction txn, Iterable<FluentProvider> providers, List<FluentSchemaChange> changes) async {
+///
+/// Only values of the tables [fluentAdoptLegacyNames] renamed at this start ([renamedTables], 1.x name → current
+/// name): they are rewritten together with their table, once. Afterwards the 1.x name is free and may become a table
+/// of the app, so its values are never touched by a later start (and no start scans the tables for them).
+Future<void> fluentAdoptLegacyTypeValues(Transaction txn, Iterable<FluentProvider> providers, List<FluentSchemaChange> changes, {required Map<String, String> renamedTables}) async {
+  if (renamedTables.isEmpty) return;
   for (final FluentProvider p in providers) {
     final Map<String, Map<String, String>> values = _legacyNames[p]?.typeValues ?? const {};
     if (values.isEmpty) continue;
@@ -214,6 +239,7 @@ Future<void> fluentAdoptLegacyTypeValues(Transaction txn, Iterable<FluentProvide
     for (final MapEntry<String, Map<String, String>> c in values.entries) {
       if (!columns.contains(c.key)) continue;
       for (final MapEntry<String, String> v in c.value.entries) {
+        if (renamedTables[v.value] != v.key) continue;
         final int n = await txn.rawUpdate('UPDATE ${p.tableName.quotedIdentifier} SET ${c.key.quotedIdentifier} = ? WHERE ${c.key.quotedIdentifier} = ?', [v.key, v.value]);
         if (n == 0) continue;
         changes.add(FluentSchemaChange(kind: FluentSchemaChangeKind.renameTable, table: p.tableName, subject: c.key, description: 'set $n "${c.key}" value(s) "${v.value}" (1.x table name) to "${v.key}"'));

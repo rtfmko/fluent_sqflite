@@ -45,7 +45,7 @@ void main() {
     issues = [];
     records = [];
     listener = FluentLog.issues.listen(issues.add);
-    FluentLog.configure(level: FluentLogLevel.debug, onRecord: records.add, console: false);
+    FluentLog.configure(enabled: true, level: FluentLogLevel.debug, onRecord: records.add, console: false);
   });
 
   tearDown(() async {

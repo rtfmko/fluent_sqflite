@@ -36,7 +36,7 @@ to `FIXED_ISSUES.md`.
 - [ ] API reference (`dart doc`) and architecture notes.
 - [ ] Before publishing: both packages depend on `fluent_sqflite` by path and say `publish_to: none`; switch to
       `fluent_sqflite: 2.0.0` (test package: the exact version, it uses internals) and publish after the library.
-- [ ] Release: versions `2.0.0-dev.1` → `2.0.0` (library + both packages), the CHANGELOG heading "2.0.0-dev.1" →
+- [ ] Release: versions `2.0.0-dev.N` → `2.0.0` (library + both packages), the CHANGELOG heading "2.0.0-dev.N" (merged) →
       "2.0.0" with a short summary on top.
 - [ ] `example/` app to exercise the library on devices (decided: later).
 
@@ -67,5 +67,9 @@ to `FIXED_ISSUES.md`.
 - [ ] Tuner: read pool resizing at run time (today: decided at start from the cores).
 - [ ] Tuner, not done on purpose: settings that only apply to a new database file (`auto_vacuum`, page size) or are
       stored for the next start — risky; revisit with device data. Battery / thermal hook (`FluentDb.reportDeviceState`).
+- [ ] Migration check script for Mac and Windows: run by hand or in CI, it checks the migrations when a project moves to a
+      new version of the library (schema changes, `FluentDbMigration` hashes and bodies) and reports what needs attention.
+- [ ] Pre-launch check script: one command that checks that everything is right before the app starts. It runs all
+      checks at once, prints every warning together, and for each one says how to fix it (idea only, not built yet).
 - [ ] A query counter for users (N+1 guards) in `fluent_sqflite_test`, through an own hook instead of
       `sqflite_common/src`

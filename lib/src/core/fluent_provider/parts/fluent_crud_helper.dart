@@ -132,10 +132,22 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
         'orderBy',
         'orderBy of "$tableName" may only name columns (with ASC / DESC, COLLATE, NULLS FIRST / LAST).',
         hint: "Order by columns, e.g. orderBy: 'created_at DESC, id'. Never pass user input as SQL: map the choice to a "
-            "column name (switch (sort) { 'new' => 'created_at DESC', ... }). For anything else use rawQuery.",
+            "column name (switch (sort) { 'new' => 'created_at DESC', ... }). For anything else use rawQuery."
+            "${_unquotedNameHint(orderBy, 'orderBy')}",
       ),
       tag: '$tableName:orderBy',
     );
+  }
+
+  /// A hint line when a term of [orderBy] looks like a column name with a space or dash that is not quoted.
+  static String _unquotedNameHint(String orderBy, String argument) {
+    for (final String term in _splitOrderTerms(orderBy)) {
+      final String t = term.trim();
+      if (!t.startsWith('"') && RegExp(r'^[\p{L}_][\p{L}\p{N}_]*[ -][\p{L}\p{N}_ -]*$', unicode: true).hasMatch(t.replaceFirst(RegExp(r'\s+(ASC|DESC)$', caseSensitive: false), ''))) {
+        return " A column name with a space or dash must be quoted: $argument: '\"${t.replaceFirst(RegExp(r'\s+(ASC|DESC)$', caseSensitive: false), '')}\"'.";
+      }
+    }
+    return '';
   }
 
   /// Splits [orderBy] at the commas outside quoted names.
@@ -272,6 +284,10 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
   /// ([synced]) update a trashed row in place and leave it in the trash, its sync versions untouched (a local delete
   /// that was not pushed yet stays pending).
   ///
+  /// Expiry: a row whose `timeToLive` passed is invisible to reads. `updateOnly` / `patch` skip it (like `findById`),
+  /// `insertOnly` writes over it (outcome `inserted`), `upsert` updates it (outcome `updated`; the model's
+  /// `timeToLive` renews it; without one it becomes live, no expiry). Server writes ([synced]) match it like any row.
+  ///
   /// Rows repeating the same match values in one call are written once (the last one wins; the first for
   /// `insertOnly`) and share its outcome and key. Writes use one `UPDATE` and one `INSERT` batch at most (no
   /// `RETURNING` / `ON CONFLICT`, so every SQLite version works). Returns the outcome and key of every row.
@@ -301,13 +317,21 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
     final int now = _now();
     final String? deleted = _softDeleteColumn;
     final FluentFilter? alive = deleted != null && conflictOn != null ? FluentFilter.isNull(deleted.quotedIdentifier) : null;
+    // Expired rows (timeToLive passed) are invisible to reads: `updateOnly` / `patch` treat them as missing (like
+    // findById), `insertOnly` writes over them, `upsert` updates them (the model's timeToLive renews them). Server
+    // writes keep matching every row.
+    final String expiry = _expiryColumn.quotedIdentifier;
+    final bool onlyFresh = !synced && (strategy == FluentSaveStrategy.updateOnly || strategy == FluentSaveStrategy.patch);
+    final FluentFilter? fresh = onlyFresh ? FluentFilter('$expiry IS NULL OR $expiry > $_sqlNow') : null;
+    final bool renews = !synced && (strategy == FluentSaveStrategy.upsert || strategy == FluentSaveStrategy.insertOnly);
     // Rows matched in the trash: written by their stored key (there is no live row with the same match values).
     final Map<int, Object> trashedId = {};
     FluentFilter matchOf(int i) {
       final Object? stored = trashedId[i];
       if (stored != null) return _keyFilterOf(stored, stored: true);
-      final FluentFilter where = _equalsAll({for (final String c in match) c: rows[i][c]}, stored: true); // rows[i] is stored already
-      return alive == null ? where : where.and(alive);
+      FluentFilter where = _equalsAll({for (final String c in match) c: rows[i][c]}, stored: true); // rows[i] is stored already
+      if (alive != null) where = where.and(alive);
+      return fresh == null ? where : where.and(fresh);
     }
 
     // Rows whose match is in the trash.
@@ -359,12 +383,23 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
 
     final List<int> toInsert = [];
     final List<int> toUpdate = [...fromTrash];
+    // insertOnly over an expired row: written like a new row (outcome `inserted`, new created-at time).
+    final Set<int> overExpired = {};
     if (strategy == FluentSaveStrategy.insertOnly) {
-      final Map<String, Object?> existing = await _existingByMatch(ex, match, [for (int i = 0; i < n; i++) if (writes(i) && matchKeys[i] != null && outcomes[i] == null && !fromTrash.contains(i)) rows[i]], scope: alive);
+      final List<Map<String, dynamic>> candidates = [for (int i = 0; i < n; i++) if (writes(i) && matchKeys[i] != null && outcomes[i] == null && !fromTrash.contains(i)) rows[i]];
+      final Map<String, Object?> existing = await _existingByMatch(ex, match, candidates, scope: alive);
+      final FluentFilter expired = FluentFilter('$expiry IS NOT NULL AND $expiry <= $_sqlNow');
+      final Map<String, Object?> stale = existing.isEmpty || synced
+          ? const {}
+          : await _existingByMatch(ex, match, [for (final Map<String, dynamic> r in candidates) if (existing.containsKey(_valuesKey(match, [for (final String c in match) r[c]]))) r], scope: alive == null ? expired : alive.and(expired));
       for (int i = 0; i < n; i++) {
         if (!writes(i) || outcomes[i] != null || fromTrash.contains(i)) continue;
         final String? key = matchKeys[i];
-        if (key != null && existing.containsKey(key)) {
+        if (key != null && stale.containsKey(key)) {
+          overExpired.add(i);
+          toUpdate.add(i);
+          ids[i] = conflictOn == null ? ids[i] ?? stale[key] : stale[key] ?? ids[i];
+        } else if (key != null && existing.containsKey(key)) {
           outcomes[i] = FluentRowOutcome.skipped;
           ids[i] = conflictOn == null ? ids[i] ?? existing[key] : existing[key] ?? ids[i];
         } else {
@@ -397,10 +432,16 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
           for (final MapEntry<String, dynamic> e in rows[i].entries)
             if (!keys.contains(e.key) && !match.contains(e.key) && !(patch && (e.value == null || e.key == meta))) e.key: e.value,
           if (times != null) times.updated: now,
+          if (times != null && overExpired.contains(i)) times.created: now,
         };
         final FluentFilter where = matchOf(i);
         if (patch) patched[i] = (where: where, fields: set.keys.toSet());
-        final List<String> extra = inPlace.contains(i) ? const [] : _versionSet(synced: synced);
+        final List<String> extra = [
+          // A model without timeToLive keeps the stored expiry of a live row; a row that expired already is made
+          // live again (the save renews it: it would stay invisible otherwise).
+          if (renews && !rows[i].containsKey(_expiryColumn)) '$expiry = CASE WHEN $expiry <= $_sqlNow THEN NULL ELSE $expiry END',
+          if (!inPlace.contains(i)) ..._versionSet(synced: synced),
+        ];
         if (set.isEmpty && extra.isEmpty) {
           // Nothing to change: a no-op update still tells whether the row exists.
           final String first = match.first.quotedIdentifier;
@@ -416,7 +457,7 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
       for (int k = 0; k < toUpdate.length; k++) {
         final int i = toUpdate[k];
         if ((results[k] as int? ?? 0) > 0) {
-          outcomes[i] = revived.contains(i) ? FluentRowOutcome.restored : FluentRowOutcome.updated;
+          outcomes[i] = revived.contains(i) ? FluentRowOutcome.restored : (overExpired.contains(i) ? FluentRowOutcome.inserted : FluentRowOutcome.updated);
         } else if (strategy == FluentSaveStrategy.upsert || strategy == FluentSaveStrategy.insertOnly) {
           toInsert.add(i);
         } else {
@@ -466,6 +507,9 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
       final int w = writer[matchKeys[i]]!;
       outcomes[i] = outcomes[w];
       ids[i] = ids[w];
+    }
+    if (!synced && _syncColumns != null) {
+      await _dropTombstonesOfWritten(ex, [for (int i = 0; i < n; i++) if (writes(i) && ids[i] != null && (outcomes[i] == FluentRowOutcome.inserted || outcomes[i] == FluentRowOutcome.updated || outcomes[i] == FluentRowOutcome.restored)) ids[i]!]);
     }
     return [for (int i = 0; i < n; i++) (outcomes[i]!, ids[i])];
   }
@@ -652,6 +696,10 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
 
   /// Writes the generated / found keys back into the saved models: a missing key is filled, and a key that differs
   /// from the written row's (`conflictOn` matched another row) is replaced.
+  ///
+  /// At once (later calls of the same transaction need the keys), and taken back when the transaction or savepoint
+  /// of the write rolls back: SQLite reuses a rolled-back rowid, so a kept key would make the next save of the model
+  /// overwrite another row.
   void _injectKeys(List<FluentStorable> items, List<_WrittenRow> written) {
     if (hasCompositeKey) return;
     final String key = primaryKeyColumns.first.name;
@@ -662,8 +710,11 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
       final Object? id = _plan.decodeValue(key, stored, []);
       final Object? given = items[i].buildJson()[key];
       if (given == null) {
+        if (fluentSameKeyValue(items[i].metadata[key], id)) continue;
+        FluentTransactionScope.whenRolledBack(dbName, items[i].keyRestorer(key));
         items[i].injectRelationId(key, id);
       } else if (!fluentSameKeyValue(given, id)) {
+        FluentTransactionScope.whenRolledBack(dbName, items[i].keyRestorer(key));
         items[i].forceKey(key, id, replaced: given); // a conflictOn match: the stored row has another key
       }
     }
@@ -812,13 +863,54 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
   // Soft delete, restore, hard delete
   // ---------------------------------------------------------------------------
 
-  /// The value written to the soft-delete column (same format as any `DateTime` of this table).
+  /// The value written to the soft-delete column: epoch milliseconds in every table, whatever its `dateTimeFormat`
+  /// (the column is INTEGER). Filters and cursors on the column pass milliseconds too (`_filterValue`,
+  /// `_storedValue`), and the cascade writes the owner's stamp into child tables with other date formats unchanged.
   ///
   /// Stamps are strictly increasing within the process: restore brings back the children deleted *together* with
   /// an owner by matching its stamp, so two deletes in the same millisecond must not share one.
-  Object _softDeleteStamp() {
+  int _softDeleteStamp() {
     _lastSoftDeleteStamp = math.max(FluentClock.now().millisecondsSinceEpoch, _lastSoftDeleteStamp + 1);
-    return FluentSqlSanitizer.sanitizeValueOnly(DateTime.fromMillisecondsSinceEpoch(_lastSoftDeleteStamp), _tableConfig) as Object;
+    return _lastSoftDeleteStamp;
+  }
+
+  /// Converts soft-delete stamps stored as ISO text (`iso8601` tables before 2.0.0-dev.3, 1.x, or a cascade from
+  /// such a table) to epoch milliseconds, so filters, cursors and the order on the column see one form. Runs in the
+  /// schema sync of the table (the stamp format is part of its fingerprint, so an older database is converted once).
+  ///
+  /// The text is read the way Dart wrote it (`DateTime.parse`: local time without an offset), so stamps that were
+  /// equal stay equal and restore still finds the children deleted together with their owner. Only the stamp
+  /// changes: sync versions are kept (no change for the server). Text that is no date is left as it is (the row
+  /// stays in the trash; the purge matches text stamps too). Reported as an autoFix issue.
+  Future<void> _adoptMillisStamps(DatabaseExecutor ex) async {
+    final String? column = _softDeleteColumn;
+    if (column == null) return;
+    final String c = column.quotedIdentifier;
+    final List<Map<String, Object?>> rows = await ex.query(tableName.quotedIdentifier, columns: [...keyColumnNames, column].quotedAll, where: "typeof($c) = 'text'");
+    if (rows.isEmpty) return;
+    final Batch batch = ex.batch();
+    int converted = 0;
+    for (final Map<String, Object?> r in rows) {
+      final Object? id = idFromRow(r);
+      final DateTime? at = DateTime.tryParse((r[column]! as String).trim());
+      if (id == null || at == null) continue;
+      final FluentFilter byKey = _keyFilterOf(id, stored: true);
+      batch.update(tableName.quotedIdentifier, {column: at.millisecondsSinceEpoch}.quotedKeys, where: byKey.whereClause, whereArgs: _sqlArgs(byKey.whereArgs));
+      converted++;
+    }
+    if (converted > 0) await batch.commit(noResult: true);
+    final int kept = rows.length - converted;
+    FluentLog.issue(
+      FluentIssueKind.storedFormatAdopted,
+      'Soft-delete stamps of "$tableName" stored as ISO text were converted to epoch milliseconds: $converted row(s)'
+      "${kept == 0 ? '' : ', $kept stamp(s) that are no date were left as they are'}.",
+      table: tableName,
+      subject: column,
+      tag: '$tableName:schema',
+      hint: 'Nothing to do: the trash keeps its rows and dates. The soft-delete column always holds epoch milliseconds now, '
+          'so filters and findPage on "$column" work with DateTime values in every table.',
+      context: {'converted': converted, 'kept': kept},
+    );
   }
 
   /// Owned relations whose children are soft-deleted / restored together with this table's rows.
@@ -1043,7 +1135,9 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
 
   /// Soft-deleted rows deleted more than [olderThan] ago ([Duration.zero]: all of them).
   ///
-  /// Matches both stored forms of the stamp (epoch milliseconds and ISO text from older versions).
+  /// Stamps are epoch milliseconds (see `_softDeleteStamp`); ISO text written by older versions is converted at the
+  /// start (`_adoptMillisStamps`), so the text branch only serves text a raw statement wrote later (compared with the
+  /// library's six-digit ISO form, `fluentIsoText`).
   FluentFilter _deletedBefore(Duration olderThan) {
     final String column = _softDeleteColumn!;
     FluentFilter deleted = FluentFilter.isNotNull(column.quotedIdentifier);
@@ -1054,7 +1148,7 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
     final DateTime cutoff = FluentClock.now().subtract(olderThan);
     final String c = column.quotedIdentifier;
     return deleted.and(
-      FluentFilter("(typeof($c) IN ('integer', 'real') AND $c < ?) OR (typeof($c) = 'text' AND $c < ?)", [cutoff.millisecondsSinceEpoch, cutoff.toIso8601String()]),
+      FluentFilter("(typeof($c) IN ('integer', 'real') AND $c < ?) OR (typeof($c) = 'text' AND $c < ?)", [cutoff.millisecondsSinceEpoch, fluentIsoText(cutoff)]),
     );
   }
 
@@ -1126,11 +1220,15 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
       );
     }
     final String? column = RegExp(r'no such column: ([^\s,)]+)').firstMatch(text)?.group(1);
+    final bool syntax = column == null && text.contains('syntax error');
     return FluentQueryException(
       column != null ? '$operation on "$tableName" failed: no such column "$column"' : '$operation on "$tableName" failed: SQLite rejected the statement',
       hint: column != null
           ? 'Use column names of the table (see the model\'s buildJson); a FluentFilter on a typo\'d field fails the same way.'
-          : 'Check the SQL (raw filters, rawQuery, execute) against the cause below.',
+          : syntax
+              ? 'Check the SQL (raw filters, rawQuery, execute) against the cause below. A column name that is not a plain identifier '
+                    "(a space, a dash, a dot) must be quoted in a FluentFilter and in orderBy: FluentFilter.eq('\"first name\"', value), orderBy: '\"first name\"'."
+              : 'Check the SQL (raw filters, rawQuery, execute) against the cause below.',
       cause: e,
       stackTrace: stackTrace,
     );

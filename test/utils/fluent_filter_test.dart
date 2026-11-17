@@ -50,8 +50,8 @@ void main() {
     test('an explicit table config decides the stored form (ISO text)', () {
       final when = DateTime.utc(2026, 1, 2, 3, 4, 5);
       const iso = FluentTableConfig(dateTimeFormat: FluentDateTimeFormat.iso8601);
-      expect(FluentFilter.eq('a', when, config: iso).whereArgs, [when.toIso8601String()]);
-      expect(FluentFilter.between('a', when, when, config: iso).whereArgs, [when.toIso8601String(), when.toIso8601String()]);
+      expect(FluentFilter.eq('a', when, config: iso).whereArgs, [fluentIsoText(when)]);
+      expect(FluentFilter.between('a', when, when, config: iso).whereArgs, [fluentIsoText(when), fluentIsoText(when)]);
       const indexes = FluentTableConfig(storeEnumsAsNames: false);
       expect(FluentFilter.eq('a', _Level.high, config: indexes).whereArgs, [1]);
       expect(FluentFilter.inList('a', [_Level.low, _Level.high], config: indexes).whereArgs, [0, 1]);

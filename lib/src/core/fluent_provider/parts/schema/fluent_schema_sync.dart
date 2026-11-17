@@ -176,6 +176,11 @@ Future<bool> fluentSchemaUpToDate(DatabaseExecutor db, Iterable<FluentProvider> 
     // A full-text index built for another revision of the table may point at the wrong rows: the full sync rebuilds it.
     if (fullText.containsKey(p.tableName) && fullTextRevision[p.tableName] != snapshot.revision) return false;
   }
+  // The FTS module is not part of the file: a copied file or restored backup may meet a SQLite without the module the
+  // index was built with (its triggers would fail every write), or one that has it now. The full sync drops / builds it.
+  for (final FluentProvider p in providers) {
+    if (!await p._fullTextModuleUpToDate(db, ctx.fullText, fullText[p.tableName])) return false;
+  }
   for (final FluentProvider p in providers) {
     p._adoptFullText(fullText[p.tableName]);
   }
@@ -200,6 +205,10 @@ String _declaredType(String definition) => _definitionBody(definition).trim().sp
 
 /// `CREATE INDEX IF NOT EXISTS "x" ON ...;` and `CREATE INDEX "x" ON ...` compare equal.
 String _normalizeSql(String sql) => sql.replaceAll(RegExp(r'\s+'), ' ').replaceAll('IF NOT EXISTS ', '').replaceAll(RegExp(r';\s*$'), '').trim();
+
+/// Whether two `CREATE INDEX` statements define the same index: spacing, `IF NOT EXISTS`, the final `;`, case and the
+/// quoting of identifiers do not matter (1.x wrote `CREATE INDEX idx_t_c ON t (c)`, 2.0 quotes every name).
+bool _sameIndexSql(String a, String b) => _canonicalSql(_normalizeSql(a)) == _canonicalSql(_normalizeSql(b));
 
 /// Column definition without its leading quoted name (renames keep the same body).
 String _definitionBody(String definition) {
@@ -384,6 +393,9 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
     }
 
     await _applySteps(txn, snapshot, desired, ctx, changes, fresh: !existsOnDisk);
+    if (existsOnDisk) await _adoptMillisStamps(txn); // soft-delete stamps stored as ISO text by older versions
+    if (existsOnDisk) await _adoptIsoFraction(txn); // ISO text with a three-digit fraction (fluent_row_mapping.dart)
+    await _checkColumnsOnDisk(txn, desired);
 
     if (changes.isNotEmpty) snapshot.revision = fromRevision + 1;
     snapshot.relations
@@ -441,6 +453,22 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
     }
   }
 
+  /// The table must have every column of the model after the sync: a snapshot (and its fingerprint) stored for a table
+  /// that lacks one would let the fast start keep it broken, and every write would fail. Refused instead (the schema
+  /// transaction is rolled back, nothing changes).
+  Future<void> _checkColumnsOnDisk(Transaction txn, _DesiredSchema desired) async {
+    final Set<String> onDisk = {for (final _DiskColumn d in await _diskColumns(txn)) d.name};
+    final List<String> missing = [for (final String name in desired.definitions.keys) if (!onDisk.contains(name)) name];
+    if (missing.isEmpty) return;
+    throw FluentSchemaException(
+      'The schema sync of "$tableName" left the table without the column(s) ${missing.map((m) => '"$m"').join(', ')} of the model; nothing was changed.',
+      modelName: tableName,
+      columnName: missing.first,
+      hint: 'A migration step of ${modelSample.runtimeType} probably renamed or dropped the column (rawSql / onMigrate): steps must leave every column '
+          'of the model in place. Check the steps and the oldName of the columns.',
+    );
+  }
+
   /// Fingerprint of everything a full sync of this table depends on (see [FluentTableSnapshot.fingerprint]).
   String _fingerprint(_DesiredSchema desired, FluentSchemaSyncContext ctx) {
     final FluentFullText fullText = _tableConfig.fullText ?? ctx.fullText ?? FluentEngine().config.fullText;
@@ -459,6 +487,8 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
         '#links', ..._linkTableStatements(),
         for (final FluentRelationLink l in _links) '${l.name}=${_storageOf(l)}',
         '#sync:${_syncColumns != null}',
+        if (_softDeleteColumn != null) '#stamp:ms', // ISO stamps of older versions are converted once (_adoptMillisStamps)
+        '#iso:6', // ISO dates are padded to six fraction digits once (_adoptIsoFraction)
         '#fk:${ctx.foreignKeys}',
         '#fts:${fullText.name}:${fullTextColumns.join(',')}',
       ].join('\u0001'),
@@ -475,6 +505,8 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
     refreshSchema();
     final _DesiredSchema desired = _desiredSchema();
     if (!desired.indexes.keys.every(snapshot.indexes.containsKey)) return false;
+    // A column the snapshot does not record was never created (an older version could store such a snapshot).
+    if (!desired.definitions.keys.every(snapshot.columns.containsKey)) return false;
     final List<String> needed = [
       tableName,
       for (final FluentRelationLink l in _links) if (l.isManyToMany) l.linkTable!,
@@ -626,7 +658,8 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
       final String name = r['name']! as String;
       final FluentIndex? wanted = desired.indexes[name];
       // Only an identical index is taken over; one of the same name with another definition is the app's (reported by _syncIndexes).
-      if (wanted != null && _normalizeSql(r['sql']! as String) == _normalizeSql(wanted.createSql(tableName))) indexes[name] = _normalizeSql(r['sql']! as String);
+      // 1.x wrote its indexes without quotes (`CREATE INDEX idx_t_c ON t (c)`): the same index, recorded as the model's.
+      if (wanted != null && _sameIndexSql(r['sql']! as String, wanted.createSql(tableName))) indexes[name] = _normalizeSql(wanted.createSql(tableName));
     }
 
     final Map<String, String> steps = {};
@@ -682,14 +715,17 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
       FluentLog.debug('Archived column "${d.name}" of "$tableName" was not in the snapshot; adopted', tag: '$tableName:schema');
     }
 
-    // Renames (oldName maps live columns only).
-    final Map<String, String> renames = {};
+    // Renames (oldName maps live columns only). A live column renamed away frees its name: a column of the model under
+    // that name is a new (empty) column, and may itself be renamed from another live column (chains), so the renames
+    // are collected until nothing changes. Their order is the order they must run in (a name is freed before it is taken).
+    final Map<String, String> renames = _renames(desired, live);
+    final Set<String> renamedFrom = renames.values.toSet();
+    // A live column that is neither renamed away nor still in the model under its name.
+    bool isLive(String name) => live.containsKey(name) && !renamedFrom.contains(name);
     for (final FluentDbColumn c in desired.columns) {
       final String? old = c.oldName;
-      if (old == null || live.containsKey(c.name)) continue;
-      if (live.containsKey(old)) {
-        renames[c.name] = old;
-      } else if (snapshot.archived.any((a) => a.original == old)) {
+      if (old == null || renames.containsKey(c.name) || isLive(c.name) || live.containsKey(old)) continue;
+      if (snapshot.archived.any((a) => a.original == old)) {
         FluentLog.issue(
           FluentIssueKind.schemaFallback,
           'Column "${c.name}" of "$tableName" declares oldName "$old", but "$old" is archived; "${c.name}" starts empty.',
@@ -700,8 +736,7 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
       }
     }
 
-    final List<FluentDbColumn> added = [for (final FluentDbColumn c in desired.columns) if (!live.containsKey(c.name) && !renames.containsKey(c.name)) c];
-    final Set<String> renamedFrom = renames.values.toSet();
+    final List<FluentDbColumn> added = [for (final FluentDbColumn c in desired.columns) if (!isLive(c.name) && !renames.containsKey(c.name)) c];
     final List<String> removed = [for (final String name in live.keys) if (!desired.definitions.containsKey(name) && !renamedFrom.contains(name)) name];
     // A column a pending step drops stays in the table (under its own name) while the step runs, so its rawSql /
     // onMigrate can still read it; the step drops it right after (see _applySteps).
@@ -712,7 +747,7 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
     final List<String> changed = [];
     bool enforcePending = false;
     for (final FluentDbColumn c in desired.columns) {
-      final String? source = renames[c.name] ?? (live.containsKey(c.name) ? c.name : null);
+      final String? source = renames[c.name] ?? (isLive(c.name) ? c.name : null);
       if (source == null) continue;
       final String? applied = snapshot.columns[source];
       final String wanted = desired.definitions[c.name]!;
@@ -798,7 +833,7 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
     final Map<String, String> copyFrom = {};
     final Set<String> pending = {};
     for (final FluentDbColumn c in desired.columns) {
-      final String? source = renames[c.name] ?? (live.containsKey(c.name) ? c.name : null);
+      final String? source = renames[c.name] ?? (isLive(c.name) ? c.name : null);
       String definition = desired.definitions[c.name]!;
       if (c.effectiveNotNull && !c.effectiveDefault && !c.effectivePrimaryKey) {
         final bool missingValues = source == null ? await hasRows() : await _hasNulls(txn, source);
@@ -874,6 +909,46 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
       ..addAll(pending);
 
     await _syncIndexes(txn, desired, snapshot, changes, rebuilt: true);
+  }
+
+  /// The renames of this sync (new name → live column it is renamed from), in the order they must run.
+  ///
+  /// A column with `oldName` is renamed from that live column when its own name is not taken by a live column that
+  /// stays. A live column renamed away frees its name, so `full` (oldName `name`) plus a new `name` renames `name` to
+  /// `full` and adds `name` empty; chains (`b` from `a`, `c` from `b`) run `b → c` before `a → b`. A live column claimed by
+  /// two columns goes to the first one; the other starts empty (reported).
+  Map<String, String> _renames(_DesiredSchema desired, Map<String, _DiskColumn> live) {
+    final Map<String, String> renames = {};
+    final Set<String> claimed = {};
+    final Set<String> reported = {};
+    bool progress = true;
+    while (progress) {
+      progress = false;
+      for (final FluentDbColumn c in desired.columns) {
+        final String? old = c.oldName;
+        if (old == null || old == c.name || renames.containsKey(c.name) || !live.containsKey(old)) continue;
+        // Its own name is a live column that stays: nothing to rename (the usual state after the rename ran once).
+        if (live.containsKey(c.name) && !claimed.contains(c.name)) continue;
+        if (claimed.contains(old)) {
+          if (reported.add(c.name)) {
+            FluentLog.issue(
+              FluentIssueKind.schemaFallback,
+              'Column "${c.name}" of "$tableName" declares oldName "$old", but "${renames.entries.firstWhere((e) => e.value == old).key}" is renamed from "$old" already; "${c.name}" starts empty.',
+              table: tableName,
+              database: dbName,
+              subject: c.name,
+              tag: '$tableName:schema',
+              hint: 'Only one column can take over "$old": remove oldName from the other one (copy the values with a migration step if both need them).',
+            );
+          }
+          continue;
+        }
+        renames[c.name] = old;
+        claimed.add(old);
+        progress = true;
+      }
+    }
+    return renames;
   }
 
   /// Warns about changes that keep the data but probably not as meant: a changed column type, a column that looks
@@ -1241,7 +1316,7 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
         changes.add(_change(FluentSchemaChangeKind.viewOrTriggerLost, 'could not recreate ${d['type']} "${d['name']}" (it is gone)', subject: d['name']! as String));
         FluentLog.issue(
           FluentIssueKind.viewOrTrigger,
-          'Could not recreate ${d['type']} "${d['name']}" after rebuilding "$tableName": $e',
+          'Could not recreate ${d['type']} "${d['name']}" after rebuilding "$tableName": ${FluentLog.redact('$e')}',
           table: tableName,
           tag: '$tableName:schema',
           hint: 'It probably uses a column that was removed or renamed. Recreate it with the updated SQL:\n${d['sql']}',
@@ -1355,7 +1430,7 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
         final Map<String, Object?>? existing = (await txn.rawQuery("SELECT tbl_name, sql FROM sqlite_master WHERE type = 'index' AND name = ?", [entry.key])).firstOrNull;
         if (existing != null) {
           final String? existingSql = existing['sql'] as String?;
-          if (existing['tbl_name'] == tableName && existingSql != null && _normalizeSql(existingSql) == wanted) {
+          if (existing['tbl_name'] == tableName && existingSql != null && _sameIndexSql(existingSql, wanted)) {
             applied[entry.key] = wanted;
           } else {
             FluentLog.issue(

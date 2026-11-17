@@ -1391,6 +1391,8 @@ extension FluentRelationSchema<T extends FluentStorable> on FluentProvider<T> {
   /// Only truly dangling references are touched: owned children of a missing owner are deleted
   /// (or their reference cleared for `setNull`), references to a missing model are cleared, and
   /// link rows to missing rows are removed. Rows that are simply not referenced are never deleted.
+  /// References to rows the schema sync moved to a quarantine table (`__fluent_rejected_<table>_r<n>`) are kept and
+  /// reported (`danglingReferences`): they are valid again once those rows are moved back.
   ///
   /// With [pointingTo] only the links to that table are checked (after rows of it were deleted).
   Future<void> cleanupOrphans(DatabaseExecutor executor, {FluentProvider? pointingTo}) async {
@@ -1408,8 +1410,48 @@ extension FluentRelationSchema<T extends FluentStorable> on FluentProvider<T> {
     String matches(String alias, List<String> keys, String table, List<String> columns) =>
         [for (int i = 0; i < columns.length; i++) '$alias.${keys[i].quotedIdentifier} = $table.${columns[i].quotedIdentifier}'].join(' AND ');
 
-    String missing(List<String> columns, FluentProvider referenced, List<String> keys) =>
-        '${columns.first.quotedIdentifier} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ${referenced.tableName.quotedIdentifier} r WHERE ${matches('r', keys, me, columns)})';
+    // Quarantine tables of the database (rows a new CHECK / UNIQUE rejected at a start), read once per call.
+    List<String>? rejectedTables;
+    final Map<String, Set<String>> rejectedColumns = {};
+    // The quarantine tables of [referenced] that hold every column of [keys].
+    Future<List<String>> quarantinesOf(FluentProvider referenced, List<String> keys) async {
+      rejectedTables ??= [
+        for (final Map<String, Object?> r in await executor.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table' AND substr(name, 1, 18) = '__fluent_rejected_'"))
+          r['name']! as String,
+      ];
+      final RegExp own = RegExp('^${RegExp.escape('__fluent_rejected_${referenced.tableName}_r')}\\d+(?:_\\d+)?\$');
+      final List<String> result = [];
+      for (final String q in rejectedTables!.where(own.hasMatch)) {
+        final Set<String> columns = rejectedColumns[q] ??= {
+          for (final Map<String, Object?> r in await executor.rawQuery('PRAGMA table_info(${q.quotedIdentifier})')) r['name']! as String,
+        };
+        if (keys.every(columns.contains)) result.add(q);
+      }
+      return result;
+    }
+
+    // Rows of this table whose [columns] point to a [referenced] row that is gone; rows pointing to a quarantined row
+    // are left out and reported.
+    Future<String> missing(List<String> columns, FluentProvider referenced, List<String> keys, {String? only}) async {
+      final String gone = '${only == null ? '' : '$only AND '}${columns.first.quotedIdentifier} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ${referenced.tableName.quotedIdentifier} r WHERE ${matches('r', keys, me, columns)})';
+      final List<String> quarantines = await quarantinesOf(referenced, keys);
+      if (quarantines.isEmpty) return gone;
+      final String inQuarantine = quarantines.map((q) => 'EXISTS (SELECT 1 FROM ${q.quotedIdentifier} q WHERE ${matches('q', keys, me, columns)})').join(' OR ');
+      final int kept = Sqflite.firstIntValue(await executor.rawQuery('SELECT COUNT(*) FROM $me WHERE $gone AND ($inQuarantine)')) ?? 0;
+      if (kept > 0) {
+        FluentLog.issue(
+          FluentIssueKind.danglingReferences,
+          '$kept row(s) of "$tableName" reference "${referenced.tableName}" rows that a schema change moved to ${quarantines.map((q) => '"$q"').join(', ')}; they were kept (nothing deleted or cleared).',
+          table: tableName,
+          database: dbName,
+          subject: referenced.tableName,
+          tag: '$tableName:cleanupOrphans',
+          hint: 'Move the quarantined rows back into "${referenced.tableName}" (fix them and copy them with a migration step: see the rowsQuarantined warning); '
+              'the references are valid again. When you drop the quarantine table instead, the next clean-up removes these rows or clears their references.',
+        );
+      }
+      return '$gone AND NOT ($inQuarantine)';
+    }
 
     String clear(List<String> columns) => columns.map((c) => '${c.quotedIdentifier} = NULL').join(', ');
 
@@ -1437,7 +1479,7 @@ extension FluentRelationSchema<T extends FluentStorable> on FluentProvider<T> {
       // Owned children stored in this table whose owner is gone.
       for (final FluentRelationLink link in _incomingLinks) {
         if (link.isPolymorphic || !concerns(link.owner)) continue; // polymorphic: with the oneOf reference below
-        final String where = missing(link.foreignKeys, link.owner, link.referencedColumns);
+        final String where = await missing(link.foreignKeys, link.owner, link.referencedColumns);
         if (await restricted(link, where)) continue;
         await run(link.onDelete == FluentOnDelete.cascade ? 'DELETE FROM $me WHERE $where' : 'UPDATE $me SET ${clear(link.foreignKeys)} WHERE $where');
       }
@@ -1447,25 +1489,29 @@ extension FluentRelationSchema<T extends FluentStorable> on FluentProvider<T> {
           for (final MapEntry<String, FluentProvider> t in link.targets.entries) {
             if (!concerns(t.value)) continue;
             final bool owned = t.value._links.any((l) => l.isPolymorphic && identical(l.target, this) && l.typeColumn == link.typeColumn && l.onDelete == FluentOnDelete.cascade);
-            final String where =
-                '${link.typeColumn!.quotedIdentifier} = ${fluentSqlLiteral(t.key)} AND ${missing(link.columnsFor(t.key), t.value, t.value.keyColumnNames.toList())}';
+            final String where = await missing(link.columnsFor(t.key), t.value, t.value.keyColumnNames.toList(), only: '${link.typeColumn!.quotedIdentifier} = ${fluentSqlLiteral(t.key)}');
             if (!owned && await restricted(link, where)) continue;
             await run(owned || link.onDelete == FluentOnDelete.cascade ? 'DELETE FROM $me WHERE $where' : 'UPDATE $me SET ${clear([link.typeColumn!, ...link.foreignKeys])} WHERE $where');
           }
         } else if (link.isReference) {
           if (!concerns(link.target)) continue;
           // References from this table to a model that is gone.
-          final String where = missing(link.foreignKeys, link.target, link.referencedColumns);
+          final String where = await missing(link.foreignKeys, link.target, link.referencedColumns);
           if (await restricted(link, where)) continue;
           await run(link.onDelete == FluentOnDelete.cascade ? 'DELETE FROM $me WHERE $where' : 'UPDATE $me SET ${clear(link.foreignKeys)} WHERE $where');
         } else if (link.isManyToMany && !link.isThrough) {
           if (pointingTo != null && !identical(pointingTo, this) && !identical(link.target, pointingTo)) continue;
           // (Rows of a link model are cleaned by that model's own relations.)
           final String table = link.linkTable!.quotedIdentifier;
-          await run(
-            'DELETE FROM $table WHERE NOT EXISTS (SELECT 1 FROM $me o WHERE ${matches('o', keyColumnNames.toList(), table, link.linkOwnerColumns)}) '
-            'OR NOT EXISTS (SELECT 1 FROM ${link.target.tableName.quotedIdentifier} t WHERE ${matches('t', link.target.keyColumnNames.toList(), table, link.linkTargetColumns)})',
-          );
+          // Link rows to a quarantined owner or target stay (see above).
+          String keptIn(List<String> quarantines, List<String> keys, List<String> columns) =>
+              quarantines.isEmpty ? '' : ' AND NOT (${quarantines.map((q) => 'EXISTS (SELECT 1 FROM ${q.quotedIdentifier} q WHERE ${matches('q', keys, table, columns)})').join(' OR ')})';
+          final List<String> ownerKeys = keyColumnNames.toList();
+          final List<String> targetKeys = link.target.keyColumnNames.toList();
+          final String ownerGone = 'NOT EXISTS (SELECT 1 FROM $me o WHERE ${matches('o', ownerKeys, table, link.linkOwnerColumns)})${keptIn(await quarantinesOf(this, ownerKeys), ownerKeys, link.linkOwnerColumns)}';
+          final String targetGone =
+              'NOT EXISTS (SELECT 1 FROM ${link.target.tableName.quotedIdentifier} t WHERE ${matches('t', targetKeys, table, link.linkTargetColumns)})${keptIn(await quarantinesOf(link.target, targetKeys), targetKeys, link.linkTargetColumns)}';
+          await run('DELETE FROM $table WHERE ($ownerGone) OR ($targetGone)');
         }
       }
     } on DatabaseException catch (e, st) {

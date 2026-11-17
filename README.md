@@ -30,6 +30,9 @@ dependencies:
   fluent_sqflite: ^2.0.0
 ```
 
+Until 2.0.0 is out, `^2.0.0` does not resolve a pre-release: name the version (`fluent_sqflite: 2.0.0-dev.2`) or use git
+(`fluent_sqflite: {git: {url: https://github.com/rtfmko/fluent_sqflite, ref: main}}`).
+
 Works on Android and iOS (sqflite). For desktop use [sqflite_common_ffi](https://pub.dev/packages/sqflite_common_ffi); for tests,
 [fluent_sqflite_test](packages/fluent_sqflite_test/README.md).
 

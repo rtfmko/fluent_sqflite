@@ -380,9 +380,11 @@ extension FluentParentOps<T extends FluentStorable> on FluentProvider<T> {
     ExecutionPolicy policy = const ExecutionPolicy(),
   }) async {
     final FluentProvider owner = FluentDbInternals.providerForType(P, dbName: dbName);
+    // A `oneOf` reference points here when this table is one of its types (its `target` is only the first one).
+    bool pointsHere(FluentRelationLink l) => l.type == FluentRelationType.oneOf ? l.targets.values.any((p) => identical(p, this)) : identical(l.target, this);
     final List<FluentRelationLink> candidates = [
       for (final FluentRelationLink l in owner._links)
-        if (identical(l.target, this) && (via == null || l.name == via)) l,
+        if (pointsHere(l) && (via == null || l.name == via)) l,
     ];
     // Several relations over the same reference (a full list and a filtered view of it, like comments / topComments)
     // point from the same parents: take the unfiltered one.
@@ -391,7 +393,7 @@ extension FluentParentOps<T extends FluentStorable> on FluentProvider<T> {
         ? [candidates.firstWhere((l) => l.relation.where == null && l.relation.limit == null, orElse: () => candidates.first)]
         : candidates;
     if (links.length != 1) {
-      final List<String> all = [for (final FluentRelationLink l in owner._links) if (identical(l.target, this)) l.name];
+      final List<String> all = [for (final FluentRelationLink l in owner._links) if (pointsHere(l)) l.name];
       throw FluentLog.raise(
         FluentRelationException(
           links.isEmpty
@@ -406,9 +408,10 @@ extension FluentParentOps<T extends FluentStorable> on FluentProvider<T> {
     }
     final Object? id = model.primaryKeyValue;
     if (id == null) return <P>[];
-    final FluentFilter pointsHere = FluentFilter.related(links.single.name, keyFilter(id));
+    final FluentRelationLink link = links.single;
+    final FluentFilter parentsOf = link.type == FluentRelationType.oneOf ? _oneOfPointingHere(link, id) : FluentFilter.related(link.name, keyFilter(id));
     return (owner as FluentProvider<P>).find(
-      where: where == null ? pointsHere : pointsHere.and(where),
+      where: where == null ? parentsOf : parentsOf.and(where),
       orderBy: orderBy,
       limit: limit,
       offset: offset,
@@ -417,5 +420,13 @@ extension FluentParentOps<T extends FluentStorable> on FluentProvider<T> {
       maxDepth: maxDepth,
       policy: policy,
     );
+  }
+
+  /// The rows of the owner of the `oneOf` reference [link] that point to the row of this table with key [id]: the
+  /// type column names this table and the key columns of this type hold [id].
+  FluentFilter _oneOfPointingHere(FluentRelationLink link, Object id) {
+    final String type = link.targets.entries.firstWhere((e) => identical(e.value, this)).key;
+    final Map<String, Object?> key = _zipKey(link.columnsFor(type), keyColumnNames.toList(), _storedId(id));
+    return _equalsAll({link.typeColumn!: type, ...key}, stored: true);
   }
 }

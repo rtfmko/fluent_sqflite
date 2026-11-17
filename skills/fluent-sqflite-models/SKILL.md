@@ -123,7 +123,7 @@ FluentTableConfig get tableConfig => const FluentTableConfig(trashRetention: Dur
 List<FluentDbColumn> get missingColumns => [
   FluentDbColumn.timestamp('synced_at'),                                   // a field that can be null
   FluentDbColumn.text('email', isUnique: true, collation: FluentCollation.noCase),
-  FluentDbColumn.text('nick', oldName: 'nickname'),                       // rename, data kept
+  FluentDbColumn(name: 'nick', type: FluentDbDataType.text, oldName: 'nickname'), // rename, data kept (main constructor only)
   FluentDbColumn.converted('address', FluentJsonConverter<Address>(fromJson: Address.fromJson)),
   FluentDbColumn.integer('level', defaultValue: 1),
 ];
@@ -144,6 +144,11 @@ List<FluentIndex> get indexes => [
 ```
 
 Defaults are Dart values (`defaultValue: 'active'`); SQL expressions use `FluentSqlExpression.currentTimestamp`.
+A `defaultValue` is stored like a saved value (converter, enum converter, table `dateTimeFormat`): a changed default text is
+updated on the next sync; a NaN default throws `FluentSchemaException`. ISO-8601 text has six fraction digits (old
+three-digit values are padded once at start, `storedFormatAdopted`).
+Expired rows (`timeToLive`): `update` / `updateAll` / `patch` skip them, `insertOnly` writes a new row over one, `upsert`
+renews it; `updateById` / `updateWhere` take `includeExpired: true`.
 
 Column builders: `FluentDbColumn.primary`, `.text`, `.integer`, `.real`, `.boolean`, `.timestamp`, `.blob`,
 `.converted(name, converter)`; the full constructor `FluentDbColumn(name:, type: FluentDbDataType.x, ...)` adds

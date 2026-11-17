@@ -163,7 +163,7 @@ extension FluentSchema<T extends FluentStorable> on FluentProvider<T> {
     final List<FluentDbColumn> keyColumns = _resolvePrimaryKeys(finalMap, model);
     _validateSchema(finalMap);
 
-    final List<FluentDbColumn> finalizedSchema = finalMap.values.toList(growable: false);
+    final List<FluentDbColumn> declaredSchema = finalMap.values.toList(growable: false);
 
     _cachedTableColumns = finalMap.keys.toSet();
 
@@ -173,16 +173,19 @@ extension FluentSchema<T extends FluentStorable> on FluentProvider<T> {
     // codec of its value kind (FluentTypeCodecs).
     final Map<String, List<Enum>> enums = model.enumValues;
     _converters = {
-      for (final FluentDbColumn c in finalizedSchema)
+      for (final FluentDbColumn c in declaredSchema)
         if (c.converter != null)
           c.name: c.converter!
         else if (c.valueKind == FluentValueKind.enumValue && enums[c.name] != null)
           c.name: FluentEnumConverter<Enum>(enums[c.name]!, byName: _tableConfig.storeEnumsAsNames, nullIfUnknown: !c.isNotNull),
     };
     _valueKinds = {
-      for (final FluentDbColumn c in finalizedSchema)
+      for (final FluentDbColumn c in declaredSchema)
         if (c.valueKind != null && !_converters.containsKey(c.name)) c.name: c.valueKind!,
     };
+
+    // A default is stored the way the row writer stores that value (converter, codec with this table's settings).
+    final List<FluentDbColumn> finalizedSchema = [for (final FluentDbColumn c in declaredSchema) _withStoredDefault(c)];
 
     _cachedFullSchema = finalizedSchema;
     _rowPlan = null;
@@ -190,6 +193,30 @@ extension FluentSchema<T extends FluentStorable> on FluentProvider<T> {
 
     FluentLog.debug('Schema compilation finalized', tag: '$tableName:schema', context: {'finalColumnCount': finalizedSchema.length});
     return _cachedFullSchema!;
+  }
+
+  /// [column] with its Dart `defaultValue` replaced by the stored form of that value: the column's converter, else the
+  /// built-in codec with this table's settings (a `DateTime` on an ISO column becomes its ISO text, an enum its name or
+  /// index). The DEFAULT text of the column definition, so also the schema fingerprint, follows. A default that is
+  /// already a stored value (`String`, `num`, `bool`, expression) stays as it is.
+  FluentDbColumn _withStoredDefault(FluentDbColumn column) {
+    final Object? value = column.defaultValue;
+    if (value == null || value is FluentSqlExpression || value is String || value is num || value is bool || value is Uint8List) return column;
+    try {
+      final FluentConverter<Object?, Object?>? converter = _converters[column.name];
+      final Object? stored = converter != null && converter.acceptsValue(value) ? converter.encode(value) : value;
+      final Object? plain = stored is String || stored is num || stored is bool || stored is Uint8List || stored == null ? stored : FluentSqlSanitizer.sanitizeValueOnly(stored, _tableConfig);
+      return identical(plain, value) ? column : column.copyWith(defaultValue: plain);
+    } catch (e) {
+      FluentLog.issue(
+        FluentIssueKind.schemaFallback,
+        'The default value ${value.runtimeType} of "$tableName.${column.name}" cannot be stored: $e',
+        table: tableName,
+        tag: '$tableName:schema',
+        hint: 'Use a default the column stores as it is (String, int, double, bool), or the value its converter takes.',
+      );
+      return column;
+    }
   }
 
   /// Resolves the primary key columns from the model and makes sure they exist in [finalMap]

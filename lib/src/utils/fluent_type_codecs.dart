@@ -28,14 +28,14 @@ abstract final class FluentTypeCodecs {
     _FluentCodec(
       'datetime_utc',
       (v) => v is DateTime && v.isUtc,
-      (v, c) => c.dateTimeFormat == FluentDateTimeFormat.timestamp ? (v as DateTime).millisecondsSinceEpoch : (v as DateTime).toIso8601String(),
+      (v, c) => c.dateTimeFormat == FluentDateTimeFormat.timestamp ? (v as DateTime).millisecondsSinceEpoch : fluentIsoText(v as DateTime),
       (s) => _dateTime(s, utc: true),
       lost: _lostMicroseconds,
     ),
     _FluentCodec(
       'datetime',
       (v) => v is DateTime,
-      (v, c) => c.dateTimeFormat == FluentDateTimeFormat.timestamp ? (v as DateTime).millisecondsSinceEpoch : (v as DateTime).toIso8601String(),
+      (v, c) => c.dateTimeFormat == FluentDateTimeFormat.timestamp ? (v as DateTime).millisecondsSinceEpoch : fluentIsoText(v as DateTime),
       (s) => _dateTime(s, utc: false),
       lost: _lostMicroseconds,
     ),
@@ -99,6 +99,12 @@ abstract final class FluentTypeCodecs {
   static String? _lostMicroseconds(Object value, FluentTableConfig config) =>
       config.dateTimeFormat == FluentDateTimeFormat.timestamp && (value as DateTime).microsecond != 0 ? 'microseconds' : null;
 
+  /// Whether [text] is ISO-8601 text with a three-digit fraction (`...:00.123Z`): the form earlier versions wrote.
+  /// Mixed with the six-digit form of [fluentIsoText] in one column, it sorts and compares wrongly within one millisecond.
+  static bool isShortIso(String text) => _shortIso.hasMatch(text);
+
+  static final RegExp _shortIso = RegExp(r'^[+-]?\d{4,6}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}(?:Z|[+-]\d\d:?\d\d)?$');
+
   static Object _dateTime(Object s, {required bool utc}) {
     if (s is DateTime) return s;
     if (s is num) return DateTime.fromMillisecondsSinceEpoch(s.toInt(), isUtc: utc);
@@ -119,6 +125,9 @@ abstract final class FluentTypeCodecs {
     }
     return null;
   }
+
+  /// Whether [tag] is one a stored row may carry (a codec tag or `enum`).
+  static bool knows(String tag) => tag == 'enum' || _byTag.containsKey(tag);
 
   /// [stored] read back as the Dart type of [tag]; [stored] itself when the tag is unknown or nothing applies.
   /// Enums need their [enumValues] (`FluentStorable.enumValues`). Stored text that cannot become the type (a RegExp

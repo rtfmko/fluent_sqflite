@@ -106,6 +106,39 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
     await batch.commit(noResult: true);
   }
 
+  /// After a local write: the rows with the stored keys [ids] exist again, so a tombstone with their server key is
+  /// obsolete (their `sync_version` sends an upsert; a push must not also report the deletion). The server key is read
+  /// from the stored rows: it may be set by the server only, or be composite.
+  Future<void> _dropTombstonesOfWritten(DatabaseExecutor ex, List<Object> ids) async {
+    if (ids.isEmpty || await _countTombstones(ex) == 0) return;
+    final List<Object> keys = [];
+    await _forKeyChunks(ids, (filter) async {
+      for (final Map<String, Object?> r in await ex.query(tableName.quotedIdentifier, columns: _serverKey.quotedAll, where: filter.whereClause, whereArgs: _sqlArgs(filter.whereArgs))) {
+        final Object? key = _serverKeyOf(r);
+        if (key != null) keys.add(key);
+      }
+      return 0;
+    }, stored: true);
+    if (keys.isEmpty) return;
+    final Batch batch = ex.batch();
+    for (final Object key in keys) {
+      batch.delete(_tombstoneTable, where: 'tbl = ? AND key = ?', whereArgs: [tableName, _encodeKey(key)]);
+    }
+    await batch.commit(noResult: true);
+  }
+
+  /// Number of tombstones (deletions not pushed yet) of this table.
+  Future<int> _countTombstones(DatabaseExecutor ex) async {
+    await _ensureSyncTables(ex);
+    return Sqflite.firstIntValue(await ex.rawQuery('SELECT COUNT(*) FROM $_tombstoneTable WHERE tbl = ?', [tableName])) ?? 0;
+  }
+
+  /// Drops every tombstone of this table (a local reset: the deletions are not reported any more).
+  Future<void> _dropAllTombstones(DatabaseExecutor ex) async {
+    await _ensureSyncTables(ex);
+    await ex.delete(_tombstoneTable, where: 'tbl = ?', whereArgs: [tableName]);
+  }
+
   /// Indexes of the prepared [rows] whose local row (matched by [match]) has a change not pushed yet.
   Future<Set<int>> _busyRows(DatabaseExecutor ex, List<String> match, List<Map<String, dynamic>> rows) async {
     bool keyed(Map<String, dynamic> r) => match.every((c) => r[c] != null);
@@ -495,7 +528,7 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
   Future<int> clearLocally(FluentFilter where) => _run<int>(
     FluentDbAction.relationWrite,
     data: () => _write('Clear cache', (txn) {
-      final FluentFilter scope = _resolveRelated(_syncColumns == null ? where : where.and(_negate(_unsynced)));
+      final FluentFilter scope = _resolveRelated(_keepBusyRows(where));
       return _hardDeleteWhere(txn, scope, synced: true);
     }),
   );
@@ -507,7 +540,7 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
   Future<void> replaceLocally(FluentFilter where, List<T> items, {FluentRelationSyncMode? relationSync}) => _run<void>(
     FluentDbAction.relationWrite,
     data: () => _write('Replace cache', (txn) async {
-      final FluentFilter scope = _resolveRelated(_syncColumns == null ? where : where.and(_negate(_unsynced)));
+      final FluentFilter scope = _resolveRelated(_keepBusyRows(where));
       await _hardDeleteWhere(txn, scope, synced: true);
       if (items.isEmpty) return;
       final List<String>? conflictOn = setEquals(_serverKey.toSet(), keyColumnNames.toSet()) ? null : _serverKey;
@@ -533,6 +566,46 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
       }
     }),
   );
+
+  /// [where] without the rows a local-only removal must keep: rows with local changes not pushed yet, and rows
+  /// whose cascade (`ON DELETE CASCADE` or a polymorphic `oneOf` list / reference, at any depth) would remove such rows of another table.
+  FluentFilter _keepBusyRows(FluentFilter where) {
+    final FluentFilter own = _syncColumns == null ? where : where.and(_negate(_unsynced));
+    final String? busy = _busyBelow(tableName.quotedIdentifier, {this}, [0]);
+    return busy == null ? own : own.and(FluentFilter('NOT ($busy)'));
+  }
+
+  /// SQL: the row of [outer] (a table name or alias) has a cascade descendant with local changes not pushed yet;
+  /// `null` when no syncable table is reachable.
+  String? _busyBelow(String outer, Set<FluentProvider> path, List<int> counter) {
+    final List<String> parts = [];
+    for (final (FluentProvider child, List<String> references, List<String> referenced) in _cascadeEdges) {
+      if (path.contains(child)) continue; // a cycle: the rows of this branch are checked at its first visit
+      final String alias = '"__c${counter[0]++}"';
+      final String? below = child._busyBelow(alias, {...path, child}, counter);
+      final String? own = child._syncColumns == null ? null : child._unsynced.whereClause;
+      final String? busy = own == null ? below : below == null ? own : '($own) OR ($below)';
+      if (busy == null) continue;
+      final String link = [for (int i = 0; i < references.length; i++) '$alias.${references[i].quotedIdentifier} = $outer.${referenced[i].quotedIdentifier}'].join(' AND ');
+      parts.add('EXISTS (SELECT 1 FROM ${child.tableName.quotedIdentifier} AS $alias WHERE $link AND ($busy))');
+    }
+    // Polymorphic (oneOf) references: deleted or cleared by `_polymorphicCascade`, either way the unsynced row is lost.
+    final List<String> keys = keyColumnNames.toList();
+    for (final (FluentProvider child, FluentRelationLink ref) in _oneOfPointing) {
+      if (path.contains(child)) continue;
+      final List<String> references = ref.columnsFor(tableName);
+      if (references.length != keys.length) continue;
+      final String alias = '"__c${counter[0]++}"';
+      final String? below = child._busyBelow(alias, {...path, child}, counter);
+      final String? own = child._syncColumns == null ? null : child._unsynced.whereClause;
+      final String? busy = own == null ? below : below == null ? own : '($own) OR ($below)';
+      if (busy == null) continue;
+      final String link = [for (int i = 0; i < references.length; i++) '$alias.${references[i].quotedIdentifier} = $outer.${keys[i].quotedIdentifier}'].join(' AND ');
+      final String type = "'${tableName.replaceAll("'", "''")}'";
+      parts.add('EXISTS (SELECT 1 FROM ${child.tableName.quotedIdentifier} AS $alias WHERE $alias.${ref.typeColumn!.quotedIdentifier} = $type AND $link AND ($busy))');
+    }
+    return parts.isEmpty ? null : parts.join(' OR ');
+  }
 
   static FluentFilter _negate(FluentFilter f) => FluentFilter('NOT (${f.whereClause})', f.whereArgs);
 }

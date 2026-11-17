@@ -38,7 +38,7 @@ export 'src/core/core.dart'
         writeFluentSchemaHistory;
 export 'src/exceptions/exceptions.dart';
 export 'src/interfaces/interfaces.dart' hide FluentStorableInternals, fluentSameKeyValue;
-export 'src/models/models.dart' hide FluentDbColumnRules, fluentSqlLiteral;
+export 'src/models/models.dart' hide FluentDbColumnRules, fluentIsoText, fluentSqlLiteral;
 export 'src/relations/relations.dart';
 export 'src/soft_delete/soft_delete.dart';
 export 'src/sync/sync.dart';

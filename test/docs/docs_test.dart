@@ -99,7 +99,7 @@ void main() {
     // Not exported (src/internal.dart only), or only reached through a documented member (enum behind FluentUpdate.*, …).
     const Set<String> notForAgents = {
       'FluentAnalyzer', 'FluentEngine', 'FluentLog', 'FluentSqlSanitizer', 'FluentTableStatsTracker', 'FluentTask',
-      'FluentTuner', 'FluentTypeCodecs', 'TableHelper', 'FluentTouchedTable', 'FluentTransactionScope', 'FluentReadScope',
+      'FluentTuner', 'FluentTypeCodecs', 'FluentClockTimer', 'FluentClockAlarm', 'TableHelper', 'FluentTouchedTable', 'FluentTransactionScope', 'FluentReadScope',
       'FluentAggregateFunction', 'FluentQueryCost', 'FluentUpdateOperation', 'FluentValueKind', 'MigrationPlanCallback',
     };
     final List<String> missing = [];

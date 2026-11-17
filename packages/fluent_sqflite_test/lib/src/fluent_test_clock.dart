@@ -8,7 +8,8 @@
 import 'package:fluent_sqflite/src/internal.dart';
 
 /// The time fluent_sqflite sees in a test: timestamps, soft-delete stamps, expiry (`timeToLive`), trash retention,
-/// sync times and `maxAge`. It is the real time until you move it; `FluentTestDb.close` puts it back.
+/// sync times, `maxAge` and the maintenance timers (`trashPurgeInterval`, `optimizeInterval`: moving the clock runs
+/// the ones that are due). It is the real time until you move it; `FluentTestDb.close` puts it back.
 ///
 /// ```dart
 /// db.clock.advance(const Duration(days: 31)); // the trash retention has passed
@@ -55,8 +56,9 @@ class FluentTestClock {
     FluentClock.testNow = null;
   }
 
+  // Assigned on every move: that tells the library's clock timers (trash purge, `PRAGMA optimize`) to check whether
+  // they are due.
   void _install() {
-    if (_installed) return;
     _installed = true;
     FluentClock.testNow = () => _fixed ?? DateTime.now().add(_offset);
   }

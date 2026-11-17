@@ -164,7 +164,7 @@ final List<Article> written = await ann.findParents<Article>(via: 'author'); // 
 ```
 
 `findParents` works on any model (the parent needs `FluentRelations`); `via` names the relation when the parent has
-several to this model. To filter parents by their related models, use `FluentFilter.related` (see [Reading](reading.md)).
+several to this model. For a `oneOf` relation it finds the parents of every listed type, also without `via`. To filter parents by their related models, use `FluentFilter.related` (see [Reading](reading.md)).
 
 A `one` reference and an owned list over the same column (`Category.parent` / `children`) share one delete rule: the
 declared one, else the reference's (`setNull`); the `autoRelations` hint lists such columns.
@@ -177,6 +177,14 @@ Options per relation: `foreignKey`, `onDelete` (`cascade`, `setNull`, `restrict`
 `save` writes the model and its related models in one transaction. A list replaces what is stored: children removed
 from a `many` list are deleted, tags removed from a `manyToMany` list are unlinked (`keepMissing: true` keeps them).
 A `null` relation means *not loaded* — the stored data is left untouched.
+What a save never removes (children and links are only removed when the list really lacks them):
+
+* a relation with `limit`: nothing; a relation with `where`: only rows that match it;
+* trashed or expired children and targets are not "missing": their links stay;
+* children read from the trash (`includeDeleted`) are not restored by saving the parent: use `trash.restore`;
+* relations in `model.unloadedRelations` (read with `FluentLoad.none`, `lazy`, cut by `maxDepth`, or a failed load): nothing
+  is removed, new children in them are still saved;
+* `insertOnly` on a row that exists writes nothing for its relations.
 
 ```dart
 await Article(title: 'Hi', author: ann, comments: [Comment(text: 'first')], tags: [dart, flutter]).save();
@@ -198,4 +206,5 @@ await article.detach('tags', [oldTag]);
 * Relation loads use the relation's own visibility, not the trash scope of the call: `trash.find(relations: ...)` and
   `withTrash` load live related rows; trashed ones show only with `includeDeleted: true` (and owned children trashed
   together with their owner).
-* `cleanupOrphans` leaves dangling rows of `RESTRICT` links alone and reports them (`danglingReferences`).
+* `cleanupOrphans` leaves dangling rows of `RESTRICT` links alone and reports them (`danglingReferences`); references into
+  rows quarantined in a `__fluent_rejected_*` table stay as well and are reported the same way.

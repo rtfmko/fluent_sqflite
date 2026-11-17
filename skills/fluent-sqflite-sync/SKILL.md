@@ -23,7 +23,9 @@ metadata:
   (same local key) so they get the server's id; refused rows go in `rejected`.
 - `onPull(request)` must return only changes after `request.since` and should set `serverTime` from the server clock;
   for big answers return `hasMore: true` and a `cursor` (passed back in `request.cursor`). Without `serverTime` the
-  device clock is used (the `pullClock` hint). `clearTable` / `FluentDb.clear` reset `since`: the next pull is full.
+  device clock is used (the `pullClock` hint). `clearTable` / `FluentDb.clear` reset `since` (the next pull is full) and drop pending tombstones (`unsentChangesDiscarded`).
+  A local save of a key with a pending tombstone cancels the deletion. `replaceLocally` / `clearLocally` / `watchRemote` keep
+  parents that have unsynced descendants.
 - Send `batch.deleted` (soft-deleted rows) and `batch.deletedKeys` (permanent deletes, server keys) to the server,
   not only `batch.changed`.
 - When the server has its own id next to a local auto-increment id, set `FluentTableConfig(serverKey: ['server_id'])`

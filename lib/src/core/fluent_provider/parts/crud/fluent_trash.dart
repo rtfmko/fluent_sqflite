@@ -71,13 +71,17 @@ class FluentTrash<T extends FluentSoftDeletable> {
   /// Brings [item] back from the trash (with the owned rows deleted together with it) and clears `item.deletedAt`;
   /// returns 1 or 0. A row whose owner is still in the trash stays there (0, reported as a `trashStays` issue).
   ///
+  /// `item.deletedAt` follows the stored row once the write is committed: inside a `FluentDb.transaction` that rolls
+  /// back, the model keeps its stamp.
+  ///
   /// ```dart
   /// if (await notes.trash.restore(note) == 1) print('back: ${note.isDeleted}'); // false
   /// ```
   Future<int> restore(T item, {Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
-    final int count = await restoreById(item.primaryKeyValue, tag: tag, policy: policy);
-    if (count > 0) item.deletedAt = null;
-    return count;
+    final Object? id = item.primaryKeyValue;
+    if (id == null) return 0;
+    final FluentProvider<T> provider = _provider;
+    return provider._run<int>(FluentDbAction.restore, data: [item], helper: TableHelper(arguments: [id]), policy: policy, tag: tag);
   }
 
   /// Brings the row with key [id] back from the trash (see [restore]); returns 1 or 0.

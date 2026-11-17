@@ -55,7 +55,8 @@ class FluentLog {
   /// Whether [key] is muted ([mute]).
   static bool isMuted(String key) => _muted.any((m) => m.endsWith('*') ? key.startsWith(m.substring(0, m.length - 1)) : key == m);
 
-  /// Changes the logging setup; `null` keeps the current value.
+  /// Changes the logging setup; `null` keeps the current value; [removeOnRecord] removes the record sink first (a new
+  /// [onRecord] given with it is set after).
   static void configure({
     bool? enabled,
     FluentLogLevel? level,
@@ -64,7 +65,9 @@ class FluentLog {
     bool? colors,
     bool? showSqlArguments,
     Set<String>? mute,
+    bool removeOnRecord = false,
   }) {
+    if (removeOnRecord) _onRecord = null;
     if (mute != null) _muted = Set.unmodifiable(mute);
     if (enabled != null) _enabled = enabled;
     if (level != null) _level = level;
@@ -288,9 +291,20 @@ class FluentLog {
   static final RegExp _args = RegExp(r'args \[[\s\S]*');
   static final RegExp _details = RegExp(r'\s*\{details: .*$', dotAll: true);
 
+  // A quoted path (`path = 'C:\x\y.db'`, `'/home/x/y.db'`; it may hold spaces): the whole quoted text goes.
+  static final RegExp _quotedPath = RegExp(r'''(['"])(?:[A-Za-z]:[\\/]|\\\\|/[^'"\n/]*/)[^'"\n]*\1''');
+  // An unquoted absolute path: a drive path, a UNC path, or a POSIX path of at least two segments (a word before the
+  // slash, or the `//` of a URL, is not a path start).
+  static final RegExp _barePath = RegExp(r'''(?<![A-Za-z])[A-Za-z]:[\\/][^\s'"<>|]*|\\\\[^\s'"<>|]+|(?<![\w:/.)\]])/(?:[^\s'"/:]+/)+[^\s'"/:]*''');
+
   /// Hides SQL arguments and the database path in an error [text], unless `showSqlArguments` is on.
   static String redact(String text) {
     if (_showSqlArguments) return text;
-    return text.replaceAll(_details, '').replaceAll(_args, 'args [hidden]').replaceAll(_ffiParameters, 'parameters: hidden');
+    return text
+        .replaceAll(_details, '')
+        .replaceAll(_args, 'args [hidden]')
+        .replaceAll(_ffiParameters, 'parameters: hidden')
+        .replaceAllMapped(_quotedPath, (m) => "${m[1]}<path hidden>${m[1]}")
+        .replaceAll(_barePath, '<path hidden>');
   }
 }

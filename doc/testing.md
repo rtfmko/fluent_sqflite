@@ -82,12 +82,16 @@ await db.restart([NoteProviderV2()]);       // then apply it
 ## Time
 
 `db.clock` is the time the library sees: timestamps, soft-delete stamps, expiry (`timeToLive`), trash retention,
-sync times and `maxAge`. It is the real time until the test moves it.
+sync times and `maxAge`. It is the real time until the test moves it. Moving it also runs the maintenance timers
+that are due (`trashPurgeInterval`, `optimizeInterval`).
 
 ```dart
 await notes.delete(note);
-db.clock.advance(const Duration(days: 8));    // past the default trash retention of 7 days
-expect(await notes.trash.empty(), 1);
+db.clock.advance(const Duration(days: 1));
+expect(await notes.trash.count(), 1);         // still in the trash
+db.clock.advance(const Duration(days: 7));    // past the default trash retention of 7 days:
+await db.settle();                            // the trash purge timer runs
+expect(await notes.trash.count(), 0);
 
 db.clock.set(DateTime(2026, 1, 1));           // stopped at a fixed moment
 ```
@@ -113,4 +117,5 @@ warnings, errors); `db.warnings` only warnings and errors. With `FluentTestDb(fa
 the test when there are any. `FluentDiagnostics.none` in `fluentConfig` makes a database fully predictable (no
 measuring, no hints, no tuning).
 
+The package resets logging after every test: call `setupLogging` in `setUp` or in the test, not in `setUpAll`.
 Library logs are off in tests; `setUpFluentTests(logging: true)` or the `FLUENT_LOG` environment variable turns them on.

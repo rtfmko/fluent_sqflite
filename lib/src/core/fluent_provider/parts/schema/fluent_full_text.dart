@@ -157,7 +157,18 @@ extension FluentFullTextSchema<T extends FluentStorable> on FluentProvider<T> {
     _ftsModule = definition != null && columns.isNotEmpty && definition.endsWith(':${columns.join(',')}') ? definition.split(':').first : null;
   }
 
-  Future<String?> _ftsModuleFor(Transaction txn, FluentFullText mode) async {
+  /// Fast start: whether the stored full-text index ([definition], `null` without one) is the one [syncFullText] would
+  /// keep with the FTS modules of this SQLite. `false` when the module it was built with is gone, or when a module is
+  /// there now for a table that has no index yet: the full sync then drops / builds it.
+  Future<bool> _fullTextModuleUpToDate(DatabaseExecutor executor, FluentFullText? databaseMode, String? definition) async {
+    final FluentFullText mode = _tableConfig.fullText ?? databaseMode ?? FluentEngine().config.fullText;
+    final List<String> columns = fullTextColumns;
+    if (columns.isEmpty || mode == FluentFullText.off || modelSample.withoutRowId) return definition == null;
+    final String? module = await _ftsModuleFor(executor, mode);
+    return definition == null ? module == null : definition == '$module:${columns.join(',')}';
+  }
+
+  Future<String?> _ftsModuleFor(DatabaseExecutor txn, FluentFullText mode) async {
     final String key = '$dbName|${mode.name}';
     final bool Function(String module)? override = moduleAvailableOverride;
     if (override == null && _ftsSupport.containsKey(key)) return _ftsSupport[key];

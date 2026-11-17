@@ -40,8 +40,8 @@ void main() {
       expect(enc(local)!.tag, 'datetime');
       expect(enc(utc)!.value, utc.millisecondsSinceEpoch);
       expect(enc(utc)!.tag, 'datetime_utc');
-      expect(enc(local, iso)!.value, local.toIso8601String());
-      expect(enc(utc, iso)!.value, utc.toIso8601String());
+      expect(enc(local, iso)!.value, fluentIsoText(local));
+      expect(enc(utc, iso)!.value, fluentIsoText(utc));
       expect(enc(utc, iso)!.value, endsWith('Z'));
     });
 

@@ -41,7 +41,7 @@ extension FluentWatch<T extends FluentStorable> on FluentProvider<T> {
     StreamSubscription<FluentChangeEvent<dynamic>>? changes;
     final List<FluentChangeEvent<dynamic>> pending = [];
     Timer? frame;
-    Timer? expiry;
+    FluentClockAlarm? expiry; // follows the library clock (a test that moves it sees rows expire)
     bool running = false;
     bool dirty = false;
     // Set by onCancel: nothing runs, emits or arms a timer afterwards (a refresh in flight stops at its next step).
@@ -92,7 +92,7 @@ extension FluentWatch<T extends FluentStorable> on FluentProvider<T> {
           if (!includeExpired && result.isNotEmpty) {
             final int? next = await scope.run(() => _nextExpiry(where, policy));
             if (next != null && !cancelled && !controller.isClosed && !dirty) {
-              expiry = Timer(Duration(milliseconds: math.max(1, next - FluentClock.now().millisecondsSinceEpoch + 1)), refresh);
+              expiry = FluentClockAlarm(next + 1, refresh, tag: '$tableName:watch');
             }
           }
         } while (dirty && !cancelled);

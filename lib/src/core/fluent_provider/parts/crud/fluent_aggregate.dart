@@ -102,6 +102,14 @@ extension FluentAggregates<T extends FluentStorable> on FluentProvider<T> {
         if (e.value.function == FluentAggregateFunction.min || e.value.function == FluentAggregateFunction.max) e.key,
     ];
     final String? tagged = extremes.length == 1 && tableColumns.contains(FluentDbColumn.systemMetadata().name) ? extremes.single : null;
+    // Other group columns and min / max values: SQLite cannot name the row of each one, so the type tags of all rows of
+    // the group are summed up (is there a UTC tag, a local tag): only a `DateTime`'s flag depends on them.
+    final Map<String, ({String utc, String local})> flags = {};
+    if (tableColumns.contains(FluentDbColumn.systemMetadata().name)) {
+      for (final String c in [...groupBy, for (final String n in extremes) if (n != tagged) values[n]!.column!]) {
+        if (!flags.containsKey(c) && _mayHoldDateTimes(c)) flags[c] = (utc: '__fluent_u${flags.length}', local: '__fluent_l${flags.length}');
+      }
+    }
     final FluentFilter scoped = _resolveRelated(_scoped(where, _visibility(includeExpired: includeExpired)));
     final String group = groupBy.map((c) => c.quotedIdentifier).join(', ');
     String sql =
@@ -109,6 +117,10 @@ extension FluentAggregates<T extends FluentStorable> on FluentProvider<T> {
           if (group.isNotEmpty) group,
           for (final MapEntry<String, String> s in selects.entries) '${s.value} AS ${s.key.quotedIdentifier}',
           if (tagged != null) '${FluentDbColumn.systemMetadata().name.quotedIdentifier} AS ${_aggregateMeta.quotedIdentifier}',
+          for (final MapEntry<String, ({String utc, String local})> f in flags.entries) ...[
+            'MAX(${_tagLike(f.key, 'datetime_utc')}) AS ${f.value.utc.quotedIdentifier}',
+            'MAX(${_tagLike(f.key, 'datetime')}) AS ${f.value.local.quotedIdentifier}',
+          ],
         ].join(', ')} '
         'FROM ${tableName.quotedIdentifier}${scoped.whereClause.isEmpty ? '' : ' WHERE ${scoped.whereClause}'}${group.isEmpty ? '' : ' GROUP BY $group'}';
     final List<Object?> args = [...?_sqlArgs(scoped.whereArgs)];
@@ -134,16 +146,52 @@ extension FluentAggregates<T extends FluentStorable> on FluentProvider<T> {
       policy: policy,
     );
     final List<_MappingWarning> warnings = [];
+    // The tag of a column from the flags of its group: only one kind present means that kind.
+    Object? flagged(Map<String, dynamic> row, String column) {
+      final ({String utc, String local})? f = flags[column];
+      if (f == null) return null;
+      final bool utc = row[f.utc] == 1;
+      final bool local = row[f.local] == 1;
+      if (utc == local) {
+        if (utc) {
+          warnings.add((
+            message: 'The values of "$tableName.$column" in one group of an aggregate were saved as both UTC and local DateTimes; the UTC flag of the result follows the column kind.',
+            hint: 'Save one kind of DateTime in the column (e.g. always .toUtc()), or read the rows with find / pluck, which keep the flag of each value.',
+          ));
+        }
+        return null;
+      }
+      return jsonEncode({column: utc ? 'datetime_utc' : 'datetime'});
+    }
+
     final List<Map<String, dynamic>> result = [
       for (final Map<String, dynamic> row in rows)
         {
-          for (final String c in groupBy) c: _plan.decodeValue(c, row[c], warnings),
+          for (final String c in groupBy) c: _plan.decodeValue(c, row[c], warnings, metadata: flagged(row, c)),
           for (final MapEntry<String, FluentAggregate> e in values.entries)
-            e.key: _aggregateValue(e.value, row[e.key], warnings, metadata: e.key == tagged ? row[_aggregateMeta] : null),
+            e.key: _aggregateValue(
+              e.value,
+              row[e.key],
+              warnings,
+              metadata: e.key == tagged ? row[_aggregateMeta] : (e.value.column == null ? null : flagged(row, e.value.column!)),
+            ),
         },
     ];
     _logWarnings(warnings);
     return result;
+  }
+
+  /// Whether values of [column] can carry a `DateTime` tag in `_fs_metadata`: no converter, no other value kind.
+  bool _mayHoldDateTimes(String column) {
+    if (_plan.converters.containsKey(column)) return false;
+    final FluentValueKind? kind = getFullSchema.firstWhere((d) => d.name == column).valueKind;
+    return kind == null || kind == FluentValueKind.dateTime;
+  }
+
+  /// SQL: whether the metadata of the row tags [column] as [tag] (`"column":"tag"` inside the JSON text).
+  String _tagLike(String column, String tag) {
+    final String pattern = '${jsonEncode(column)}:"$tag"'.replaceAll(r'\', r'\\').replaceAll('%', r'\%').replaceAll('_', r'\_').replaceAll("'", "''");
+    return "${FluentDbColumn.systemMetadata().name.quotedIdentifier} LIKE '%$pattern%' ESCAPE '\\'";
   }
 
   /// The result name of the type tags of the row holding a min / max value (dropped from the result).

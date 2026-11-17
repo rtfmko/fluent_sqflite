@@ -300,7 +300,7 @@ void main() {
       final utc = <bool>[true];
       expect(FluentEpochDateTimeConverter(utc: utc.first).fromSql(0).isUtc, isTrue);
       final toUtc = <bool>[false];
-      expect(FluentIsoDateTimeConverter(toUtc: toUtc.first).toSql(DateTime(2026)), DateTime(2026).toIso8601String());
+      expect(FluentIsoDateTimeConverter(toUtc: toUtc.first).toSql(DateTime(2026)), fluentIsoText(DateTime(2026)));
       // ignore: prefer_const_constructors
       expect(FluentConflictPolicy<int>.keepServer().serverWins, isTrue);
       // ignore: prefer_const_constructors

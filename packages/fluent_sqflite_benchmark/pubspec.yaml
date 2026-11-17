@@ -1,6 +1,6 @@
 name: fluent_sqflite_benchmark
 description: "Benchmarks of fluent_sqflite: parallel reads, UI stalls, and queue / save / relation / delete scenarios with regression comparison."
-version: 2.0.0-dev.1
+version: 2.0.0-dev.2
 homepage: https://github.com/rtfmko/fluent_sqflite
 # Until fluent_sqflite 2.0.0 is on pub.dev: then remove this line and depend on fluent_sqflite: ^2.0.0.
 publish_to: none

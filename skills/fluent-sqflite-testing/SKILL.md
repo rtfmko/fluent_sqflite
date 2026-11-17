@@ -21,7 +21,8 @@ metadata:
 - One `FluentTestDb` per test: `open` in `setUp`, `close` in `tearDown`. It is in memory unless `persistent: true`.
 - Use `persistent: true` only for `restart` (schema changes between versions) or read connections.
 - Never wait with `Future.delayed` for `watch` / `watchValue` / `watchRemote`: `await db.settle()`.
-- Never wait real days for expiry or the trash: `db.clock.advance(...)` / `db.clock.set(...)`.
+- Never wait real days for expiry or the trash: `db.clock.advance(...)` / `db.clock.set(...)` (moving it also runs
+  the trash purge / `PRAGMA optimize` timers that are due).
 - Check warnings with `db.warnings` or `FluentTestDb(failOnWarnings: true)`, not by reading logs.
 
 - Regression benchmarks: `FluentBenchmark.runScenarios(suites: {...})` (queue, save, relations, deletes) with
@@ -78,7 +79,8 @@ await db.restart([TodoProviderV2()]); // same file, new schema: check the data a
 ## API
 
 - `setUpFluentTests({bool? logging})`: FFI SQLite, a temporary databases directory per file, logs off (on with
-  `logging: true` or `FLUENT_LOG`), closes a database left open.
+  `logging: true` or `FLUENT_LOG`), closes a database left open, and resets logging after every test (configure
+  `setupLogging` in `setUp` or the test, not `setUpAll`).
 - `FluentTestDb({name, persistent = false, failOnWarnings = false})`: `open(providers, config:, fluentConfig:,
   removedColumns:, archiveRetention:, historyLimit:, resetOnSchemaError:)`, `restart(providers, ...)`,
   `close({keepFile})`, `settle({frame, timeout})`, `clock`, `issues`, `warnings`, `key`, `isOpen`,

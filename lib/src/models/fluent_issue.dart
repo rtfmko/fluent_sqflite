@@ -243,6 +243,11 @@ enum FluentIssueKind {
   /// with the old naming rule) was renamed to the current name; its data is kept.
   legacyNameAdopted(FluentIssueType.autoFix),
 
+  /// Values an earlier version stored in an older form were rewritten once at start into the current form, without
+  /// changing what they mean (soft-delete stamps stored as ISO text became epoch milliseconds; ISO-8601 dates with a
+  /// three-digit fraction were padded to six digits).
+  storedFormatAdopted(FluentIssueType.autoFix),
+
   /// A saved value lost part of itself in its stored form (the microseconds of a `DateTime` in the timestamp format,
   /// which keeps milliseconds); the rest was saved.
   precisionLost(FluentIssueType.warning),

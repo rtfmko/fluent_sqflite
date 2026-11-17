@@ -3,6 +3,8 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:fluent_sqflite/fluent_sqflite.dart';
+// ignore: implementation_imports
+import 'package:fluent_sqflite/src/internal.dart' show FluentLog;
 import 'package:fluent_sqflite_test/fluent_sqflite_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -73,7 +75,8 @@ void main() {
     await notes.delete(note);
     expect(await notes.trash.empty(), 0, reason: 'deleted just now');
     db.clock.advance(const Duration(days: 8));
-    expect(await notes.trash.empty(), 1, reason: 'older than the default retention of 7 days');
+    await db.settle();
+    expect(await notes.trash.count(), 0, reason: 'older than the default retention of 7 days: the purge timer ran');
 
     db.clock.set(DateTime(2030));
     expect(db.clock.now, DateTime(2030));
@@ -142,5 +145,23 @@ void main() {
     await db.open([NoteProvider()]);
     await expectLater(db.restart([NoteProvider()]), throwsA(isA<TestFailure>()));
     await db.close();
+  });
+
+  group('logging is reset after every test', () {
+    final List<FluentLogRecord> records = [];
+
+    test('a test sets a sink, showSqlArguments and a mute', () {
+      FluentDb.setupLogging(enabled: true, console: false, onRecord: records.add, showSqlArguments: true, mute: {'x:*'}, level: FluentLogLevel.debug);
+      FluentLog.info('inside the first test');
+      expect(records, hasLength(1));
+    });
+
+    test('the next test starts with the defaults: no sink, no mute, arguments hidden, logging off', () {
+      expect(FluentLog.showSqlArguments, isFalse);
+      expect(FluentLog.mute, isEmpty);
+      expect(FluentLog.isEnabled, isFalse);
+      FluentLog.info('after the reset');
+      expect(records, hasLength(1), reason: 'the sink of the first test is gone');
+    });
   });
 }

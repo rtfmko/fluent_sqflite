@@ -37,9 +37,13 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
   /// * owned children (`many` / `oneOwned`): saved with the owner id; children missing from the list are
   ///   deleted unless `keepMissing`. `null` leaves the stored children unchanged.
   /// * `manyToMany`: related models are saved, then the links are replaced (or merged with `keepMissing`).
+  /// * Only what a list could show is removed: nothing for a relation with a `limit` or one the model was read
+  ///   without (`unloadedRelations`), only rows matching its `where` and visible to it. Related models read in the
+  ///   trash and still there are not written (no restore through a save of the parent).
   ///
   /// [strategy] and [conflictOn] apply to [items] only (the caller's models); related models are always saved with
   /// `upsert`, so new children / references are never skipped by `updateOnly` / `patch` / `insertOnly` of the root.
+  /// A root row that is skipped (also an existing row `insertOnly` leaves alone) writes no children and no links.
   /// The same instance repeated in [items] is written once and every occurrence gets its key.
   Future<List<Object?>> _saveGraph(Transaction txn, List<T> items, FluentTask task, FluentRelationSaveContext ctx, {FluentSaveStrategy? strategy, List<String>? conflictOn}) async {
     final FluentSaveStrategy saveStrategy = strategy ?? FluentSaveStrategy.upsert;
@@ -142,11 +146,15 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
       // conflictOn applies to the models passed by the caller (related tables are saved without it).
       final List<_WrittenRow> written = await _writeRows(txn, rows, saveStrategy, conflictOn: conflictOn, synced: task.helper?.syncWrite ?? false);
       _injectKeys([for (final int i in todo) items[i]], written);
+      // The owner key each row's children / links are written with: none for a skipped row (not written, or an
+      // existing row `insertOnly` left alone: its stored children and links stay as they are).
+      final List<Object?> ownerIds = List<Object?>.filled(items.length, null);
       for (int n = 0; n < todo.length; n++) {
         final int i = todo[n];
-        // Rows that were not written (and do not exist) get no children / links.
+        // Rows that were not written (and do not exist) have no key; an existing row skipped by insertOnly keeps it.
         final Object? id = written[n].$1 == FluentRowOutcome.skipped && saveStrategy != FluentSaveStrategy.insertOnly ? null : written[n].$2;
         ids[i] = id;
+        ownerIds[i] = written[n].$1 == FluentRowOutcome.skipped ? null : id;
         ctx.savedIds[items[i]] = id;
         ctx.outcomes[items[i]] = written[n].$1;
       }
@@ -158,11 +166,11 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
 
       for (final FluentRelationLink link in _links) {
         if (link.isOwned) {
-          await _saveOwnedChildren(txn, link, items, todo, ids, task, ctx);
+          await _saveOwnedChildren(txn, link, items, todo, ownerIds, task, ctx);
         } else if (link.isThrough) {
           _warnThroughWrite(link, items, todo);
         } else if (link.isManyToMany) {
-          await _saveLinks(txn, link, items, todo, ids, task, ctx);
+          await _saveLinks(txn, link, items, todo, ownerIds, task, ctx);
         }
       }
     } finally {
@@ -227,16 +235,29 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
 
   bool _keepMissing(FluentRelationLink link, FluentRelationSaveContext ctx) => ctx.keepMissingOverride ?? link.relation.keepMissing;
 
+  /// Saves the owned children of [link] for the rows [todo] (owner keys in [ids]; `null`: no children are written)
+  /// and removes the stored children missing from each list (unless `keepMissing`).
+  ///
+  /// Only children the list could have shown are removed: a relation with a `limit` shows part of them (nothing is
+  /// removed), its `where` limits the removal to the rows it matches, and rows in the trash or expired are never
+  /// taken for missing. A relation the model was read without (`unloadedRelations`: `FluentLoad.none`, lazy, depth
+  /// cut-off, failed load) removes nothing; its children (when the app put some in) are saved. Children read in the
+  /// trash (`includeDeleted`) that are still there are not written, so the save does not restore them.
   Future<void> _saveOwnedChildren(Transaction txn, FluentRelationLink link, List<T> items, List<int> todo, List<Object?> ids, FluentTask task, FluentRelationSaveContext ctx) async {
     final FluentProvider target = link.target;
     final List<FluentStorable> allChildren = [];
     final Map<int, List<FluentStorable>> childrenOf = {};
+    final Set<int> mergeOnly = {}; // owners whose list was not loaded: nothing is removed
 
     for (final int i in todo) {
       final List<FluentStorable>? children = _selectList(link, items[i], ctx);
       if (children == null) continue; // not loaded / not provided: leave stored children alone
       final Object? ownerId = ids[i];
       if (ownerId == null) continue;
+      if (_unloaded(link, items[i])) {
+        if (children.isEmpty) continue; // the default value of a list that was never read
+        mergeOnly.add(i);
+      }
       final Map<String, Object?> reference = link.referenceValues(ownerId);
       for (final FluentStorable child in children) {
         reference.forEach(child.injectRelationId);
@@ -246,17 +267,18 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
     }
     if (childrenOf.isEmpty) return;
 
-    final List<Object?> childIds = allChildren.isEmpty ? const [] : await target._saveGraph(txn, target._createTypedList(allChildren), task, ctx);
-    if (_keepMissing(link, ctx)) return;
+    final Map<FluentStorable, Object?> idOf = await _saveRelated(txn, link, allChildren, task, ctx);
+    if (_keepMissing(link, ctx) || _showsPart(link)) return;
 
     // Children that are no longer in the owner's list are removed (owned data). The stored children are read and
     // compared in Dart, then removed by key in chunks: a `NOT IN (<every kept key>)` could exceed the variable limit.
-    final Map<FluentStorable, Object?> idOf = Map.identity()..addEntries([for (int k = 0; k < allChildren.length; k++) MapEntry(allChildren[k], childIds[k])]);
-    final String? childDeleted = target._softDeleteColumn;
+    // Only rows the list could show: live (trashed children are gone already), not expired, matching its `where`.
+    FluentFilter shown = target._visibility(deletedOnly: false, includeDeleted: false);
+    if (link.relation.where != null) shown = shown.and(target._resolveRelated(link.relation.where!));
     for (final MapEntry<int, List<FluentStorable>> entry in childrenOf.entries) {
+      if (mergeOnly.contains(entry.key)) continue;
       final Set<String> keep = {for (final FluentStorable c in entry.value) if (idOf[c] != null) _tupleKey(target._normalizeKey(idOf[c]))};
-      FluentFilter owned = _equalsAll(link.referenceValues(ids[entry.key]), stored: true); // ids are stored keys
-      if (childDeleted != null) owned = owned.and(FluentFilter.isNull(childDeleted.quotedIdentifier)); // trashed children are gone already
+      final FluentFilter owned = _equalsAll(link.referenceValues(ids[entry.key]), stored: true).and(shown); // ids are stored keys
       final List<Object> stale = [for (final Object id in await target._keysWhere(txn, owned)) if (!keep.contains(_tupleKey(target._normalizeKey(id)))) id];
       if (stale.isEmpty) continue;
       final int removed = await target._removeOwnedKeys(txn, stale);
@@ -264,6 +286,53 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
         FluentLog.debug('Removed children missing from the list', tag: '$tableName:relations', context: {'relation': link.name, 'removed': removed});
       }
     }
+  }
+
+  /// Whether [link] was not loaded when [item] was read: its list holds what `fromCacheJson` defaulted it to, not
+  /// the stored children.
+  bool _unloaded(FluentRelationLink link, FluentStorable item) => item.unloadedRelations.contains(link.name);
+
+  /// Whether a loaded list of [link] shows only some of the related rows (a `limit`): rows missing from it are not
+  /// removed, the rest of the list was simply not shown.
+  bool _showsPart(FluentRelationLink link) => link.relation.limit != null && link.relation.limit! >= 0;
+
+  /// Saves [related] (models of [link]'s target) and returns the stored key of each. Models read in the trash
+  /// (`deletedAt` set, e.g. through `includeDeleted`) whose rows are still there are not written (a save of a
+  /// trashed key would restore it); they keep their key, so their place in the list (and their link) stays.
+  Future<Map<FluentStorable, Object?>> _saveRelated(Transaction txn, FluentRelationLink link, List<FluentStorable> related, FluentTask task, FluentRelationSaveContext ctx) async {
+    final FluentProvider target = link.target;
+    final Map<FluentStorable, Object?> idOf = Map.identity();
+    if (related.isEmpty) return idOf;
+    final Map<FluentStorable, Object> trashed = await target._stillInTrash(txn, related);
+    final List<FluentStorable> toSave = trashed.isEmpty ? related : [for (final FluentStorable m in related) if (!trashed.containsKey(m)) m];
+    if (trashed.isNotEmpty) {
+      FluentLog.debug('Related models in the trash are left there (not saved)', tag: '$tableName:relations', context: {'relation': link.name, 'models': trashed.length});
+    }
+    final List<Object?> savedIds = toSave.isEmpty ? const [] : await target._saveGraph(txn, target._createTypedList(toSave), task, ctx);
+    for (int k = 0; k < toSave.length; k++) {
+      idOf[toSave[k]] = savedIds[k];
+    }
+    idOf.addAll(trashed);
+    return idOf;
+  }
+
+  /// The models of [models] that were read in the trash (`deletedAt` set) and whose rows are still there, with their
+  /// stored keys.
+  Future<Map<FluentStorable, Object>> _stillInTrash(DatabaseExecutor ex, List<FluentStorable> models) async {
+    final Map<FluentStorable, Object> result = Map.identity();
+    if (_softDeleteColumn == null) return result;
+    final Map<FluentStorable, Object> candidates = Map.identity();
+    for (final FluentStorable m in models) {
+      if (m is! FluentSoftDeletable || m.deletedAt == null) continue;
+      final Object? id = _storedId(m.primaryKeyValue);
+      if (id != null) candidates[m] = id;
+    }
+    if (candidates.isEmpty) return result;
+    final Set<String> trashed = await _trashedKeys(ex, candidates.values.toList());
+    candidates.forEach((m, id) {
+      if (trashed.contains(_keyText(id))) result[m] = id;
+    });
+    return result;
   }
 
   /// Deletes owned rows matching [filter] (soft delete when the model supports it).
@@ -278,34 +347,58 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
   }
 
 
+  /// Saves the related models of the many-to-many [link] for the rows [todo] (owner keys in [ids]; `null`: nothing
+  /// is written) and replaces their links (merged with `keepMissing`). Like owned children (see
+  /// [_saveOwnedChildren]), only links the list could have shown are removed: none for a `limit` or a relation the
+  /// model was read without, only links to targets matching the relation's `where` and visible to it (links to
+  /// targets in the trash or expired stay, unless the relation shows trashed rows).
   Future<void> _saveLinks(Transaction txn, FluentRelationLink link, List<T> items, List<int> todo, List<Object?> ids, FluentTask task, FluentRelationSaveContext ctx) async {
     final FluentProvider target = link.target;
     final List<FluentStorable> allTargets = [];
     final Map<int, List<FluentStorable>> targetsOf = {};
+    final Set<int> mergeOnly = {}; // owners whose list was not loaded: no link is removed
 
     for (final int i in todo) {
       final List<FluentStorable>? related = _selectList(link, items[i], ctx);
       if (related == null || ids[i] == null) continue;
+      if (_unloaded(link, items[i])) {
+        if (related.isEmpty) continue; // the default value of a list that was never read
+        mergeOnly.add(i);
+      }
       targetsOf[i] = related;
       allTargets.addAll(related);
     }
     if (targetsOf.isEmpty) return;
 
-    final List<Object?> targetIds = allTargets.isEmpty ? const [] : await target._saveGraph(txn, target._createTypedList(allTargets), task, ctx);
-    final Map<FluentStorable, Object?> idOf = Map.identity()..addEntries([for (int k = 0; k < allTargets.length; k++) MapEntry(allTargets[k], targetIds[k])]);
+    final Map<FluentStorable, Object?> idOf = await _saveRelated(txn, link, allTargets, task, ctx);
+    final bool replace = !_keepMissing(link, ctx) && !_showsPart(link);
+    FluentFilter? shown;
 
     for (final MapEntry<int, List<FluentStorable>> entry in targetsOf.entries) {
       final Object ownerId = ids[entry.key]!;
       final List<Object> linked = [for (final FluentStorable t in entry.value) idOf[t]].whereType<Object>().toSet().toList();
-      if (!_keepMissing(link, ctx)) {
+      if (replace && !mergeOnly.contains(entry.key)) {
         // Stored links are read and compared in Dart, stale ones deleted in chunks (no `NOT IN` over every kept key).
         final List<String> targetKeys = target.keyColumnNames.toList();
         final FluentFilter ofOwner = _equalsAll(link.linkOwnerValues(ownerId), stored: true);
         final Set<String> keep = {for (final Object id in linked) _tupleKey(target._normalizeKey(id))};
-        final List<Object> stale = [
+        List<Object> stale = [
           for (final Map<String, Object?> r in await txn.query(link.linkTable!.quotedIdentifier, columns: link.linkTargetColumns.quotedAll, where: ofOwner.whereClause, whereArgs: ofOwner.whereArgs))
             if (_rowTuple(r, link.linkTargetColumns, targetKeys) case final Object id when !keep.contains(_tupleKey(target._normalizeKey(id)))) id,
         ];
+        if (stale.isNotEmpty) {
+          // Only links to targets the list could show (visible to the relation, matching its `where`).
+          final FluentFilter visibleTargets = shown ??= link.relation.where == null ? target._relationVisibility(link) : target._relationVisibility(link).and(target._resolveRelated(link.relation.where!));
+          final Set<String> visible = {};
+          final int perChunk = target.keysPerChunk(math.max(1, _maxParamsPerChunk - visibleTargets.whereArgs.length));
+          for (int i = 0; i < stale.length; i += perChunk) {
+            final FluentFilter where = target._keysFilterOf(stale.sublist(i, math.min(i + perChunk, stale.length)), stored: true).and(visibleTargets);
+            for (final Object id in await target._keysWhere(txn, where)) {
+              visible.add(_tupleKey(target._normalizeKey(id)));
+            }
+          }
+          stale = [for (final Object id in stale) if (visible.contains(_tupleKey(target._normalizeKey(id)))) id];
+        }
         final int step = math.max(1, (_maxParamsPerChunk - link.linkOwnerColumns.length) ~/ link.linkTargetColumns.length);
         int removed = 0;
         for (int i = 0; i < stale.length; i += step) {

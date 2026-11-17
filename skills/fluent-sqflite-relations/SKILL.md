@@ -36,6 +36,12 @@ metadata:
 - A `null` relation on save means "not loaded": stored data is untouched. A list (even empty) replaces the stored
   one — removed `many` children are deleted, removed `manyToMany` links are unlinked. Use `keepMissing: true` or
   `attach` / `detach` to change lists partially.
+- A save never removes: anything for a relation with `limit` (with `where`: only matching rows), trashed / expired
+  children and targets (their links stay), nothing for `unloadedRelations` (`FluentLoad.none`, lazy, depth cut-off,
+  failed load; new children are still saved). Children read from the trash are not restored by saving the parent
+  (`trash.restore`). `insertOnly` on an existing row writes nothing for its relations.
+- `findParents` of a `oneOf` relation covers every listed type, also without `via`.
+- `cleanOrphans` keeps references into rows quarantined in `__fluent_rejected_*` and reports them (`danglingReferences`).
 - Reads load the eager relations one level deep (`relations: FluentLoad.eager`, `maxDepth: 1`). For lists use
   `relations: FluentLoad.none` and load later with `model.loadRelations()`; mark big relations `lazy: true`.
   Loading is batched (one query per relation and level): never load relations in a loop per model.

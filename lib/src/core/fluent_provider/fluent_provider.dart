@@ -343,7 +343,7 @@ abstract class FluentProvider<T extends FluentStorable> {
     } catch (e, s) {
       throw FluentLog.raise(
         FluentSchemaException(
-          'Converter ${converter.runtimeType} failed to ${toSql ? 'store' : 'read'} a ${value.runtimeType} value of "$tableName.$column": $e',
+          'Converter ${converter.runtimeType} failed to ${toSql ? 'store' : 'read'} a ${value.runtimeType} value of "$tableName.$column": ${FluentLog.redact('$e')}',
           modelName: modelType.toString(),
           columnName: column,
           hint: toSql

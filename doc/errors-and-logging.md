@@ -18,7 +18,7 @@ Every error is a `FluentException` with:
 | `FluentQueryException` | `sqlError`, `noSuchTable`, `readOnly` |
 | `FluentRelationException` | `invalidRelation` |
 | `FluentSyncException` | `syncFailed`, `apiError` (`statusCode`), `syncNotSupported` |
-| `FluentCancelledException` | `engineClosed` |
+| `FluentCancelledException` | `engineClosed`, `syncCancelled` |
 | `FluentEngineException` | `engineError` |
 
 ```dart
@@ -64,7 +64,8 @@ collected, and whether the library may change anything by itself, is set by `Flu
 
 `close`, `restart`, `deleteDatabases` and `FluentEngine.shutdown` called from inside `FluentDb.transaction` or a
 provider callback would wait for themselves; they are ignored and reported (`ignoredCall`). Call them after the
-transaction completes.
+transaction completes. `clear`, `cleanOrphans` and `purgeArchivedColumns` called from inside another running task of the
+same database are skipped the same way.
 
 ## Logging
 
@@ -76,6 +77,7 @@ FluentDb.setupLogging(
   },
   showSqlArguments: false,                  // default: SQL arguments and paths are hidden (user data)
 );
+FluentDb.setupLogging(removeOnRecord: true); // remove the onRecord sink (onRecord: null keeps it)
 FluentDb.setupLogging(enabled: false);      // everything off
 ```
 
@@ -89,4 +91,5 @@ Output goes through `debugPrint`, with colors only where the console shows them 
 
 SQL arguments are hidden from `args [` to the end of an error text. The `error` of a `FluentLogRecord` / `FluentIssue`
 that is not a `FluentException` arrives as a `FluentRedactedError` (`type` and the redacted `message`) unless
-`FluentLog.showSqlArguments` is on; database paths are shown only then as well.
+`FluentLog.showSqlArguments` is on; database paths are shown only then as well (`<path hidden>`; `FluentGroup.toString`
+never shows the directory).

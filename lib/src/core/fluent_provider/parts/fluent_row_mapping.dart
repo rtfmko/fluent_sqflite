@@ -18,7 +18,8 @@ class _FluentRowPlan<T extends FluentStorable> {
     required this.enumValues,
     required this.linkNames,
     required this.factory,
-  });
+    Map<String, String>? seenTags,
+  }) : _seenTags = seenTags ?? {};
 
   final String table;
   final String modelName;
@@ -30,8 +31,40 @@ class _FluentRowPlan<T extends FluentStorable> {
   final List<String> linkNames;
   final T Function(Map<String, dynamic> json) factory;
 
-  _FluentRowPlan<T> withFactory(T Function(Map<String, dynamic> json) other) =>
-      _FluentRowPlan<T>(table: table, modelName: modelName, kinds: kinds, converters: converters, enumValues: enumValues, linkNames: linkNames, factory: other);
+  /// Column → the tag the last intact `_fs_metadata` gave it (that is where a `DateTime`'s UTC flag lives): a row
+  /// whose metadata is damaged takes the tags of its columns from here before falling back to the column kinds.
+  final Map<String, String> _seenTags;
+
+  _FluentRowPlan<T> withFactory(T Function(Map<String, dynamic> json) other) => _FluentRowPlan<T>(
+    table: table,
+    modelName: modelName,
+    kinds: kinds,
+    converters: converters,
+    enumValues: enumValues,
+    linkNames: linkNames,
+    factory: other,
+    seenTags: _seenTags,
+  );
+
+  /// Columns already reported for short ISO text (once per plan).
+  final Set<String> _shortIsoReported = {};
+
+  /// ISO text with a three-digit fraction was written by earlier versions (the library writes six digits now): next to
+  /// new values it sorts and compares wrongly within one millisecond. Reported once per column, with the statement
+  /// that rewrites the values.
+  void _checkShortIso(String column, String value, List<_MappingWarning> warnings) {
+    if (!FluentTypeCodecs.isShortIso(value) || !_shortIsoReported.add(column)) return;
+    final String c = column.quotedIdentifier;
+    final String dot = "instr($c, '.')";
+    warnings.add((
+      message: 'The ISO-8601 text of "$table.$column" has a three-digit fraction (written by an earlier version, e.g. "$value"); the library writes six digits now, so old and new values compare and sort wrongly within one millisecond.',
+      hint: 'Rewrite the old values once (a FluentDbMigration rawSql step): UPDATE ${table.quotedIdentifier} SET $c = substr($c, 1, $dot + 3) || \'000\' || substr($c, $dot + 4) '
+          "WHERE $c GLOB '*.[0-9][0-9][0-9]' OR $c GLOB '*.[0-9][0-9][0-9]Z'.",
+    ));
+  }
+
+  /// `"column":"tag"` pairs that are still readable in damaged metadata (e.g. text cut off in the middle).
+  static final RegExp _tagPair = RegExp(r'"((?:[^"\\]|\\.)*)"\s*:\s*"([a-z_]+)"');
 
   /// Builds the model of [row] (relation values already typed); problems that do not stop it go to [warnings].
   T build(Map<String, dynamic> row, List<_MappingWarning> warnings) {
@@ -48,7 +81,7 @@ class _FluentRowPlan<T extends FluentStorable> {
       // received value types.
       final String types = json.entries.map((e) => '${e.key}: ${e.value.runtimeType}').join(', ');
       throw FluentSchemaException(
-        'Building $modelName from "$table" failed: $e\nReceived: {$types}',
+        'Building $modelName from "$table" failed: ${FluentLog.redact('$e')}\nReceived: {$types}',
         modelName: modelName,
         hint: e is TypeError
             ? 'Read values with the types listed above. JSON lists/maps arrive as List<dynamic> / Map<String, dynamic>: use '
@@ -127,10 +160,11 @@ class _FluentRowPlan<T extends FluentStorable> {
         }
         throw FormatException('unknown enum value ${value.runtimeType == String ? "'$value'" : value}; known values: $known');
       }
+      if (converter is FluentIsoDateTimeConverter && value is String && warnings != null) _checkShortIso(column, value, warnings);
       return converter.decode(value);
     } catch (e, s) {
       throw FluentSchemaException(
-        'Converter ${converter.runtimeType} failed to read a ${value.runtimeType} value of "$table.$column": $e',
+        'Converter ${converter.runtimeType} failed to read a ${value.runtimeType} value of "$table.$column": ${FluentLog.redact('$e')}',
         modelName: modelName,
         columnName: column,
         hint: converter is FluentEnumConverter
@@ -153,11 +187,24 @@ class _FluentRowPlan<T extends FluentStorable> {
         hints = Map.of(kinds);
         for (final MapEntry<String, dynamic> e in decoded.entries) {
           // Columns with a converter are read by it (rows written before the converter may still carry a tag).
-          if (!converters.containsKey(e.key)) hints[e.key] = e.value.toString();
+          if (converters.containsKey(e.key)) continue;
+          final String tag = e.value.toString();
+          hints[e.key] = tag;
+          if (_seenTags[e.key] != tag) _seenTags[e.key] = tag;
         }
       } catch (_) {
-        hints = kinds;
-        warnings.add((message: 'Corrupted type metadata in "$table"; column kinds are used instead', hint: 'Re-save the affected rows to rewrite their metadata.'));
+        // Damaged: the pairs still readable, else the tag intact rows gave the column, else the column kind.
+        hints = Map.of(kinds);
+        for (final MapEntry<String, String> seen in _seenTags.entries) {
+          hints[seen.key] = seen.value;
+        }
+        for (final RegExpMatch m in _tagPair.allMatches(metaRaw)) {
+          final String column = m.group(1)!;
+          final String tag = m.group(2)!;
+          if (!converters.containsKey(column) && FluentTypeCodecs.knows(tag)) hints[column] = tag;
+        }
+        // Every tag decodes leniently, so a guessed tag never loses a value; at worst a DateTime gets the other flag.
+        warnings.add((message: 'Corrupted type metadata in "$table"; readable tags, tags of intact rows and column kinds are used instead', hint: 'Re-save the affected rows to rewrite their metadata.'));
       }
     }
     if (hints.isEmpty) return row;
@@ -172,7 +219,7 @@ class _FluentRowPlan<T extends FluentStorable> {
         restored = FluentTypeCodecs.decode(entry.value, value, enumValues: values);
       } catch (e, s) {
         throw FluentSchemaException(
-          'The stored value of "$table.${entry.key}" cannot be read as ${entry.value}: $e',
+          'The stored value of "$table.${entry.key}" cannot be read as ${entry.value}: ${FluentLog.redact('$e')}',
           modelName: modelName,
           columnName: entry.key,
           hint: 'The value was damaged or written outside the library. Fix or delete it (e.g. `UPDATE "$table" SET "${entry.key}" = NULL WHERE ...`), '
@@ -190,6 +237,7 @@ class _FluentRowPlan<T extends FluentStorable> {
         }
         continue;
       }
+      if (value is String && (entry.value == 'datetime' || entry.value == 'datetime_utc')) _checkShortIso(entry.key, value, warnings);
       if (identical(result, row)) result = Map<String, dynamic>.from(row);
       result[entry.key] = restored;
     }
@@ -200,6 +248,40 @@ class _FluentRowPlan<T extends FluentStorable> {
 /// Turning query results into models without blocking the UI: big lists are sliced across frames on the UI isolate,
 /// or mapped in a background isolate (see `FluentConfig.isolateMapping` and [FluentProvider.isolateFactory]).
 extension _FluentRowMapping<T extends FluentStorable> on FluentProvider<T> {
+  /// Pads ISO-8601 text written by earlier versions (three-digit fraction, `...:00.123Z`) to the six digits the library
+  /// writes now, in every column that holds library ISO text (columns of a `FluentIsoDateTimeConverter`; date columns
+  /// of an `iso8601` table), so equality filters and the order inside one millisecond see one form. The instant stays
+  /// the same (only zeros are added). Runs in the schema sync of the table, which the fingerprint marker `#iso:6` makes
+  /// happen once per database; a quick UPDATE that matches nothing costs one scan. Reported as an autoFix issue.
+  /// Read-only groups never run it: the row mapping warns there (`_checkShortIso`).
+  Future<void> _adoptIsoFraction(DatabaseExecutor ex) async {
+    final bool isoTable = _tableConfig.dateTimeFormat == FluentDateTimeFormat.iso8601;
+    final Map<String, int> fixed = {};
+    for (final FluentDbColumn column in getFullSchema) {
+      final bool isoConverter = _converters[column.name] is FluentIsoDateTimeConverter;
+      final bool isoKind = isoTable && column.valueKind == FluentValueKind.dateTime && !_converters.containsKey(column.name);
+      if (!isoConverter && !isoKind) continue;
+      final String c = column.name.quotedIdentifier;
+      final String dot = "instr($c, '.')";
+      final int count = await ex.rawUpdate(
+        'UPDATE ${tableName.quotedIdentifier} SET $c = substr($c, 1, $dot + 3) || \'000\' || substr($c, $dot + 4) '
+        "WHERE typeof($c) = 'text' AND $c GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]' "
+        "OR typeof($c) = 'text' AND $c GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'",
+      );
+      if (count > 0) fixed[column.name] = count;
+    }
+    if (fixed.isEmpty) return;
+    FluentLog.issue(
+      FluentIssueKind.storedFormatAdopted,
+      'ISO-8601 dates of "$tableName" written with a three-digit fraction were padded to six digits: ${fixed.entries.map((e) => '${e.key}: ${e.value} row(s)').join(', ')}.',
+      table: tableName,
+      subject: fixed.keys.first,
+      tag: '$tableName:schema',
+      hint: 'Nothing to do: the instants are unchanged. Equality filters and ordering on these columns see one text form now.',
+      context: {'rows': fixed.values.fold<int>(0, (a, b) => a + b)},
+    );
+  }
+
   /// Below this many rows a background isolate never pays off (spawning and copying cost more than mapping).
   static const int _isolateMinRows = 100;
 

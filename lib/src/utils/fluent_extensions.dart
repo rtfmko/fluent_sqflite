@@ -137,7 +137,7 @@ extension FluentActiveRecords<T extends FluentStorable> on T {
 
   /// Whether this model's row is stored and visible (not in the trash; not expired unless [includeExpired]).
   Future<bool> exists({bool includeExpired = false, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) =>
-      FluentDb.exists<T>(primaryKeyValue, includeExpired: includeExpired, policy: policy, dbKey: dbKey);
+      Future.sync(() => FluentDbInternals.providerForItem<T>(this, dbKey: dbKey).exists(primaryKeyValue, includeExpired: includeExpired, policy: policy));
 
   /// Deletes this model (see [FluentRemove.delete]): to the trash for [FluentSoftDeletable] models (then `deletedAt`
   /// holds the stored stamp), for good otherwise. Returns 1 or 0.
@@ -152,7 +152,7 @@ extension FluentActiveRecords<T extends FluentStorable> on T {
   /// A fresh copy of this model from the database, or `null` when it is gone (or in the trash, or expired);
   /// [relations] says which relations load.
   Future<T?> refresh({FluentLoad relations = FluentLoad.eager, int maxDepth = 1, FluentDbKey? dbKey}) =>
-      FluentDb.findById<T>(primaryKeyValue, relations: relations, maxDepth: maxDepth, dbKey: dbKey);
+      Future.sync(() => FluentDbInternals.providerForItem<T>(this, dbKey: dbKey).findById(primaryKeyValue, relations: relations, maxDepth: maxDepth));
 
   /// The models [P] whose relation points to this model (see [FluentDb.findParents]): the article of a comment, the
   /// articles of a tag. [via] names the relation when [P] has several to this model.
@@ -175,11 +175,14 @@ extension FluentActiveRecords<T extends FluentStorable> on T {
 /// Calls on a model with [FluentSoftDeletable]: `await note.restore()`, `await note.deleteForever()`.
 extension FluentTrashRecords<T extends FluentSoftDeletable> on T {
   /// Brings this model back from the trash and clears `deletedAt` (see [FluentTrash.restore]); returns 1 or 0.
-  Future<int> restore({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) => FluentDb.trash<T>(dbKey: dbKey).restore(this, tag: tag, policy: policy);
+  Future<int> restore({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) => _trash(dbKey).restore(this, tag: tag, policy: policy);
 
   /// Removes this model permanently, live or trashed (see [FluentTrash.deleteForever]); returns 1 or 0.
   Future<int> deleteForever({Object? tag, ExecutionPolicy policy = const ExecutionPolicy(), FluentDbKey? dbKey}) =>
-      FluentDb.trash<T>(dbKey: dbKey).deleteForever(this, tag: tag, policy: policy);
+      _trash(dbKey).deleteForever(this, tag: tag, policy: policy);
+
+  /// The trash of this model's table, found like `delete` finds it (by the runtime type first).
+  FluentTrash<T> _trash(FluentDbKey? dbKey) => fluentLazyTrash<T>(() => FluentDbInternals.providerForItem<T>(this, dbKey: dbKey));
 }
 
 /// Calls on a model with [FluentRelations]: load its relations later, query or count them, add and remove links.

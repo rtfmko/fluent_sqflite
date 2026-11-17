@@ -2,6 +2,8 @@
 // Use of this source code is governed by an Apache-2.0 license that can be
 // found in the LICENSE file.
 
+import 'package:meta/meta.dart';
+
 import '../../utils/fluent_enum.dart';
 import '../execution_policy.dart';
 import 'fluent_diagnostics.dart';
@@ -111,4 +113,39 @@ class FluentConfig {
     this.readConnections,
     this.batchKeys = FluentBatchKeys.fromRows,
   });
+
+  /// This config with every interval that cannot work (zero or negative: a timer that never waits, a watchdog that
+  /// fires at once) replaced by its default; [onFixed] hears each replacement (`name`, the bad value, the default).
+  @internal
+  FluentConfig withSafeIntervals(void Function(String name, Duration bad, Duration fallback) onFixed) {
+    const FluentConfig defaults = FluentConfig();
+    Duration? check(String name, Duration? value, Duration? fallback) {
+      if (value == null || value > Duration.zero) return value;
+      onFixed(name, value, fallback!);
+      return fallback;
+    }
+
+    final Duration? tx = check('transactionWatchdog', transactionWatchdog, defaults.transactionWatchdog);
+    final Duration? pause = check('pauseWatchdog', pauseWatchdog, defaults.pauseWatchdog);
+    final Duration? purge = check('trashPurgeInterval', trashPurgeInterval, defaults.trashPurgeInterval);
+    final Duration? optimize = check('optimizeInterval', optimizeInterval, defaults.optimizeInterval);
+    if (identical(tx, transactionWatchdog) && identical(pause, pauseWatchdog) && identical(purge, trashPurgeInterval) && identical(optimize, optimizeInterval)) return this;
+    return FluentConfig(
+      transactionWatchdog: tx,
+      pauseWatchdog: pause,
+      trashPurgeInterval: purge,
+      optimizeInterval: optimize,
+      isolateMapping: isolateMapping,
+      sliceAfterRows: sliceAfterRows,
+      frameBudget: frameBudget,
+      diagnostics: diagnostics,
+      defaultPolicy: defaultPolicy,
+      trashRetention: trashRetention,
+      indexReferences: indexReferences,
+      autoRelations: autoRelations,
+      fullText: fullText,
+      readConnections: readConnections,
+      batchKeys: batchKeys,
+    );
+  }
 }

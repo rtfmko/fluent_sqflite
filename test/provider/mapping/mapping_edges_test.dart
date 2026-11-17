@@ -77,11 +77,33 @@ void main() {
       await p.db.rawUpdate("UPDATE m SET _fs_metadata = '{not json'");
       final DynamicModel m = (await p.findById(1))!;
       expect(m['flag'], true, reason: 'the column kind restores the bool');
-      expect((m['at'] as DateTime).isAtSameMomentAs(DateTime.utc(2030)), isTrue, reason: 'same instant; only the UTC flag lived in the damaged metadata');
+      expect((m['at'] as DateTime).isAtSameMomentAs(DateTime.utc(2030)), isTrue, reason: 'same instant; the UTC flag lived only in the damaged metadata and no intact row showed it');
       expect(m['word'], 'hello');
       final FluentIssue issue = issuesOf(FluentIssueKind.mappingValue).single;
       expect(issue.title, contains('Corrupted type metadata in "m"'));
       expect(issue.fix, contains('Re-save'));
+    });
+
+    test('damaged metadata keeps the UTC flag: readable tags and the tags of intact rows are used (known bug 1)', () async {
+      final DynamicProvider p = table();
+      await db.open([p]);
+      await p.saveAll([
+        p.row({'id': 1, 'flag': true, 'at': DateTime.utc(2030), 'word': 'a'}),
+        p.row({'id': 2, 'flag': true, 'at': DateTime.utc(2031), 'word': 'b'}),
+        p.row({'id': 3, 'flag': true, 'at': DateTime.utc(2032), 'word': 'c'}),
+      ]);
+      // Cut off in the middle: the pair before the cut is still readable.
+      await p.db.rawUpdate('''UPDATE m SET _fs_metadata = '{"at":"datetime_utc","fl' WHERE id = 2''');
+      // Unreadable: the tag comes from the intact row read before it.
+      await p.db.rawUpdate("UPDATE m SET _fs_metadata = '{not json' WHERE id = 3");
+      final DynamicModel cut = (await p.findById(2))!;
+      expect((cut['at'] as DateTime).isUtc, isTrue);
+      expect(cut['at'], DateTime.utc(2031));
+      expect(cut['flag'], true, reason: 'the column kind still restores the bool');
+      final List<DynamicModel> all = await p.find(orderBy: 'id');
+      expect(all.map((m) => (m['at'] as DateTime).isUtc), [true, true, true]);
+      expect(all.last['at'], DateTime.utc(2032));
+      expect(issuesOf(FluentIssueKind.mappingValue), isNotEmpty, reason: 'the damage is still reported');
     });
 
     test('metadata that is valid JSON but not an object is damaged too', () async {

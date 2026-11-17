@@ -169,14 +169,14 @@ class FluentTask {
       _ => 30,
     };
     final TableHelper? h = helper;
-    if (h != null) {
-      if (h.limit != null) {
-        w += h.limit! <= 100 ? -15 : 10;
-      } else if (action == FluentDbAction.find) {
-        w += 40;
-      }
-      if (h.orderBy != null) w += 20;
+    final int? limit = h?.limit;
+    if (limit != null) {
+      w += limit <= 100 ? -15 : 10;
+    } else if (action == FluentDbAction.find) {
+      // An unbounded find (no helper at all, or a helper without a limit) may read the whole table.
+      w += 40;
     }
+    if (h?.orderBy != null) w += 20;
     // Relation levels cost queries; depth 0 (no relations) costs nothing extra.
     if (maxDepth > 1) w += maxDepth * 30;
     if (ignoreLazy) w += 20;

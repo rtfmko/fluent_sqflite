@@ -74,7 +74,8 @@ Future<void> loadMore() async {
 
 `orderBy` is one column name (default: the key); the key is added automatically, so ties have a fixed order. Use the
 same `orderBy` / `descending` for every page of a cursor. Store a cursor with `page.next!.encode()` and
-`FluentCursor.decode(text)`.
+`FluentCursor.decode(text)` (it round-trips bytes and non-finite doubles; garbage text fails with `FluentArgumentException`).
+Cursors on `DateTime` columns of iso8601 tables work.
 
 ## Live queries
 

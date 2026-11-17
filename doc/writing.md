@@ -42,7 +42,11 @@ await posts.update(post);                                              // only i
 await posts.update(post, withRelations: true);                         // also its relations
 await posts.updateById(1, {'status': Status.published, 'rating': 5.0}); // just these fields
 await posts.updateWhere(FluentFilter.lt('rating', 1), {'status': Status.draft});
+await posts.updateById(1, {'rating': 3.0}, includeExpired: true);        // also a row past its timeToLive
 ```
+
+`update`, `updateAll` and `patch` skip expired rows (like `findById`); `updateById` / `updateWhere` do too, unless
+`includeExpired: true` (the expiry stays as it is).
 
 ## Counters and computed values
 
@@ -74,6 +78,10 @@ await posts.trash.empty(olderThan: const Duration(days: 30)); // empty the trash
 await posts.clearTable();                    // synced table: the next pull asks for everything again
 ```
 
+`deletedAt` is epoch milliseconds (ISO text stamps of an earlier version are converted once at start,
+`storedFormatAdopted`). On the models it changes after the commit, for `delete` and `restore` like for `save`;
+`FluentDb.deleteAll`, `Iterable.deleteAll()` and deletes through a base type set it as well.
+
 Soft deletes cascade to owned soft-deletable children, and `restore` brings back what was deleted together. Unique
 columns only apply to live rows, so a deleted row never blocks a value. The trash is purged automatically: per model
 with `trashRetention` (`FluentConfig`, per database `FluentDbConfig`, per table the model's `tableConfig`), plus
@@ -103,7 +111,12 @@ await a call created *outside* the transaction from inside it — it waits behin
 uncommitted changes). With several databases pass `dbKey`.
 
 A `FluentDb.transaction` inside another one runs in a savepoint: if it throws, only its own writes (and their events)
-are rolled back, and the error reaches the outer body, which may catch it and go on.
+are rolled back, and the error reaches the outer body, which may catch it and go on. Keys generated inside a transaction
+or savepoint that rolls back are taken back from the models. A transaction on database A opened inside a transaction on
+database B: writes to B still join B's transaction. `FluentDb.clear` inside a transaction runs in it (a rollback
+keeps the rows, the `clear` event comes after the commit); `purgeArchivedColumns` inside one is skipped, call it after.
+
+Two saves of the same model instance in a row are never merged into one write (a double tap stores one row).
 
 ## Through `FluentDb` and models
 
@@ -130,6 +143,9 @@ await FluentDb.clear(dbKey: AppDb.cache);  // empty every table (also behind RES
 await FluentDb.deleteDatabases();          // delete the files and open fresh, empty databases (sign-out)
 await FluentDb.close();                    // close everything (FluentDb.init opens again)
 ```
+
+`clear`, `cleanOrphans` and `purgeArchivedColumns` called from inside another running task of the same database are
+skipped with an `ignoredCall` warning. `cleanOrphans` is ordered with the other writes and publishes `update` events.
 
 Watchers receive empty results first. `clear` is a write like any other: calls made before it finish first, calls
 made after it see the empty tables.

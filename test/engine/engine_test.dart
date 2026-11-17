@@ -49,6 +49,16 @@ void main() {
     expect(copy.fingerprint, read(0).fingerprint, reason: 'the id is not part of the fingerprint');
   });
 
+  test('an unbounded find never weighs less than a filtered or a limited one (known bug 2)', () {
+    FluentTask find([TableHelper? helper]) => FluentTask(action: FluentDbAction.find, table: 't', helper: helper);
+    final FluentTask unfiltered = find();
+    final FluentTask filtered = find(TableHelper(where: '"a" = ?', whereArgs: const [1]));
+    final FluentTask limited = find(TableHelper(where: '"a" = ?', whereArgs: const [1], limit: 10));
+    expect(unfiltered.staticWeight, greaterThanOrEqualTo(filtered.staticWeight));
+    expect(filtered.staticWeight, greaterThan(limited.staticWeight));
+    expect(unfiltered.staticWeight, greaterThan(limited.staticWeight));
+  });
+
   test('a flood of lookups is answered by few IN queries and keeps priorities', () async {
     await users.saveAll([for (int i = 1; i <= 300; i++) u(i, 'm$i@x', 'U$i')]);
     final Completer<void> release = await hold();

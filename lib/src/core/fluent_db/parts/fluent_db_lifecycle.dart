@@ -19,9 +19,20 @@ extension FluentLifecycleHooks on FluentDb {
 extension _FluentDbLifecycle on FluentDb {
   /// [FluentDb.planMigrations]: plans every group on its own connection (an open database gets an empty plan).
   Future<List<FluentMigrationPlan>> _planMigrations(Iterable<FluentGroup> groups, FluentConfig config, {required bool runCode}) async {
+    if (_isInitialized) return _planGroups(groups, config, runCode: runCode);
+    // The settings are the plan's own: the ones of the library stay as they were (nothing is initialized).
+    final FluentConfig before = FluentEngine().config;
+    FluentEngine().applyConfig(config);
+    try {
+      return await _planGroups(groups, config, runCode: runCode);
+    } finally {
+      if (identical(FluentEngine().config, config)) FluentEngine().applyConfig(before);
+    }
+  }
+
+  Future<List<FluentMigrationPlan>> _planGroups(Iterable<FluentGroup> groups, FluentConfig config, {required bool runCode}) async {
     final List<FluentGroup> groupList = groups.toList(growable: false);
     _refuseSharedProviders([for (final FluentGroup g in groupList) if (g.providerList.isNotEmpty) g], tag: 'FluentDb:planMigrations');
-    if (!_isInitialized) FluentEngine().applyConfig(config);
     final List<FluentMigrationPlan> plans = [];
     for (final FluentGroup group in groupList) {
       if (group.providerList.isEmpty) continue;
@@ -72,7 +83,7 @@ extension _FluentDbLifecycle on FluentDb {
 
   /// [FluentDb.init]: opens, syncs and registers every group. A failing group closes every database this call opened;
   /// with `resetOnSchemaError` (and not [isRetry]) its file is deleted and the whole init runs once more.
-  Future<void> _init(Iterable<FluentGroup> groups, FluentConfig config, {required bool isRetry}) async {
+  Future<void> _init(Iterable<FluentGroup> groups, FluentConfig requested, {required bool isRetry}) async {
     if (_isInitialized) return;
 
     // The caller's Iterable may be single-use: it is read once, the retry (resetOnSchemaError) reuses this list.
@@ -127,9 +138,13 @@ extension _FluentDbLifecycle on FluentDb {
 
     _refuseSharedProviders(uniqueGroupsMap.values, tag: 'FluentDb:init');
 
+    final FluentConfig config = FluentDb._checkedConfig(requested);
     FluentDb._lastConfig = uniqueGroupsMap.values.toList();
     FluentDb._lastFluentConfig = config;
     FluentEngine().applyConfig(config);
+    // The settings of every database are known to the engine before the first schema sync and relation graph run: the
+    // hints they raise follow the diagnostics of their own database.
+    FluentEngine().preloadDbConfigs({for (final FluentGroup g in uniqueGroupsMap.values) g.dbKey.dbName: g.config});
 
     final Map<String, FluentDbConfig> dbConfigs = {};
     final Map<String, Database> dbNameWithDb = {};
@@ -275,6 +290,7 @@ extension _FluentDbLifecycle on FluentDb {
               hint: 'Another process or connection probably holds the file. Close it, or delete the file by hand, and start again.',
               error: left,
             );
+            FluentEngine().preloadDbConfigs(const {}); // nothing is open: no settings to follow
             Error.throwWithStackTrace(failure, st);
           }
           FluentLog.issue(
@@ -294,6 +310,7 @@ extension _FluentDbLifecycle on FluentDb {
           stopwatch.stop();
           // Nothing stays half open: the databases this call opened before the failure are closed again.
           await _closeAll(dbs: {for (final Database db in dbNameWithDb.values) if (db.isOpen) db});
+          FluentEngine().preloadDbConfigs(const {}); // nothing is open: no settings to follow
           Error.throwWithStackTrace(failure, st);
         }
       }
@@ -325,9 +342,10 @@ extension _FluentDbLifecycle on FluentDb {
       // Nothing stays half started: the engine stops and the databases this call opened are closed again.
       final FluentException failure = e is FluentException
           ? e
-          : FluentEngineException('The databases could not be started: $e', hint: 'Usually a file another process holds. Fix the cause and call FluentDb.init again.', cause: e, stackTrace: st);
+          : FluentEngineException('The databases could not be started: ${FluentLog.redact('$e')}', hint: 'Usually a file another process holds. Fix the cause and call FluentDb.init again.', cause: e, stackTrace: st);
       FluentLog.report(failure, tag: 'FluentDb:init');
       await _closeAll(dbs: {for (final Database db in dbNameWithDb.values) if (db.isOpen) db});
+      FluentEngine().preloadDbConfigs(const {}); // nothing is open: no settings to follow
       Error.throwWithStackTrace(failure, st);
     }
     unawaited(_deleteLegacyStatsDb(uniqueGroupsMap.values.toList()));
@@ -346,7 +364,7 @@ extension _FluentDbLifecycle on FluentDb {
     if (group.readOnly && !group.inMemory) return false;
     if (group.inMemory) return false; // no file to recreate
     if (failure.code == FluentErrorCode.migrationRefused || failure.code == FluentErrorCode.databaseNotFound) return false;
-    final RegExp inUse = RegExp(r'database is locked|database table is locked|SQLITE_BUSY|SQLITE_LOCKED|\bbusy\b', caseSensitive: false);
+    final RegExp inUse = RegExp(r'database is locked|database table is locked|SQLITE_BUSY|SQLITE_LOCKED|database is busy', caseSensitive: false);
     return !inUse.hasMatch('${failure.message} ${failure.cause ?? ''}');
   }
 
@@ -357,9 +375,10 @@ extension _FluentDbLifecycle on FluentDb {
     _trashPurgeTimer = _optimizeTimer = null;
     if (!_isInitialized) return;
     final Duration? purgeEvery = config.trashPurgeInterval;
-    if (purgeEvery != null) _trashPurgeTimer = Timer.periodic(purgeEvery, (_) => unawaited(_purgeSoftDeletedGlobal()));
+    // Library time (FluentClock): tests move them with the clock instead of waiting.
+    if (purgeEvery != null) _trashPurgeTimer = FluentClockTimer(purgeEvery, _purgeSoftDeletedGlobal, tag: 'FluentDb:purge');
     final Duration? optimizeEvery = config.optimizeInterval;
-    if (optimizeEvery != null) _optimizeTimer = Timer.periodic(optimizeEvery, (_) => unawaited(_optimizeAll()));
+    if (optimizeEvery != null) _optimizeTimer = FluentClockTimer(optimizeEvery, _optimizeAll, tag: 'FluentDb:optimize');
   }
 
   /// Opens the read pool of [group] (`readConnections` of the group, else of `FluentConfig`): only for a database
@@ -578,7 +597,7 @@ extension _FluentDbLifecycle on FluentDb {
       configToUse = updateConfig != null ? updateConfig(List.of(FluentDb._lastConfig ?? const [])) : List.of(FluentDb._lastConfig ?? const []);
     } catch (e, st) {
       throw FluentLog.raise(
-        FluentConfigException('restart: the update callback threw: $e', hint: 'The databases were left open as they were; fix the callback and call restart again.', cause: e, stackTrace: st),
+        FluentConfigException('restart: the update callback threw: ${FluentLog.redact('$e')}', hint: 'The databases were left open as they were; fix the callback and call restart again.', cause: e, stackTrace: st),
         tag: 'FluentDb:restart',
       );
     }

@@ -31,6 +31,14 @@ metadata:
 - `delete` of a `FluentSoftDeletable` model goes to the trash; `provider.trash.deleteForever*` removes it for good.
   `provider.trash` is a `FluentTrash` (only trashed rows: `find`, `count`, `watch`, `restore*`, `deleteForever*`,
   `empty`); `provider.withTrash` a `FluentWithTrash` (reads that see live and trashed rows).
+- Expired rows (`timeToLive`): `update` / `updateAll` / `patch` skip them; `updateById` / `updateWhere` too unless
+  `includeExpired: true`; `insertOnly` writes a new row over one; `upsert` renews it.
+- `deletedAt` is epoch milliseconds and changes on the models after the commit (delete, restore and save alike);
+  `FluentDb.deleteAll`, `Iterable.deleteAll()` and deletes through a base type set it.
+- Two saves of the same instance are never merged (double tap = one row). Keys generated in a rolled-back transaction /
+  savepoint are taken back. `FluentDb.clear` inside a transaction runs in it. `clear`, `cleanOrphans`,
+  `purgeArchivedColumns` inside another running task are skipped (`ignoredCall`); `purgeArchivedColumns` inside a
+  transaction too: call it after.
 - Handle `FluentConstraintException` (`code == FluentErrorCode.uniqueViolation`, …) where a user can cause it.
 
 - `conflictOn` gives the model the key of the matched row. A nested `FluentDb.transaction` is a savepoint.

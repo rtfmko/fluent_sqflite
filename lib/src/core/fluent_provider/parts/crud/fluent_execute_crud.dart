@@ -226,20 +226,31 @@ extension _FluentExecuteCrud<T extends FluentStorable> on FluentProvider<T> {
     Future<int> each(Transaction txn, Future<int> Function(FluentFilter where) action) =>
         ids == null ? action(_taskFilter(task)) : _forKeyChunks([...ids.whereType<Object>()], (keys) => action(FluentFilter(keys.whereClause, _sqlArgs(keys.whereArgs)!)));
 
+    // The models passed in (`delete(item)`, `deleteAll`, `trash.restore(item)`); a `List<FluentStorable>` when the call
+    // came through a base type (`FluentDb.deleteAll`, `Iterable.deleteAll()`), so not tested as `List<T>`.
+    final List<FluentStorable>? items = task.data is List ? (task.data! as List).whereType<FluentStorable>().toList(growable: false) : null;
+
+    /// Gives [items] the stamps stored now, once the transaction commits (a rollback leaves them as they were).
+    Future<void> stampModels(Transaction txn) async {
+      if (ids == null || items == null || items.isEmpty) return;
+      final Map<String, DateTime?> stamps = await _storedDeleteStamps(txn, [...ids.whereType<Object>()]);
+      FluentTransactionScope.whenCommitted(dbName, () => _applyDeleteStamps(items, stamps));
+    }
+
     return switch (task.action) {
-      FluentDbAction.delete => () async {
-        Map<String, DateTime?> stamps = const {};
-        final int count = await _write('Delete', (txn) async {
-          final Object stamp = _softDeleteStamp();
-          final int n = await each(txn, (where) => _softDeleteWhere(txn, where, stamp));
-          // Models passed in get the stamp stored in this transaction (rows in the trash already keep their first one).
-          if (ids != null && task.data is List<T>) stamps = await _storedDeleteStamps(txn, [...ids.whereType<Object>()]);
-          return n;
-        });
-        if (task.data case final List<T> items) _applyDeleteStamps(items, stamps);
-        return count;
-      }(),
-      FluentDbAction.restore => _write('Restore', (txn) => each(txn, (where) => _restoreWhere(txn, where))),
+      FluentDbAction.delete => _write('Delete', (txn) async {
+        final int stamp = _softDeleteStamp();
+        final int n = await each(txn, (where) => _softDeleteWhere(txn, where, stamp));
+        // Models passed in get the stamp stored in this transaction (rows in the trash already keep their first one).
+        await stampModels(txn);
+        return n;
+      }),
+      FluentDbAction.restore => _write('Restore', (txn) async {
+        final int n = await each(txn, (where) => _restoreWhere(txn, where));
+        // Restored rows have no stamp any more; rows that stay in the trash (owner deleted) keep theirs.
+        await stampModels(txn);
+        return n;
+      }),
       _ => _write('Delete', (txn) => each(txn, (where) => _hardDeleteWhere(txn, where))),
     };
   }
@@ -256,13 +267,14 @@ extension _FluentExecuteCrud<T extends FluentStorable> on FluentProvider<T> {
 
   /// Clears the table locally (e.g. on logout): no tombstones, the server keeps its data.
   Future<int> _executeClearTable(FluentTask task) => _write('Clear table', (txn) async {
-    final int unsent = _syncColumns == null ? 0 : await _countUnsent(txn);
+    final int unsent = _syncColumns == null ? 0 : await _countUnsent(txn) + await _countTombstones(txn);
     final int count = await _hardDeleteWhere(txn, FluentFilter.empty, synced: true);
     await _forgetFetchState(txn);
+    if (_syncColumns != null) await _dropAllTombstones(txn);
     if (unsent > 0) {
       FluentLog.issue(
         FluentIssueKind.unsentChangesDiscarded,
-        'clearTable on "$tableName" discarded $unsent row(s) with local changes the server never received.',
+        'clearTable on "$tableName" discarded $unsent local change(s) (rows and deletions) the server never received.',
         table: tableName,
         tag: '$tableName:clearTable',
         hint: 'Call syncWithServer() before clearTable to push them first. clearTable is a full local reset: it also drops unsent changes.',

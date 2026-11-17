@@ -206,7 +206,7 @@ the model extensions (`item.save()`, …). Provider methods no longer take `dbNa
 | Old name | New name | Deprecated in | Removed in | Search for | Before → After |
 |---|---|---|---|---|---|
 | `FluentDbMigration` without `version` / `id` | `FluentDbMigration(id: ...)` | — | 2.0.0 | `FluentDbMigration(` | `FluentDbMigration(rawSql: [...])` → `FluentDbMigration(id: 'fill_status', rawSql: [...])` (steps without a label are skipped with a warning) |
-| `FluentDbMigration(columns: [...])` | `oldName` / the column in the model | — | 2.0.0 | `FluentDbMigration(columns:` | `FluentDbMigration(columns: [FluentDbColumn.text('title', oldName: 'name')])` → `FluentDbColumn.text('title', oldName: 'name')` in `missingColumns` / `tableSchema` (the model is the only place for columns) |
+| `FluentDbMigration(columns: [...])` | `oldName` / the column in the model | — | 2.0.0 | `FluentDbMigration(columns:` | `FluentDbMigration(columns: [FluentDbColumn.text('title', oldName: 'name')])` → `FluentDbColumn(name: 'title', type: FluentDbDataType.text, oldName: 'name')` in `missingColumns` / `tableSchema` (the model is the only place for columns) |
 | `defaultValue` as SQL text | `defaultValue` as a Dart value | — | 2.0.0 | `defaultValue: "'` | `defaultValue: "'active'"` → `defaultValue: 'active'`; `defaultValue: 'CURRENT_TIMESTAMP'` → `defaultValue: FluentSqlExpression.currentTimestamp` |
 | mutable `FluentDbColumn` fields | `copyWith` | — | 2.0.0 | `column.isNotNull =` | `c.isNotNull = true` → `c = c.copyWith(isNotNull: true)` |
 
@@ -371,3 +371,20 @@ These compile unchanged but act differently; check the code that depends on them
   reported once per run as `relationValue` (was: a `one` / `oneOf` was ignored silently); the item is still saved.
 * `FluentIssueKind.eventFailed` is removed: a change event cannot fail to publish (a listener that throws reports to
   its own zone).
+* `FluentDb.init(groups)` and `FluentDb.planMigrations(groups)` without `config:` keep the settings in use (the last
+  `FluentDb.configure` / `init(config:)`); they no longer reset to the defaults. Pass `config: const FluentConfig()` to
+  reset on purpose.
+* `updateById` / `updateWhere` skip expired rows like `findById` does; pass `includeExpired: true` to update them too
+  (their expiry stays). `update`, `updateAll` and `patch` skip expired rows; `insertOnly` writes a new row over one;
+  `upsert` renews it.
+* `setupLogging(onRecord: null)` keeps the sink set earlier; remove it with `setupLogging(removeOnRecord: true)`
+  (`FluentLog.configure(removeOnRecord: true)`). Paths in messages show as `<path hidden>` unless `showSqlArguments`.
+* The soft-delete stamp `deleted_at` is always epoch milliseconds; stamps stored as ISO text are converted once at start
+  (`storedFormatAdopted`). ISO-8601 text written by the library has six fraction digits; older three-digit values are
+  padded once at start. Code or SQL that reads those columns directly sees the new forms.
+* `deletedAt` of a model changes after the commit for `delete` and `restore` (like `save`), not right after the call.
+* A save no longer removes relation children / links it cannot judge: relations with `limit`, trashed or expired rows,
+  and relations the model was read without (`unloadedRelations`) keep their rows.
+* A zero or negative `trashPurgeInterval`, `optimizeInterval`, `pauseWatchdog` or `transactionWatchdog` falls back to the
+  default (`configFallback`); `null` still switches the timer off.
+* `fluent_sqflite_test` resets logging after every test: call `setupLogging` in `setUp` or in the test, not `setUpAll`.

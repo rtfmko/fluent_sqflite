@@ -497,8 +497,8 @@ void main() {
     });
 
     test('decoding garbage fails', () {
-      expect(() => FluentCursor.decode('%%%'), throwsA(isA<FormatException>()));
-      expect(() => FluentCursor.decode(base64Url.encode(utf8.encode('[1]'))), throwsA(isA<TypeError>()));
+      expect(() => FluentCursor.decode('%%%'), throwsA(isA<FluentArgumentException>()));
+      expect(() => FluentCursor.decode(base64Url.encode(utf8.encode('[1]'))), throwsA(isA<FluentArgumentException>()));
     });
 
     test('equality compares every field and the key map', () {

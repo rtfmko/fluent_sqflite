@@ -359,6 +359,50 @@ void main() {
       expect(FluentDbInternals.maintenanceTimers, (purge: false, optimize: false));
     });
 
+    test('the trash purge timer follows the library clock: moving db.clock runs it (known bug 4)', () async {
+      db = FluentTestDb(name: 'timer_clock', persistent: true);
+      await db!.open([CommentProvider()], fluentConfig: const FluentConfig(trashRetention: Duration(days: 1), trashPurgeInterval: Duration(hours: 6), optimizeInterval: null));
+      await FluentDb.saveAll<Comment>([Comment(text: 'a'), Comment(text: 'b')]);
+      await FluentDb.delete<Comment>((await FluentDb.findFirst<Comment>(orderBy: 'id'))!);
+      db!.clock.advance(const Duration(hours: 1));
+      await db!.settle();
+      expect(await FluentDb.withTrash<Comment>().count(), 2, reason: 'neither the retention nor the interval has passed');
+      db!.clock.advance(const Duration(days: 2));
+      await waitUntil(() async => await FluentDb.withTrash<Comment>().count() == 1, db!);
+    });
+
+    test('a clock timer reports a failing run, keeps running, and stops for good on cancel', () async {
+      final FluentTestClock clock = FluentTestClock();
+      int runs = 0;
+      final FluentClockTimer timer = FluentClockTimer(const Duration(hours: 1), () async {
+        runs++;
+        throw StateError('boom');
+      });
+      try {
+        clock.advance(const Duration(minutes: 30));
+        await Future<void>.delayed(Duration.zero);
+        expect(runs, 0);
+        clock.advance(const Duration(minutes: 31));
+        await Future<void>.delayed(Duration.zero);
+        expect(runs, 1, reason: 'the error stays inside the timer');
+        clock.advance(const Duration(hours: 2));
+        await Future<void>.delayed(Duration.zero);
+        expect(runs, 2);
+        clock.advance(const Duration(days: -10));
+        clock.advance(const Duration(hours: 1));
+        await Future<void>.delayed(Duration.zero);
+        expect(runs, 3, reason: 'a clock moved back does not stall the timer');
+        timer.cancel();
+        clock.advance(const Duration(days: 1));
+        await Future<void>.delayed(Duration.zero);
+        expect(runs, 3);
+        expect(timer.isCancelled, isTrue);
+      } finally {
+        timer.cancel();
+        clock.reset();
+      }
+    });
+
     test('timers stop with close and are not started before init', () async {
       expect(FluentDbInternals.maintenanceTimers, (purge: false, optimize: false));
       FluentDb.configure(const FluentConfig(optimizeInterval: Duration(milliseconds: 30)));

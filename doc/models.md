@@ -55,7 +55,12 @@ List<FluentDbColumn> get missingColumns => [FluentDbColumn.timestamp('synced_at'
 
 Column factories: `FluentDbColumn.primary`, `text`, `integer`, `real`, `boolean`, `timestamp`, `blob`, `converted`.
 Options: `isNotNull`, `isUnique`, `indexed`, `defaultValue` (a Dart value, or `FluentSqlExpression.currentTimestamp`),
-`collation`, `checkConstraint`, `oldName` (rename a column without losing data).
+`collation`, `checkConstraint`. `oldName` (rename a column without losing data) belongs to the main constructor only:
+`FluentDbColumn(name: 'title', type: FluentDbDataType.text, oldName: 'name')`.
+
+A `defaultValue` is stored like a saved value (the column's converter, an enum converter, the table's `dateTimeFormat`);
+when that changes the stored text of a default, the column's `DEFAULT` is updated on the next sync. A `double` NaN
+default throws a `FluentSchemaException`; infinity is allowed.
 
 ## Keys
 
@@ -73,7 +78,7 @@ List<FluentDbColumn> get primaryKeys => [FluentDbColumn.integer('user_id'), Flue
 ```
 
 Rows of a composite key are addressed with a `FluentKey`: `stats.findById(FluentKey({'user_id': 7, 'day': '2026-10-20'}))`,
-or `model.key`. `withoutRowId: true` makes such tables smaller.
+or `model.key`. Override `bool get withoutRowId => true;` to make such tables smaller.
 
 Names derived from a model type or a relation name (the default `tableName`, `<model>_id` / `<relation>_id`
 columns, link tables) are snake case by words: `UserName` → `user_name`, `HTTPAuthor` → `http_author`, `userID` →
@@ -114,6 +119,9 @@ Built-in types: a `RegExp` keeps its flags; a `double` NaN cannot be stored (the
 infinity is fine); the timestamp format keeps `DateTime` in milliseconds (microseconds are cut and reported once
 per column as `precisionLost`: use iso8601 or a converter to keep them). A stored enum value the enum no longer has reads as `null` with a `mappingValue` warning whose
 hint has the `UPDATE` that fixes the rows; in a NOT NULL column it is a `FluentSchemaException`.
+ISO-8601 text written by the library always has six fraction digits (`2026-01-02T03:04:05.000000Z`); three-digit values of
+an earlier version are padded once at start (`storedFormatAdopted`; a read-only database gets a `mappingValue` warning
+instead). `aggregate` keeps the UTC flag of a date result.
 
 A converter on a key column is applied once. Keys you pass (`findById`, `FluentKey`, `FluentFilter.ids`, `save`) and
 keys on models are Dart values and are converted like on save; keys the library reads from rows, and the reference
@@ -147,6 +155,10 @@ final Article? owner = (await comment.findParents<Article>()).firstOrNull;
 
 `timeToLive` says how long a row lives after it is saved: once the time has passed the row is hidden from every read
 and removed by `clearExpired()` and the start-up maintenance (`includeExpired: true` still sees it). Set it per instance,
+Writes treat an expired row as missing, like `findById`: `update`, `updateAll`, `patch` skip it, `updateById` /
+`updateWhere` skip it unless `includeExpired: true` (its expiry stays), `insertOnly` writes a new row over it, and
+`upsert` renews it (the model's `timeToLive`, or no expiry when the model has none). `watch` drops a row when it expires,
+following `db.clock` in tests.
 or for the whole table — then every save extends the life:
 
 ```dart
@@ -177,7 +189,12 @@ Settings live on three levels; a narrower one wins:
 | database | `FluentGroup(config: FluentDbConfig(...))` | SQLite pragmas (journal, synchronous, cache, foreign keys, busy timeout), `readConnections`, `diagnostics` |
 | table | the model's `FluentTableConfig get tableConfig` | how dates and enums are stored, `isolateMapping` |
 
-`trashRetention`, `indexReferences` and `fullText` exist on all three levels (`null` = follow the wider one),
+`FluentDb.init(groups)` without `config:` keeps the settings in use (the last `configure` / `init(config:)`), not the defaults;
+the same for `planMigrations`. `trashPurgeInterval`, `optimizeInterval`, `pauseWatchdog` and `transactionWatchdog`: `null`
+switches the timer off, zero or a negative value falls back to the default (`configFallback`).
+
+`trashRetention`, `indexReferences` and `fullText` exist on all three levels; on the database and table levels `null`
+follows the wider one (the global values are never null),
 `readConnections` on the global and database levels.
 
 ```dart

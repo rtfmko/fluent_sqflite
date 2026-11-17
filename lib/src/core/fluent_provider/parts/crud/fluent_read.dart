@@ -338,6 +338,8 @@ extension FluentRead<T extends FluentStorable> on FluentProvider<T> {
       );
     }
 
+    if (after != null) _checkCursorValues(after, column, keys);
+
     final String dir = descending ? 'DESC' : 'ASC';
     final List<String> orderColumns = [column, ...keys.where((k) => k != column)];
     final FluentFilter? position = after == null ? null : _afterCursor(after, column, keys, descending);
@@ -368,6 +370,45 @@ extension FluentRead<T extends FluentStorable> on FluentProvider<T> {
     if (model is FluentSoftDeletable && column == (model as FluentSoftDeletable).softDeleteColumn) return (model as FluentSoftDeletable).deletedAt?.millisecondsSinceEpoch;
     throw FluentLog.raise(
       FluentArgumentException('orderBy', '"$column" of "$tableName" is not a field of the model, so a cursor cannot be built', hint: 'Order by a column that buildJson writes.'),
+      tag: '$tableName:findPage',
+    );
+  }
+
+  /// Checks the stored values of [cursor] against the columns of this table before any SQL is built: every key column
+  /// is present, each value is one SQLite stores (null, number, text, bytes), and a numeric column does not get
+  /// text that is no number (a cursor of another table, another version, or edited by hand). A `DateTime` column also
+  /// takes ISO text (its stored form in `iso8601` tables); a converter column is checked by its SQL type. Throws a
+  /// [FluentArgumentException] with a hint.
+  void _checkCursorValues(FluentCursor cursor, String column, List<String> keys) {
+    final Map<String, FluentDbDataType?> types = _columnAffinities;
+    final List<String> missing = [for (final String k in keys) if (!cursor.key.containsKey(k)) k];
+    String? problem;
+    if (missing.isNotEmpty) {
+      problem = 'it has no value for the key column${missing.length == 1 ? '' : 's'} ${missing.map((k) => '"$k"').join(', ')}';
+    } else {
+      for (final (String col, Object? value) in [(column, cursor.value), for (final String k in keys) (k, cursor.key[k])]) {
+        final bool storable = value == null || value is num || value is String || (value is List && value.every((b) => b is int));
+        // The form the column really stores: a converter decides by its SQL type (the declared type may differ); a
+        // DateTime column holds epoch milliseconds or ISO text (`FluentDateTimeFormat.iso8601`), whatever its affinity.
+        final FluentConverter<Object?, Object?>? converter = _converters[col];
+        final FluentDbDataType? type = converter != null ? converter.sqlType : types[col];
+        final bool dateText = converter == null && _valueKinds[col] == FluentValueKind.dateTime && value is String && DateTime.tryParse(value.trim()) != null;
+        final bool numeric = (type == FluentDbDataType.integer || type == FluentDbDataType.real) && !dateText;
+        if (!storable) {
+          problem = 'the value of "$col" is a ${value.runtimeType}, not a stored value (null, number, text or bytes)';
+        } else if (numeric && value is String && _FluentCrudHelper._parseNumber(value) == null) {
+          problem = 'the value of "$col" is text, but the column stores numbers';
+        }
+        if (problem != null) break;
+      }
+    }
+    if (problem == null) return;
+    throw FluentLog.raise(
+      FluentArgumentException(
+        'after',
+        'the cursor does not fit "$tableName": $problem',
+        hint: 'Pass the FluentPage.next of a findPage call on this table (or FluentCursor.decode of its encode()); start again without after: when the cursor is from an older version.',
+      ),
       tag: '$tableName:findPage',
     );
   }

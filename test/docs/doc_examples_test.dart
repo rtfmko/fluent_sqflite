@@ -453,6 +453,28 @@ void main() {
     FluentDb.configure(const FluentConfig());
   });
 
+  test('expired rows, logging sink and init without config (writing guide, setup and troubleshooting skills)', () async {
+    final Post session = Post(title: 's')..timeToLive = const Duration(hours: 1);
+    await posts.save(session);
+    db.clock.advance(const Duration(hours: 2));
+    expect(await posts.updateById(session.primaryKeyValue, {'rating': 3.0}), 0, reason: 'an expired row is missing');
+    expect(await posts.updateById(session.primaryKeyValue, {'rating': 3.0}, includeExpired: true), 1);
+    expect(await posts.updateWhere(FluentFilter.eq('title', 's'), {'rating': 4.0}, includeExpired: true), 1);
+
+    FluentDb.setupLogging(onRecord: (_) {});
+    FluentDb.setupLogging(removeOnRecord: true); // onRecord: null would keep the sink
+
+    await db.close();
+    FluentDb.configure(const FluentConfig(trashRetention: Duration(days: 3)));
+    await FluentDb.init([FluentGroup(dbKey: FluentDbKey('docs_init'), providerList: [PostProvider()], inMemory: true)]);
+    try {
+      expect(FluentDb.config.trashRetention, const Duration(days: 3), reason: 'init without config keeps what configure set');
+    } finally {
+      await FluentDb.close();
+      FluentDb.configure(const FluentConfig());
+    }
+  });
+
   test('sync examples (sync guide and skill)', () async {
     final FluentRemoteEvent<Post> event = await posts
         .watchRemote(fetch: () async => const FluentRemoteResponse<Post>.failed(503), maxAge: const Duration(minutes: 5), keepWatching: false)

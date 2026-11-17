@@ -19,7 +19,8 @@ extension FluentRemove<T extends FluentStorable> on FluentProvider<T> {
   /// removes them for good); other models are removed permanently. [tag] marks the change event.
   ///
   /// Afterwards `item.deletedAt` holds the stamp stored for the row (a row already in the trash keeps its first
-  /// stamp and returns 0); a model without a stored row keeps its `deletedAt`.
+  /// stamp and returns 0); a model without a stored row keeps its `deletedAt`. The model changes once the write is
+  /// committed: inside a `FluentDb.transaction` that rolls back, it keeps its old `deletedAt`.
   ///
   /// ```dart
   /// await notes.delete(note); // note.isDeleted == true
@@ -83,13 +84,15 @@ extension _FluentRemoveRows<T extends FluentStorable> on FluentProvider<T> {
     return found;
   }
 
-  /// Gives the models of rows in the trash the stamp that is stored; models without a row keep their `deletedAt`.
-  void _applyDeleteStamps(List<T> items, Map<String, DateTime?> stamps) {
-    for (final T item in items) {
+  /// Gives the models the stamp that is stored for their rows (`null` for a live row); models without a row keep
+  /// their `deletedAt`. [items] may be typed by a base type (`FluentDb.deleteAll`): models without soft delete are
+  /// skipped.
+  void _applyDeleteStamps(List<FluentStorable> items, Map<String, DateTime?> stamps) {
+    for (final FluentStorable item in items) {
       final Object? id = item.primaryKeyValue;
-      if (id == null) continue;
+      if (id == null || item is! FluentSoftDeletable) continue;
       final String key = _tupleKey(_normalizeKey(id));
-      if (stamps.containsKey(key)) (item as FluentSoftDeletable).deletedAt = stamps[key];
+      if (stamps.containsKey(key)) item.deletedAt = stamps[key];
     }
   }
 

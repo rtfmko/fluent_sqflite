@@ -110,7 +110,8 @@ void main() {
       expect(a.toString(), isNot(contains('readOnly')));
       expect(a.toString(), isNot(contains('directory')));
       final b = FluentGroup(dbKey: FluentDbKey('db'), providerList: [notes], directory: '/x', readOnly: true);
-      expect(b.toString(), contains('directory: /x'));
+      expect(b.toString(), contains('directory: <path hidden>')); // a path: shown only with showSqlArguments
+      expect(b.toString(), isNot(contains('/x')));
       expect(b.toString(), contains('readOnly: true'));
     });
   });
@@ -485,10 +486,10 @@ void main() {
       const utc = FluentIsoDateTimeConverter();
       final local = DateTime(2026, 5, 6, 7, 8, 9);
       expect(utc.sqlType, FluentDbDataType.text);
-      expect(utc.toSql(local), local.toUtc().toIso8601String());
+      expect(utc.toSql(local), fluentIsoText(local.toUtc()));
       expect(utc.fromSql(utc.toSql(local)), local.toUtc());
-      expect(const FluentIsoDateTimeConverter(toUtc: false).toSql(local), local.toIso8601String());
-      expect(const FluentIsoDateTimeConverter(toUtc: false).fromSql(local.toIso8601String()), local);
+      expect(const FluentIsoDateTimeConverter(toUtc: false).toSql(local), fluentIsoText(local));
+      expect(const FluentIsoDateTimeConverter(toUtc: false).fromSql(fluentIsoText(local)), local);
       expect(() => utc.fromSql('garbage'), throwsFormatException);
     });
 
@@ -543,15 +544,15 @@ void main() {
     });
 
     test('limit, order, depth and lazy modify the weight', () {
-      expect(task(FluentDbAction.find).staticWeight, 40);
+      expect(task(FluentDbAction.find).staticWeight, 80); // unbounded find, also without a helper
       expect(task(FluentDbAction.find, helper: TableHelper()).staticWeight, 80); // unbounded find
       expect(task(FluentDbAction.find, helper: TableHelper(limit: 10)).staticWeight, 25);
       expect(task(FluentDbAction.find, helper: TableHelper(limit: 101)).staticWeight, 50);
       expect(task(FluentDbAction.find, helper: TableHelper(limit: 100)).staticWeight, 25);
       expect(task(FluentDbAction.find, helper: TableHelper(orderBy: 'a')).staticWeight, 100);
-      expect(task(FluentDbAction.find, maxDepth: 3).staticWeight, 40 + 90);
-      expect(task(FluentDbAction.find, maxDepth: 0).staticWeight, 40);
-      expect(task(FluentDbAction.find, ignoreLazy: true).staticWeight, 60);
+      expect(task(FluentDbAction.find, maxDepth: 3).staticWeight, 80 + 90);
+      expect(task(FluentDbAction.find, maxDepth: 0).staticWeight, 80);
+      expect(task(FluentDbAction.find, ignoreLazy: true).staticWeight, 100);
     });
 
     test('isWriteOp / isStreamOp, also for SQL that changes data', () {
@@ -636,7 +637,7 @@ void main() {
       expect(plain, isNot(contains('policy')));
       expect(plain, isNot(contains('tag')));
       expect(plain, isNot(contains('merged')));
-      expect(plain, contains('weight: 40/0}'));
+      expect(plain, contains('weight: 80/0}'));
       final full = FluentTask(
         action: FluentDbAction.save,
         table: 't',

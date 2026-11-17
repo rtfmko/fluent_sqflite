@@ -6,19 +6,21 @@ When a bug here is fixed, add a regression test and move the item to
 
 ## Open
 
-1. **LOW.** A damaged `_fs_metadata` value restores the instant of a `DateTime` but loses its UTC flag: the model gets
-   a local time (a test in `test/provider/crud` pins the current behaviour).
-2. **LOW.** `FluentTask.staticWeight`: a `find` without a helper weighs 40, with any helper and no `limit` 80. The
-   unbounded-find weight is added only when a helper exists, so an unfiltered `find` looks cheaper than a filtered one.
-3. **LOW.** `findPage` cursor values on a column with a converter are not checked against the column type; a wrong
-   value fails later in SQL instead of with a typed error and a hint.
-4. **LOW.** The maintenance timers (trash purge, `PRAGMA optimize`) are real `Timer.periodic`, not `FluentClock`, so
-   tests cannot move them with `db.clock`.
+None (audit 2 is fixed, see `FIXED_ISSUES.md`).
 
 ## Known limits (decided, not bugs)
 
 - Only triggers recreated by a rebuild are checked (`brokenTrigger`); a SQLite build that compiles triggers only when
   they fire reports nothing.
+- A row whose `_fs_metadata` is unreadable and no intact row of the table showed its tags reads a `DateTime` as
+  local time (same instant); the damage is reported as `mappingValue`, re-saving the row fixes it.
+- A model rebuilt from a read without some relations (e.g. `copyWith`) does not carry `unloadedRelations`: saving it
+  treats its empty lists as "remove all" (the read's own model is protected).
+- `purgeArchivedColumns` inside a transaction (or a task) of the database is skipped with `ignoredCall`: the purge
+  needs the main connection and switches foreign keys, which a transaction cannot.
+- ISO-8601 values of plain columns without a declared `DateTime` kind are not padded at start (only metadata knows
+  their type); they get a `mappingValue` warning when read.
+- `-0.0` is stored as `0.0` (SQLite normalizes it).
 - A paged `watchRemote` holds the answered keys of all pages until the last page.
 - An edited `onMigrate` body cannot be detected (a running app cannot read its code).
 - A bootstrapped archive's retention starts at adoption (no older date exists).

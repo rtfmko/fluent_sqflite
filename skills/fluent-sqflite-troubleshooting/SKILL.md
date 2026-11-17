@@ -26,7 +26,9 @@ metadata:
 - The library never crashes over a wrong call or setting: it falls back and reports an issue. Do not wrap calls in
   try / catch to hide warnings; fix what the `fix` says, or mute the key when it does not apply.
 - Turn on details only while debugging: `FluentDb.setupLogging(level: FluentLogLevel.debug)` (`sql` shows statements;
-  arguments stay hidden unless `showSqlArguments: true`).
+  arguments and paths (`<path hidden>`) stay hidden unless `showSqlArguments: true`). `setupLogging(removeOnRecord: true)`
+  removes the `onRecord` sink (`onRecord: null` keeps it). `storedFormatAdopted` is an `autoFix`: values written by an
+  earlier version were converted once at start; nothing to do.
 
 - `FluentLogRecord.error` / `FluentIssue.error` of a foreign error is a `FluentRedactedError` (`type`, redacted
   `message`) unless `FluentLog.showSqlArguments` is on; send that to crash reporters.

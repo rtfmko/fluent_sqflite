@@ -7,7 +7,7 @@ and no transaction: every table keeps a fingerprint of its model, steps, relatio
 | Change in the model | What happens |
 |---|---|
 | new field | column added (`NOT NULL` without default stays nullable until every row has a value) |
-| `oldName: 'x'` on a column | column renamed, data kept |
+| `oldName: 'x'` on a column | column renamed, data kept (a new column under the old name is added empty; two columns with the same `oldName`: the first gets the data, the second stays empty with a `schemaFallback`) |
 | type / key / constraint / `CHECK` changed | table rebuilt with its data, triggers, views and your own indexes |
 | field removed | column **archived** as `__fluent_removed_<name>_r<rev>` (renamed in place when SQLite can, deleted after `archiveRetention`, default 30 days) |
 | new index | created |
@@ -40,6 +40,11 @@ the issue shows `DROP TRIGGER IF EXISTS …` plus your original SQL to adapt. Sw
 on checks the data at that start: rows that point nowhere are reported (`danglingReferences`) and cleaned by the
 start-up maintenance. Tables and columns a 1.x database named by the old naming rule are renamed at the first start
 (`legacyNameAdopted`, a `renameTable` change in the plan).
+
+A step that leaves a model column missing fails the start (`schemaConflict`) and nothing changes. The fast start also
+checks that the full-text module is there (a copied file or a restored backup may come from a device without it). Type
+values and unquoted indexes of a 1.x database are adopted only when their table was renamed; a duplicate 1.x column index
+is dropped. Soft-delete stamps and ISO-8601 dates stored in an older form are rewritten once (`storedFormatAdopted`).
 
 ## One-time steps
 

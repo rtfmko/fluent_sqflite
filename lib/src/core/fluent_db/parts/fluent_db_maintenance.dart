@@ -7,16 +7,48 @@ part of '../fluent_db.dart';
 /// Maintenance of [FluentDb]: the start-up clean-up (expired rows, dangling references), [FluentDb.cleanOrphans] and
 /// the periodic trash purge.
 extension _FluentDbMaintenance on FluentDb {
-  /// [FluentDb.cleanOrphans] for one database: every table in one transaction (joined when one is open).
+  /// [FluentDb.cleanOrphans] for one database: every table in one transaction, queued as a write (calls made before
+  /// it finish first, nothing runs beside it), or joined when the caller's transaction of [dbName] is open. Every
+  /// table it changed publishes a change event (after the commit inside a transaction). Inside another task of
+  /// [dbName] it is skipped and reported (`ignoredCall`): queued, it would wait for that task.
   Future<void> _cleanOrphans(String dbName, List<FluentProvider> providers) async {
     if (providers.isEmpty) return;
+    final FluentTransactionScope? open = FluentTransactionScope.of(dbName);
+    if (open == null && FluentEngine().holdsDatabase(dbName)) {
+      FluentLog.issue(
+        FluentIssueKind.ignoredCall,
+        'FluentDb.cleanOrphans was called from inside a running task of "$dbName"; nothing was done there.',
+        database: dbName,
+        subject: 'cleanOrphans',
+        tag: 'FluentDb:cleanOrphans',
+        hint: 'Queued, it would wait for the running task, which waits for it. Call it inside FluentDb.transaction (it '
+            'then runs in the transaction) or after the task completed.',
+      );
+      return;
+    }
     FluentLog.debug('Manual orphan cleanup started', tag: 'FluentDb:maintenance', context: {'dbName': dbName});
+    // The tables whose rows changed (deleted, or their reference cleared).
+    Future<List<FluentProvider>> clean() => FluentTransactionScope.inTransaction(providers.first.db, dbName, (txn) async {
+      Future<int> changes() async => Sqflite.firstIntValue(await txn.rawQuery('SELECT total_changes()')) ?? 0;
+      final List<FluentProvider> changed = [];
+      for (final FluentProvider dao in providers) {
+        final int before = await changes();
+        await dao.cleanupOrphans(txn);
+        if (await changes() != before) changed.add(dao);
+      }
+      return changed;
+    });
     try {
-      await FluentTransactionScope.inTransaction(providers.first.db, dbName, (txn) async {
-        for (final FluentProvider dao in providers) {
-          await dao.cleanupOrphans(txn);
+      if (open != null) {
+        for (final FluentProvider dao in await clean()) {
+          open.pendingEvents.add((FluentTask(action: FluentDbAction.update, table: dao.tableName, dbName: dbName), dao, 1));
         }
-      });
+      } else {
+        final Object? changed = await FluentEngine().dispatch(FluentTask(action: FluentDbAction.transaction, dbName: dbName, data: clean));
+        for (final FluentProvider dao in changed! as List<FluentProvider>) {
+          FluentEngine().broadcastSystemAction(FluentDbAction.update, dao);
+        }
+      }
       FluentLog.info('Database "$dbName": dangling references removed.', tag: 'FluentDb:maintenance');
     } catch (e, st) {
       // The caller receives the error: logged once on its way (nothing was changed).

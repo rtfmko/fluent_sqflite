@@ -80,6 +80,11 @@ class FluentEngine {
   @internal
   bool get isInsideTask => ((Zone.current[_runningTaskKey] as _RunningTask?)?.running ?? false) || FluentTransactionScope.current != null;
 
+  /// Whether the current code runs inside a running task of [dbName] (or one started from it) without that
+  /// database's open transaction: a queued write of [dbName] would start only after that task, which waits for it.
+  @internal
+  bool holdsDatabase(String dbName) => (Zone.current[_runningTaskKey] as _RunningTask?)?.holds(dbName) ?? false;
+
   /// The zone each queued task was called from, by task id: the task runs in a copy of it without the library's own
   /// scopes (see [_taskZone]), never in the zone of whatever code happened to start it.
   final Map<int, Zone> _callerZones = {};
@@ -317,6 +322,16 @@ class FluentEngine {
     }
   }
 
+  /// Makes the settings of the databases known before their schema sync (`init`), so hints raised while the schema is
+  /// applied follow each database's own diagnostics; [initMultiple] replaces them. An empty map forgets them (a failed
+  /// init).
+  @internal
+  void preloadDbConfigs(Map<String, FluentDbConfig> configs) {
+    _configs
+      ..clear()
+      ..addAll(configs);
+  }
+
   /// Applies the global settings (at `init` and on `FluentDb.configure`).
   void applyConfig(FluentConfig config) => _config = config;
 
@@ -531,6 +546,13 @@ class FluentEngine {
   ///   `IN (...)` query.
   void _processNext() {
     if (_isGlobalPaused) return;
+    // Re-entered while the tasks of a pass start (an observer hook or a synchronous log sink called the database):
+    // the tasks taken by that pass are not counted as running yet, so a pass now could start reads before a taken
+    // write. The running pass schedules again once all of its tasks are counted.
+    if (_starting) {
+      _scheduleAgain = true;
+      return;
+    }
 
     final List<FluentTask> toStart = [];
     for (final MapEntry<String, List<FluentTask>> entry in _queues.entries) {
@@ -566,8 +588,24 @@ class FluentEngine {
       tasks.removeWhere(taken.contains);
     }
 
-    toStart.forEach(_dispatchToMain);
+    if (toStart.isEmpty) return;
+    _starting = true;
+    try {
+      toStart.forEach(_dispatchToMain);
+    } finally {
+      _starting = false;
+    }
+    if (_scheduleAgain) {
+      _scheduleAgain = false;
+      _processNext();
+    }
   }
+
+  /// Whether [_processNext] is starting the tasks it took (see there).
+  bool _starting = false;
+
+  /// Whether [_processNext] was called while [_starting]: it runs again right after.
+  bool _scheduleAgain = false;
 
   /// Order of reads that may run now: aged priority, then aged weight, then arrival.
   int _readOrder(FluentTask a, FluentTask b) {
@@ -591,12 +629,15 @@ class FluentEngine {
   /// `syncWrite` and `conflictOn`.
   /// Only directly adjacent tasks are merged, so merging never changes the order of operations. A save that writes a
   /// row an earlier call of the batch writes too (same key, or same `conflictOn` value) ends the batch: one call
-  /// writes a repeated key once, which would drop an earlier call's patch and give both callers one outcome.
+  /// writes a repeated key once, which would drop an earlier call's patch and give both callers one outcome. So does a
+  /// save of a model instance an earlier call saves too (a double tap on a new model without a key yet): one call
+  /// would insert it twice, the second save must update the row the first one inserted.
   List<FluentTask> _adjacentSaves(List<FluentTask> tasks) {
     final FluentTask head = tasks.first;
     if (head.action != FluentDbAction.save) return [head];
     final List<FluentTask> parts = [head];
     Set<String>? written; // match values of the rows of [parts], built when a second save is in sight
+    final Set<Object?> saved = Set.identity(); // the model instances of [parts]
     List<String>? match;
     for (int i = 1; i < tasks.length; i++) {
       final FluentTask next = tasks[i];
@@ -614,18 +655,26 @@ class FluentEngine {
       written ??= _matchKeys(head, match);
       final Set<String>? own = _matchKeys(next, match);
       if (own == null || written == null || own.any(written.contains)) break;
+      if (saved.isEmpty) saved.addAll(_itemsOf(head));
+      final List<Object?> items = _itemsOf(next);
+      if (items.any(saved.contains)) break;
+      saved.addAll(items);
       written.addAll(own);
       parts.add(next);
     }
     return parts;
   }
 
-  /// The values of the [match] columns of every row [task] saves (rows without them insert new keys and are left
-  /// out); `null` when an item is not a model or its `buildJson` throws, so the task is not merged (it then runs alone
-  /// and fails through the executor's error handling, never inside the scheduler).
+  /// The items [task] saves.
+  static List<Object?> _itemsOf(FluentTask task) => task.data is List ? task.data as List : [task.data];
+
+  /// The values of the [match] columns of every row [task] saves, as the row writer writes them (a key generated by an
+  /// earlier insert or replaced by a `conflictOn` match, kept by the library, counts too); rows without them insert
+  /// new keys and are left out. `null` when an item is not a model or its `buildJson` throws, so the task is not
+  /// merged (it then runs alone and fails through the executor's error handling, never inside the scheduler).
   static Set<String>? _matchKeys(FluentTask task, List<String> match) {
     final Set<String> keys = {};
-    for (final Object? item in task.data is List ? task.data as List : [task.data]) {
+    for (final Object? item in _itemsOf(task)) {
       if (item is! FluentStorable) return null;
       final Map<String, dynamic> json;
       try {
@@ -633,7 +682,7 @@ class FluentEngine {
       } catch (_) {
         return null; // user code; the save reports the error when it runs
       }
-      final List<Object?> values = [for (final String c in match) json[c]];
+      final List<Object?> values = [for (final String c in match) item.keyValueOf(c, json[c])];
       if (values.contains(null)) continue;
       keys.add(values.map(fluentValueKey).join('|'));
     }
@@ -732,7 +781,7 @@ class FluentEngine {
   /// and completes its caller.
   Future<void> _runInTransaction(FluentTask task, FluentTransactionScope scope, Zone caller) async {
     final Stopwatch sw = Stopwatch()..start();
-    final _RunningTask mark = _RunningTask();
+    final _RunningTask mark = _RunningTask(task.dbName, caller[_runningTaskKey] as _RunningTask?);
     try {
       final FluentProvider provider = FluentDbInternals.providerForTable(task.table, dbName: task.dbName);
       final Object? result = await _taskZone(caller, mark, null).run(() => scope.run(() => provider.internalExecute(task)));
@@ -790,7 +839,8 @@ class FluentEngine {
     // A read borrows a pooled read-only connection (it never starts before an earlier write committed).
     final List<Database>? free = task.isWriteOp ? null : _freeReaders[db];
     final Database? reader = free == null || free.isEmpty ? null : free.removeLast();
-    final _RunningTask mark = _RunningTask();
+    final Zone base = caller ?? Zone.current;
+    final _RunningTask mark = _RunningTask(db, base[_runningTaskKey] as _RunningTask?);
     void done() {
       mark.running = false;
       _observe('onDone', () => FluentAnalyzer().onDone(task, _nowMs - now));
@@ -805,18 +855,20 @@ class FluentEngine {
 
     // Started and finished in the caller's zone without the library's scopes: code continuing from another task
     // (a read's connection, a transaction, a running mark) never leaks into this one or into what `done` starts.
-    _taskZone(caller ?? Zone.current, mark, reader == null ? null : FluentReadScope._(db, reader)).run(() {
+    _taskZone(base, mark, reader == null ? null : FluentReadScope._(db, reader)).run(() {
       _executeInMain(task).then((_) => done(), onError: (Object _) => done());
     });
   }
 
   /// A copy of [base] for one task: marked as running ([mark]), with the task's read connection ([read], or none),
-  /// and without any transaction scope, deferred logging or touched-table collector of the code that called it.
+  /// and without the deferred logging or touched-table collector of the code that called it. Of the caller's open
+  /// transactions only the one of the task's own database is removed: a transaction on another database the task was
+  /// called from stays visible, so a write to it joins it instead of queueing behind it (which would wait forever).
   static Zone _taskZone(Zone base, _RunningTask mark, FluentReadScope? read) => base.fork(
     zoneValues: {
       _runningTaskKey: mark,
       FluentReadScope._zoneKey: read,
-      FluentTransactionScope._zoneKey: null,
+      FluentTransactionScope._zoneKey: FluentTransactionScope._withoutDb(base, mark.dbName),
       FluentLog.deferKey: null,
       _touchedKey: null,
     },
@@ -1178,8 +1230,11 @@ class FluentEngine {
     return false;
   }
 
-  Future<void> _clearTables(Database db) async {
-      await db.transaction((txn) async {
+  Future<void> _clearTables(Database db) => db.transaction(_emptyTables);
+
+  /// Empties every user table and the sync bookkeeping through [txn] (see [_clearDatabase]).
+  Future<void> _emptyTables(DatabaseExecutor txn) async {
+      {
         // `_` is a wildcard in LIKE: escape it, or user tables like "myfluent_items" would be skipped.
         final List<Map<String, dynamic>> tables = await txn.rawQuery(
           r"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite\_%' ESCAPE '\' AND name NOT LIKE '\_\_fluent\_%' ESCAPE '\'",
@@ -1203,12 +1258,28 @@ class FluentEngine {
           left = failed;
         }
         // An emptied synced table is pulled in full again, and watchRemote fetches again.
-        for (final String bookkeeping in const ['__fluent_sync_state', '__fluent_fetch_state']) {
+        for (final String bookkeeping in const ['__fluent_sync_state', '__fluent_fetch_state', '__fluent_tombstones']) {
           if ((await txn.rawQuery("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", [bookkeeping])).isNotEmpty) {
             await txn.delete(bookkeeping.quotedIdentifier);
           }
         }
-      });
+      }
+  }
+
+  /// `FluentDb.clear` of [scope]'s database inside its open transaction (queued, the clear would wait for the
+  /// transaction, and the transaction for it): empties the tables in a savepoint (rolled back alone on error); the
+  /// change events of [providers] and the forgotten query costs follow the commit.
+  @internal
+  Future<void> clearInTransaction(FluentTransactionScope scope, Iterable<FluentProvider> providers) async {
+    try {
+      await scope.savepoint(() => _emptyTables(scope.txn));
+    } on DatabaseException catch (e, s) {
+      throw _clearError(scope.dbName, e, s);
+    }
+    scope._afterCommit.add(() => _observe('forget', () => FluentTableStatsTracker().forget(db: scope.dbName)));
+    for (final FluentProvider provider in providers) {
+      scope.pendingEvents.add((FluentTask(action: FluentDbAction.clearTable, table: provider.tableName, dbName: scope.dbName), provider, true));
+    }
   }
 
   /// The typed error of a database that could not be emptied: a constraint (rows still referenced, a trigger that
@@ -1362,5 +1433,32 @@ class FluentEngine {
 /// The mark of a running engine task in its zone (see `FluentEngine._runningTaskKey`): [running] turns false when the
 /// task ends, so code it left behind (timers, listeners) no longer counts as inside the task.
 class _RunningTask {
+  /// A mark for a task of [dbName] started from code that ran inside [outer] (kept only while it runs).
+  _RunningTask(this.dbName, _RunningTask? outer) : outer = outer?._running;
+
+  /// The database of the task.
+  final String dbName;
+
+  /// The task the code that started this one ran in, if any (a task started from inside another task waits for it).
+  final _RunningTask? outer;
+
   bool running = true;
+
+  /// This mark or the nearest outer one that still runs.
+  _RunningTask? get _running {
+    _RunningTask? mark = this;
+    while (mark != null && !mark.running) {
+      mark = mark.outer;
+    }
+    return mark;
+  }
+
+  /// Whether this task, or a running task it was started from, belongs to [db]: a queued write of [db] would wait
+  /// for it, and it for the write.
+  bool holds(String db) {
+    for (_RunningTask? mark = _running; mark != null; mark = mark.outer?._running) {
+      if (mark.dbName == db) return true;
+    }
+    return false;
+  }
 }

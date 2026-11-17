@@ -18,9 +18,12 @@ metadata:
 
 - Change the **model**, not the database: the schema is synchronized on every start (only the difference is applied).
   Never run `ALTER TABLE` / `CREATE TABLE` yourself for model tables.
-- Rename a field with `oldName` on its column; otherwise a rename is "remove + add" and the old data is only archived.
+- Rename a field with `oldName` (main constructor `FluentDbColumn(name:, type:, oldName:)`; factories have none); otherwise a rename is "remove + add" and the old data is only archived.
 - A removed field is archived (`__fluent_removed_<name>_r<rev>`), not dropped. Drop it on purpose with
   `FluentDbMigration(id: ..., dropColumns: ['x'])`; bring it back with `restoreColumns: {'x': 'y'}`.
+- `oldName` plus a new column under the old name: the data moves, the new column starts empty. Two columns with the same
+  `oldName`: the first gets the data, the second stays empty (`schemaFallback`). A step that leaves a model column missing
+  fails the start (`schemaConflict`), nothing changes.
 - A new `NOT NULL` field needs a `defaultValue`, or a step that fills it; until every row has a value it stays nullable.
 - Data changes go into one-time steps with a unique `version` or `id`. Never edit or reorder a step that may have
   run on a device: add a new step.
@@ -47,7 +50,7 @@ metadata:
 ```dart
 // Rename a column (data kept)
 @override
-List<FluentDbColumn> get missingColumns => [FluentDbColumn.text('display_name', oldName: 'nick')];
+List<FluentDbColumn> get missingColumns => [FluentDbColumn(name: 'display_name', type: FluentDbDataType.text, oldName: 'nick')];
 
 // A new required field with a default
 FluentDbColumn.text('status', isNotNull: true, defaultValue: 'draft'),
@@ -101,7 +104,7 @@ FluentGroup(..., onMigrationPlan: (plan) => !plan.losesData); // refuse a start 
 In tests: `expect((await db.plan([ProviderV2()])).losesData, isFalse)` (`fluent_sqflite_test`).
 
 `plan.changes` are `FluentSchemaChange`s (`kind`, `table`, `subject`, `description`, `losesData`); kinds
-(`FluentSchemaChangeKind`): `createTable`, `addColumn`, `renameColumn`, `changeColumn`, `archiveColumn`, `dropColumn`,
+(`FluentSchemaChangeKind`): `createTable`, `addColumn`, `renameTable`, `renameColumn`, `changeColumn`, `archiveColumn`, `dropColumn`,
 `purgeArchive`, `restoreColumn`, `rebuildTable`, `primaryKey`, `constraints`, `createIndex`, `dropIndex`,
 `quarantineRows`, `runStep`, `linkTable`, `moveRelationData`, `fullText`, `viewOrTriggerLost` (counts in `losesData`). `plan.failure` holds the error a start would
 hit. Removed columns: `FluentGroup(removedColumns: FluentColumnRemoval.archive)` (default) or `drop`.

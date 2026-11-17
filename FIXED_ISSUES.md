@@ -4,6 +4,102 @@ Bugs found and fixed, and work finished, during the 2.0 rework, kept as history.
 planned work in `TODO.md`. When a known bug is fixed (with a test),
 move it here.
 
+## Audit 2 (2026-11-17, fixed in 2.0.0-dev.2)
+
+Eight areas audited in parallel, every finding checked against the code; all fixed with a regression test and edge
+cases. Tests: `test/provider/relations/relations_audit2_test.dart`, `test/engine/engine_audit2_test.dart`,
+`test/provider/schema/schema_audit2_test.dart`, `test/provider/crud/crud_audit2_test.dart`,
+`test/provider/sync/sync_audit2_test.dart`, `test/db/lifecycle_audit2_test.dart`,
+`test/provider/mapping/mapping_audit2_test.dart` (numbered like the items below).
+
+### Relations
+1. **HIGH.** Saving a model loaded through a `limit` / `where` relation removed the children the view did not show.
+   Now a `limit` relation removes nothing, a `where` relation only rows matching it, trashed / expired children and
+   targets are never "missing". Found on the way: links to trashed tags were deleted by a save of the owner.
+2. **HIGH.** Saving an `includeDeleted` list restored its trashed children; they now stay in the trash.
+3. **MEDIUM.** The writer ignored `unloadedRelations` and deleted children of relations that were never loaded.
+4. **MEDIUM-HIGH.** `findParents` through `oneOf` returned parents of other types (or threw); now filtered by type.
+5. **Decision.** `insertOnly` on an existing root writes nothing for its relations.
+
+### Engine and transactions
+6. **HIGH.** Two adjacent saves of the same new model merged and inserted two rows; one instance never merges twice.
+7. **HIGH.** Keys generated in a rolled-back transaction / savepoint stayed on models (rowid reuse overwrote another
+   row); `FluentTransactionScope.whenRolledBack` takes them back. Found on the way: a failed merged batch rerun call
+   by call kept the keys of its rolled-back attempt.
+8. **HIGH.** `FluentDb.clear()` / `purgeArchivedColumns()` inside a transaction deadlocked. `clear` runs in the open
+   transaction; inside another task (and `purgeArchivedColumns` inside a transaction) the call is skipped with
+   `ignoredCall`.
+9. **HIGH.** A transaction on A inside a transaction on B deadlocked on the next write to B: transaction scopes are
+   kept per database, a task clears only its own.
+10. **MEDIUM.** Merged patch saves of one row lost a patch (`_matchKeys` now uses `keyValueOf`).
+11. **LOW-MEDIUM.** A re-entrant `_processNext` could start reads before a taken write; nested passes are deferred.
+12. **LOW-MEDIUM.** `cleanOrphans` ran outside the queue without events; now a queued write with `update` events.
+13. **LOW.** The tuner counted an earlier run's auto index again (`_servedShapes` refilled at start).
+
+### Schema and migrations
+14. **HIGH.** `oldName` + a new column under the old name broke the table; renames are resolved first (chains work),
+    the freed name is added empty, a fast start with a snapshot missing a model column takes the full sync, and a
+    table missing a model column after the steps is refused (`schemaConflict`).
+15. **HIGH, data loss.** Children of a parent quarantined in `__fluent_rejected_*` were deleted by the start-up orphan
+    clean-up; references into quarantine tables are kept and reported (`danglingReferences`).
+16. **MEDIUM.** The fast start ignored a missing FTS module; it now compares the stored definition with this SQLite.
+17. **LOW.** 1.x type values were adopted on every full sync; now only with their table's rename. Unquoted 1.x
+    indexes are the model's; found on the way: duplicate 1.x column indexes of renamed tables are dropped.
+
+### CRUD
+18. **MEDIUM, regression of the dev.2 cursor check.** ISO text on DateTime columns of `iso8601` tables is accepted.
+19. **MEDIUM.** `FluentDb.deleteAll` / `Iterable.deleteAll()` / base-type deletes set `deletedAt` now.
+20. **MEDIUM.** `delete` / `restore` change the models after the commit (`whenCommitted`).
+21. **MEDIUM.** The soft-delete stamp is always epoch milliseconds; old ISO stamps are converted once at start
+    (`storedFormatAdopted`, new issue kind).
+22. **LOW.** The `watch` expiry timer follows the library clock (`FluentClockAlarm`).
+23. **LOW.** Updates by key skip expired rows (`includeExpired` on `updateById` / `updateWhere`); upsert renews an
+    expired row, insertOnly writes over it.
+24. **LOW.** Active-record calls all resolve the provider by the runtime type.
+
+### Sync
+25. **MEDIUM.** `FluentDb.clear()` kept tombstones (a next user pushed old deletions).
+26. **LOW-MEDIUM.** `clearTable()` kept the table's tombstones; they are dropped and counted.
+27. **MEDIUM.** A save of a tombstoned key kept the tombstone (push sent upsert + delete); it is dropped in the write.
+28. **MEDIUM, confirmed.** `replaceLocally` / `clearLocally` removed unsynced children through FK cascades; found on
+    the way: the same through `oneOf` references. Parents of unsynced descendants are kept.
+
+### Lifecycle, settings, logging
+29. **MEDIUM.** `init` after a queued `close` / `restart` shared the pending init and was dropped.
+30. **MEDIUM.** File paths were not redacted (`<path hidden>` now, also in `FluentGroup.toString`).
+31. **MEDIUM.** Per-database config (diagnostics) was unknown during init.
+32. **LOW-MEDIUM.** Zero / negative intervals made a busy loop; fallback + `configFallback`, no overlapping runs.
+33. **LOW.** `init(config:)` / `planMigrations(config:)` nullable (keep the settings in use); `$e` redacted;
+    `setupLogging(removeOnRecord:)`; the test package resets logging per test; `busy` no longer blocks a recreate.
+
+### Values and mapping
+34. **MEDIUM.** `defaultValue` is stored like a saved value (converter, dateTimeFormat); NaN fails typed.
+35. **MEDIUM.** `aggregate` with groupBy / several min-max keeps the UTC flag.
+36. **LOW.** Cursors round-trip bytes and non-finite doubles; garbage text fails typed.
+37. **LOW.** ISO-8601 text has six fraction digits; old values are padded once at start (`storedFormatAdopted`).
+    Found on the way: `FluentIsoDateTimeConverter` had the same problem.
+38. **LOW.** Unquoted column names with spaces get a quoting hint.
+
+### Docs
+39-40. Fixed by the docs pass (non-compiling `oldName` examples, install line, wording).
+
+## Known bugs of 2.0.0-dev.1 (fixed 2026-11-17, in 2.0.0-dev.2)
+
+1. **LOW.** A damaged `_fs_metadata` value lost the UTC flag of a `DateTime`. Now the tag pairs still readable in the
+   damaged text and the tags intact rows of the table gave the column are used before the column kind
+   (`_FluentRowPlan._seenTags`). Test: `test/provider/mapping/mapping_edges_test.dart` ("damaged metadata keeps the
+   UTC flag"). What is left (no intact row, unreadable text) is a known limit in `KNOWN_BUGS.md`.
+2. **LOW.** `FluentTask.staticWeight`: a `find` without a helper weighed 40, with a helper and no `limit` 80, so an
+   unfiltered find looked cheaper. The unbounded weight now applies with or without a helper. Tests:
+   `test/engine/engine_test.dart` (order of weights), `test/models/models_misc_test.dart`.
+3. **LOW.** `findPage` cursor values were not checked against the columns; a wrong value failed later in SQL (or read
+   a wrong page). Now a cursor with a missing key column, a non-stored value or text for a numeric column fails with
+   a `FluentArgumentException` and a hint before any SQL. Test: `test/provider/crud/pagination_test.dart`.
+4. **LOW.** The maintenance timers (trash purge, `PRAGMA optimize`) were real `Timer.periodic`. Now
+   `FluentClockTimer` runs them by library time: moving `db.clock` runs them, a failing run is reported and the timer
+   keeps going, a clock moved back never stalls it, `close` cancels it. Tests:
+   `test/db/fluent_db_lifecycle_edges_test.dart` (group "timers").
+
 ## Audit 1 (2026-11-04, was `KNOWN_BUGS.md`)
 
 The item numbers are used by `test/regressions/known_bugs_test.dart`.

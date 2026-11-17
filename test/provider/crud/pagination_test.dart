@@ -61,6 +61,20 @@ void main() {
     await expectLater(posts.findPage(orderBy: 'nope'), throwsA(isA<FluentArgumentException>()));
   });
 
+  test('cursor values that do not fit the columns fail with a typed error before any SQL (known bug 3)', () async {
+    final FluentPage<DynamicModel> first = await posts.findPage(orderBy: 'score', limit: 5);
+    final FluentCursor good = first.next!;
+    Matcher refused(String part) => throwsA(isA<FluentArgumentException>().having((e) => e.message, 'message', contains(part)).having((e) => e.hint, 'hint', isNotNull));
+    await expectLater(posts.findPage(orderBy: 'score', limit: 5, after: FluentCursor(orderBy: 'score', descending: false, value: 'high', key: good.key)), refused('stores numbers'));
+    await expectLater(posts.findPage(orderBy: 'score', limit: 5, after: FluentCursor(orderBy: 'score', descending: false, value: const {'a': 1}, key: good.key)), refused('not a stored value'));
+    await expectLater(posts.findPage(orderBy: 'score', limit: 5, after: const FluentCursor(orderBy: 'score', descending: false, value: 1, key: {'uuid': 'x'})), refused('"id"'));
+    await expectLater(posts.findPage(orderBy: 'score', limit: 5, after: const FluentCursor(orderBy: 'score', descending: false, value: 1, key: {'id': 'seven'})), refused('"id"'));
+    // Text that is a number still fits a numeric column (SQLite converts it); text columns take any text.
+    expect((await posts.findPage(orderBy: 'score', limit: 5, after: FluentCursor(orderBy: 'score', descending: false, value: '${good.value}', key: good.key))).items, isNotEmpty);
+    final FluentPage<DynamicModel> byTitle = await posts.findPage(orderBy: 'title', limit: 5);
+    expect((await posts.findPage(orderBy: 'title', limit: 5, after: FluentCursor.decode(byTitle.next!.encode()))).items, hasLength(5));
+  });
+
   test('paged reads without orderBy get a hint once per table', () async {
     FluentLog.configure(enabled: true, console: false);
     final List<FluentIssue> hints = [];

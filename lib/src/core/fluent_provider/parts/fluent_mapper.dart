@@ -111,7 +111,7 @@ extension _FluentMapper<T extends FluentStorable> on FluentProvider<T> {
           throw FluentLog.raise(
             FluentArgumentException(
               'where',
-              'the filter value for "$tableName.$column" could not be converted by ${converter.runtimeType}: $e',
+              'the filter value for "$tableName.$column" could not be converted by ${converter.runtimeType}: ${FluentLog.redact('$e')}',
               hint: 'Pass a value the converter takes, or the stored form of the value itself.',
               cause: e,
               stackTrace: s,

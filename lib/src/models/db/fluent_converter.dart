@@ -5,6 +5,7 @@
 import 'dart:convert';
 
 import '../../utils/fluent_enum.dart';
+import 'fluent_sql_expression.dart';
 
 /// Converts a Dart value of type [D] to an SQLite value of type [S] and back.
 ///
@@ -85,7 +86,9 @@ class FluentEnumConverter<E extends Enum> extends FluentConverter<E, Object> {
   }
 }
 
-/// Stores a `DateTime` as ISO-8601 text (readable in any SQLite browser, sorts correctly in UTC).
+/// Stores a `DateTime` as ISO-8601 text (readable in any SQLite browser, sorts correctly in UTC) with a fixed
+/// six-digit fraction (`.123000Z`). Text written by earlier versions has three digits (`.123Z`) when there are no
+/// microseconds; it still reads back, but sorts and compares wrongly next to the new form within one millisecond.
 class FluentIsoDateTimeConverter extends FluentConverter<DateTime, String> {
   /// Creates the converter. With [toUtc] (default) values are normalized to UTC before storing.
   const FluentIsoDateTimeConverter({this.toUtc = true});
@@ -97,7 +100,7 @@ class FluentIsoDateTimeConverter extends FluentConverter<DateTime, String> {
   FluentDbDataType get sqlType => FluentDbDataType.text;
 
   @override
-  String toSql(DateTime value) => (toUtc ? value.toUtc() : value).toIso8601String();
+  String toSql(DateTime value) => fluentIsoText(toUtc ? value.toUtc() : value);
 
   @override
   DateTime fromSql(String value) => DateTime.parse(value);

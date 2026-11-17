@@ -90,10 +90,14 @@ print('${result.pushed} sent, ${result.pulled} received, ${result.conflicts} con
 * **Pull:** `hasMore` + `cursor` page through big answers; each page is stored when it arrives, and the `since` of the
   next pull moves only after the last page (the `serverTime` of the first page, else the device time when the pull
   started — a device clock ahead of the server skips changes, so return `serverTime`; the `pullClock` hint says so).
-  An emptied table (`clearTable`, `FluentDb.clear`) is pulled in full again.
+  An emptied table (`clearTable`, `FluentDb.clear`) is pulled in full again, and its pending deletions (tombstones) are
+  dropped (counted in `unsentChangesDiscarded`).
 * **Push:** rows edited again while they are being sent go with the next sync (one sync never loops on them).
 * **Deletes:** soft deletes are pushed as `deleted`; permanent deletes (also of owned children removed by the cascade)
-  leave tombstones, pushed as `deletedKeys` (server keys).
+  leave tombstones, pushed as `deletedKeys` (server keys). A local save of a key with a pending tombstone cancels the
+  deletion: the push sends only the upsert.
+* **Refreshing the cache:** `replaceLocally` / `clearLocally` (also used by `watchRemote`) keep parent rows that still have
+  unsynced descendants (foreign-key cascade and `oneOf`), so a refresh may leave a few old parents.
 * **Conflicts** (a server row whose local row has a change not sent yet): `conflicts:` `FluentConflictPolicy.keepLocal()`
   (default; the change is sent with the next push), `.keepServer()` (the change is dropped), or
   `.merge((local, remote) async => merged)` (the merged model is saved and sent; a local edit made while the callback

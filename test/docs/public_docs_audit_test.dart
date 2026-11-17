@@ -256,14 +256,15 @@ void main() {
       expect((await notes.findAll()).single.title, 'kept again');
     });
 
-    test('a soft-deleted note is still in the trash after 1 day and emptied after 8 days (testing.md)', () async {
+    test('a soft-deleted note is still in the trash after 1 day and purged by the timer after 8 days (testing.md)', () async {
       final Note note = Note(title: 'a');
       await notes.save(note);
       await notes.delete(note);
       db.clock.advance(const Duration(days: 1));
       expect(await notes.trash.count(), 1);
       db.clock.advance(const Duration(days: 7));
-      expect(await notes.trash.empty(), 1);
+      await db.settle();
+      expect(await notes.trash.count(), 0);
     });
 
     test('a database name with a dash fails with invalidDatabaseName (error-codes.md)', () async {

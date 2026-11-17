@@ -105,7 +105,10 @@ With several databases, statics take `dbKey:` when a model lives in more than on
 FluentTableConfig get tableConfig => const FluentTableConfig(trashRetention: Duration(days: 90), isolateMapping: FluentIsolateMapping.always);
 ```
 
-`FluentDb.configure(FluentConfig(...))` replaces the global settings at run time (timers restart).
+`FluentDb.configure(FluentConfig(...))` replaces the global settings at run time (timers restart). `init(groups)` and
+`planMigrations(groups)` without `config:` keep the settings in use (last `configure` / `init(config:)`), not the defaults.
+An `init` after a queued `close` / `restart` runs in call order. Zero or negative `trashPurgeInterval`, `optimizeInterval`,
+`pauseWatchdog`, `transactionWatchdog` fall back to the defaults (`configFallback`); `null` switches them off.
 
 ## Diagnostics and the tuner
 
