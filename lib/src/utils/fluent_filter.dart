@@ -116,8 +116,8 @@ class FluentFilter {
   /// await posts.deleteWhere(FluentFilter.ids([1, 2, 3]), hard: true);
   /// await FluentDb.updateWhere<Post>(FluentFilter.ids(selected), {'archived': true});
   /// ```
-  /// For thousands of ids, split the list (or use `findByIds`, which chunks): SQLite limits the arguments of one
-  /// statement.
+  /// Any number of ids: beyond 900 (fewer for composite keys) the provider moves them into a temporary table of the
+  /// connection, so old SQLite versions (at most 999 arguments per statement) take them too.
   static FluentFilter ids(Iterable<Object?> ids) => _single(FluentKeyCondition(List.unmodifiable(ids)));
 
   static FluentFilter _single(FluentDeferredCondition condition) => FluentFilter._withDeferred('\u00010\u0001', const [], [condition]);
@@ -290,7 +290,8 @@ class FluentFilter {
   /// Creates a condition where [column] value is present in the given [values] list (`IN (...)`).
   ///
   /// An empty [values] matches no rows (`1 = 0`). Each value is stored like [column] stores it. For key lookups prefer
-  /// [ids] (composite keys too); SQLite limits the arguments of one statement.
+  /// [ids] (composite keys too). Any number of values: beyond 900 they go through a temporary table of the connection
+  /// (a filter with them works only in a provider call, which writes it as SQL).
   ///
   /// **Example:**
   /// ```dart
@@ -299,6 +300,7 @@ class FluentFilter {
   /// ```
   static FluentFilter inList(String column, List<Object> values, {FluentTableConfig? config}) {
     if (values.isEmpty) return const FluentFilter('1 = 0');
+    if (values.length > FluentFilterInternals.maxListArguments) return _single(FluentListCondition(column, _values(column, values, config)));
     final String placeholders = List.filled(values.length, '?').join(', ');
     return FluentFilter('${column.quotedIfPlain} IN ($placeholders)', _values(column, values, config));
   }
@@ -314,6 +316,7 @@ class FluentFilter {
   /// ```
   static FluentFilter notInList(String column, List<Object> values, {FluentTableConfig? config}) {
     if (values.isEmpty) return const FluentFilter('1 = 1');
+    if (values.length > FluentFilterInternals.maxListArguments) return _single(FluentListCondition(column, _values(column, values, config), negated: true));
     final String placeholders = List.filled(values.length, '?').join(', ');
     return FluentFilter('${column.quotedIfPlain} NOT IN ($placeholders)', _values(column, values, config));
   }
@@ -442,6 +445,28 @@ class FluentKeyCondition extends FluentDeferredCondition {
   String toString() => 'ids(${ids.length})';
 }
 
+/// A long [FluentFilter.inList] / [FluentFilter.notInList] (more values than one statement may bind on old SQLite):
+/// the provider running the query moves the values into a temporary table of the connection and compares with it.
+class FluentListCondition extends FluentDeferredCondition {
+  /// Creates a condition; use [FluentFilter.inList] or [FluentFilter.notInList].
+  const FluentListCondition(this.column, this.values, {this.negated = false});
+
+  /// The column (plain or quoted name, or an expression).
+  final String column;
+
+  /// The values: Dart values that remember their column ([FluentFilterArgs]) or stored values.
+  final List<Object?> values;
+
+  /// `NOT IN` instead of `IN`.
+  final bool negated;
+
+  @override
+  String get fingerprint => 'list(${negated ? 'not ' : ''}$column:${FluentFilterArgs.rawOf(values).map(fluentValueKey).join(',')})';
+
+  @override
+  String toString() => '$column ${negated ? 'NOT IN' : 'IN'} (${values.length} values)';
+}
+
 /// A condition on the models of a relation, part of a [FluentFilter] until a provider turns it into SQL.
 class FluentRelatedCondition extends FluentDeferredCondition {
   /// Creates a condition; use [FluentFilter.related], [FluentFilter.notRelated] or [FluentFilter.relatedCount].
@@ -553,4 +578,8 @@ extension FluentFilterInternals on FluentFilter {
 
   /// The marker of a deferred condition in the clause (its index in [deferred]).
   static RegExp get marker => FluentFilter._relatedMarker;
+
+  /// The most values a list condition binds as arguments; longer lists go through a temporary table (SQLite before
+  /// 3.32, e.g. Android 11 and older, refuses statements with more than 999 arguments).
+  static const int maxListArguments = 900;
 }

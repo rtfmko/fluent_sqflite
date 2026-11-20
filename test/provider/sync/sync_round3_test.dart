@@ -453,7 +453,7 @@ void main() {
           )
           .last;
       expect(last.phase, FluentRemotePhase.failed);
-      expect(last.error, isA<TimeoutException>());
+      expect(last.error, isA<FluentSyncException>().having((e) => e.cause, 'cause', isA<TimeoutException>()).having((e) => e.hint, 'hint', isNotEmpty));
       expect(await items.count(), 10, reason: 'the rows missing on the server are still there');
       expect((await items.find(where: FluentFilter.eq('name', 'server'))).length, 3);
     });

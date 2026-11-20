@@ -32,6 +32,7 @@ to `FIXED_ISSUES.md`.
 ## Before 2.0
 
 - [ ] CI: analyze + tests + coverage.
+- [ ] CI: the normal suite + a scheduled `FLUENT_FUZZ=500` run of the `*_fuzz_test.dart` files and `chaos_test.dart`.
 - [ ] Guide (`doc/*.md`, written 2026-10-26): review it together and extend with screenshots / diagrams if needed.
 - [ ] API reference (`dart doc`) and architecture notes.
 - [ ] Before publishing: both packages depend on `fluent_sqflite` by path and say `publish_to: none`; switch to

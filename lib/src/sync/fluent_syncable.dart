@@ -303,11 +303,26 @@ mixin FluentSyncable<T extends FluentStorable> on FluentProvider<T> {
     final bool pull = strategy != FluentSyncStrategy.push;
     int pushed = 0;
     final List<Object> rejected = [];
-    FluentSyncResult<T> failed(String message, {Object? error}) =>
-        FluentSyncResult(strategy: strategy, isSuccess: false, pushed: pushed, rejected: rejected.length, errorMessage: message, error: error);
+    // The error reaches the app typed: an error of the callbacks (or none) is wrapped, kept as the cause.
+    FluentSyncResult<T> failed(String message, {Object? error, bool misconfigured = false}) => FluentSyncResult(
+      strategy: strategy,
+      isSuccess: false,
+      pushed: pushed,
+      rejected: rejected.length,
+      errorMessage: message,
+      error: error is FluentException
+          ? error
+          : FluentSyncException(
+              'Sync of "$tableName" failed: ${FluentLog.redact(message)}',
+              hint: misconfigured
+                  ? 'Pass the callbacks the strategy needs: onPush for push / full, onPull for pull / full.'
+                  : 'Nothing local was lost; what was not sent or fetched is synced by the next syncWithServer call. The cause is the error of onPush / onPull.',
+              cause: error,
+            ),
+    );
 
-    if (push && onPush == null) return failed('onPush is missing (needed by ${strategy.name})');
-    if (pull && onPull == null) return failed('onPull is missing (needed by ${strategy.name})');
+    if (push && onPush == null) return failed('onPush is missing (needed by ${strategy.name})', misconfigured: true);
+    if (pull && onPull == null) return failed('onPull is missing (needed by ${strategy.name})', misconfigured: true);
 
     FluentPullStats stats = (pulled: 0, conflicts: 0, remoteDeleted: 0);
     try {
@@ -321,10 +336,14 @@ mixin FluentSyncable<T extends FluentStorable> on FluentProvider<T> {
           final List<String> keys = [for (final (Object id, int _) in batch.versions) _syncKeyText(id)];
           if (keys.isNotEmpty && batch.deletedKeys.isEmpty && keys.every(sent.contains)) break;
           sent.addAll(keys);
+          // From now on the server may have these rows (also when the answer fails, is cancelled or the row is edited
+          // meanwhile): deleting one later must tell the server.
+          await markSent(batch);
           // A cancel stops waiting: the batch stays pending (the server may have it already; it is sent again).
           final FluentPushResult<T> answer = await _unlessCancelled(_inCallback(() => onPush!(batch)), cancel);
+          stopIfCancelled(); // cancelled while the answer was on its way: it is ignored (the batch is sent again)
           if (!answer.isAccepted) {
-            return failed('the server did not accept the changes (FluentPushResult.failed${answer.error == null ? '' : ': ${answer.error}'})', error: answer.error);
+            return failed('the server did not accept the changes (FluentPushResult.failed${answer.error == null ? '' : ': ${FluentLog.redact('${answer.error}')}'})', error: answer.error);
           }
           // Only keys of this batch count: an unknown key refuses nothing that was sent.
           final Set<String> inBatch = {for (final (Object id, int _) in batch.versions) _syncKeyText(id)};
@@ -354,6 +373,7 @@ mixin FluentSyncable<T extends FluentStorable> on FluentProvider<T> {
         for (int page = 0; page < 10000; page++) {
           stopIfCancelled();
           final FluentPullResult<T> answer = await _unlessCancelled(_inCallback(() => onPull!(FluentPullRequest(since: since, cursor: cursor, page: page))), cancel);
+          stopIfCancelled(); // cancelled while the answer was on its way: it is ignored
           if (page == 0) serverTime = answer.serverTime;
           if (page == 0 && serverTime == null) _hintServerTime();
           final FluentPullStats applied = await _applyPage(answer, conflicts, remoteDeletes, relationSync, rememberAs: answer.hasMore ? null : serverTime ?? started);
@@ -366,7 +386,7 @@ mixin FluentSyncable<T extends FluentStorable> on FluentProvider<T> {
       FluentLog.debug('Sync of "$tableName" cancelled (pushed: $pushed, pulled: ${stats.pulled})', tag: 'sync:$tableName');
       return _cancelledResult(strategy, pushed: pushed, pulled: stats.pulled, conflicts: stats.conflicts, remoteDeleted: stats.remoteDeleted, rejected: rejected.length);
     } catch (e) {
-      return failed('$e', error: e);
+      return failed(FluentLog.redact('$e'), error: e);
     }
     return FluentSyncResult(
       strategy: strategy,
@@ -463,6 +483,7 @@ mixin FluentSyncable<T extends FluentStorable> on FluentProvider<T> {
       remoteDeletes: remoteDeletes,
       relationSync: relationSync,
       rememberAs: rememberAs,
+      serverHas: [for (final ({T model, Object id, int version}) l in local.values) l.id],
     );
     if (local.isNotEmpty && merge == null) {
       FluentLog.debug('${local.length} server row(s) of "$tableName" kept their local version (changes not sent yet)', tag: 'sync:$tableName');

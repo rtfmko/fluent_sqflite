@@ -332,8 +332,17 @@ extension FluentWatchRemote<T extends FluentStorable> on FluentProvider<T> {
           hint: 'Nothing was stored; the cached rows stay. Statuses 200–299 count as success.',
           cause: response.error,
         );
-      } catch (e) {
-        error = e;
+      } catch (e, stack) {
+        // The failed event carries a typed error; the error of fetch is its cause.
+        error = e is FluentException
+            ? e
+            : FluentSyncException(
+                'The fetch of "$tableName" failed: ${FluentLog.redact('$e')}',
+                code: FluentErrorCode.apiError,
+                hint: 'Nothing was stored; the cached rows stay. The cause is the error thrown by fetch (network, timeout, parsing): fix it or retry later (retries: / retryDelay:).',
+                cause: e,
+                stackTrace: stack,
+              );
       }
       if (attempt >= retries || !fluentRetryCanHelp(error) || cancelled()) return (null, error);
       await Future<void>.delayed(fluentRetryDelay(retryDelay, attempt));
@@ -347,6 +356,7 @@ extension FluentWatchRemote<T extends FluentStorable> on FluentProvider<T> {
   /// When the query [key] last stored an answer; `null` if never (or the bookkeeping table is missing).
   Future<DateTime?> _lastFetch(String key) => _run<DateTime?>(
     FluentDbAction.relationRead,
+    committedOnly: true,
     data: () async {
       try {
         final List<Map<String, Object?>> rows = await executor.query(_fetchStateTable, columns: ['fetched_at'], where: 'query = ?', whereArgs: [key]);
@@ -396,11 +406,12 @@ extension FluentWatchRemote<T extends FluentStorable> on FluentProvider<T> {
         }
         if (_syncColumns != null) {
           // Like a pull: stored as synced, local changes not sent yet win; the time of the last pull stays.
-          final Map<int, Object> busy = await unpushedCounterparts(items);
+          final Map<int, ({T model, Object id, int version})> busy = await unpushedCounterparts(items);
           await applyPull(
             FluentPullResult<T>(deletedKeys: missing),
             remote: [for (int i = 0; i < items.length; i++) if (!busy.containsKey(i)) items[i]],
             relationSync: relationSync,
+            serverHas: [for (final ({T model, Object id, int version}) b in busy.values) b.id],
           );
         } else {
           await _mergeLocally(items, missing, relationSync);
@@ -432,6 +443,7 @@ extension FluentWatchRemote<T extends FluentStorable> on FluentProvider<T> {
       }
       await _forServerKeyChunks(missing, (keys) async {
         final FluentFilter where = _resolveRelated(keys);
+        await _flushValueLists(txn);
         await (_softDeleteColumn != null ? _softDeleteWhere(txn, where, _softDeleteStamp()) : _hardDeleteWhere(txn, where));
       });
     }),

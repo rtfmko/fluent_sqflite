@@ -13,13 +13,16 @@ part of '../fluent_sqlite_internal.dart';
 @internal
 class FluentTransactionScope {
   /// Creates a scope for [txn] of the database group [dbName].
-  FluentTransactionScope(this.dbName, this.txn);
+  FluentTransactionScope(this.dbName, Transaction txn) : txn = txn is _FluentLazyTxn ? txn : _FluentLazyTxn(txn);
 
   /// The database group the transaction belongs to.
   final String dbName;
 
-  /// The open transaction.
+  /// The open transaction. Statements go through it so that the SAVEPOINT / RELEASE of nested calls travel with the
+  /// next statement instead of a round trip of their own ([_FluentLazyTxn]).
   final Transaction txn;
+
+  _FluentLazyTxn get _lazy => txn as _FluentLazyTxn;
 
   /// Writes made inside the scope, published as change events after the commit.
   final List<(FluentTask, FluentProvider, Object?)> pendingEvents = [];
@@ -145,6 +148,26 @@ class FluentTransactionScope {
   /// Reads adopted by the transaction watchdog that still run.
   final Set<Future<void>> _adopted = {};
 
+  /// Library calls running in the transaction now ([working]).
+  int _working = 0;
+  final Stopwatch _sinceActive = Stopwatch()..start();
+
+  /// How long the transaction has run no library call (zero while one runs): a transaction that waits this long
+  /// waits for something outside it (the transaction watchdog lets waiting reads in only then; a slow but busy
+  /// transaction keeps its uncommitted changes to itself).
+  Duration get idleFor => _working > 0 ? Duration.zero : _sinceActive.elapsed;
+
+  /// Runs [call], a library call inside the transaction, counted as activity ([idleFor]).
+  Future<R> working<R>(Future<R> Function() call) {
+    _working++;
+    return Future<R>.sync(call).whenComplete(() {
+      _working--;
+      _sinceActive
+        ..reset()
+        ..start();
+    });
+  }
+
   /// Registers a read the watchdog runs inside this transaction (awaited before the transaction ends).
   void adopt(Future<void> read) {
     _adopted.add(read);
@@ -157,9 +180,132 @@ class FluentTransactionScope {
     }
   }
 
+  /// Calls made inside open transactions that wait for (or run on) another database: the wait-for graph between
+  /// databases (see [waitingFor]).
+  static final Set<_FluentWait> _waits = {};
+
+  /// Runs [call], a call on database [dbName] that waits in the engine queue, and refuses it with a
+  /// [FluentErrorCode.deadlock] error when it would close a wait-for cycle between databases.
+  ///
+  /// A call made inside open transactions on other databases (the scopes of the current zone) waits while it holds
+  /// them: an edge "held database → [dbName]" of the graph, kept until the call completes. Only one transaction holds
+  /// a database at a time (it runs alone in the queue), so an edge whose scope is still open means "the transaction
+  /// holding that database waits for [dbName]". The call is refused when [dbName] already reaches one of the held
+  /// databases through such edges (A → B → … → A): queued, it would wait forever, and so would the others. Nothing is
+  /// queued then; the error arrives through the returned future, and the other transactions go on (the refused one
+  /// rolls back when its body rethrows).
+  ///
+  /// [blockedWhile] (a read while the transaction watchdog is on) makes the edge conditional: the call counts only
+  /// while it returns true. The watchdog lets a waiting read into the transaction running on its database, so such a
+  /// read waits for nobody — unless a queued write is ahead of it (the watchdog never lets a read pass a write, G7):
+  /// then it waits for that write, and so for the transaction holding [dbName]. A call that is not blocked when it is
+  /// made never becomes blocked (writes queued later are behind it): it is never refused and adds no edge.
+  static Future<R> waitingFor<R>(String dbName, Future<R> Function() call, {bool Function()? blockedWhile}) {
+    final List<FluentTransactionScope> held = [
+      for (final FluentTransactionScope s in _scopesOf(Zone.current).values)
+        if (!s._closed && s.dbName != dbName) s,
+    ];
+    if (held.isEmpty || (blockedWhile != null && !blockedWhile())) return call();
+    final List<String>? cycle = _cycleFrom(dbName, {for (final FluentTransactionScope s in held) s.dbName});
+    if (cycle != null) {
+      final String from = cycle.last;
+      return Future<R>.error(
+        FluentLog.raise(
+          FluentEngineException(
+            'Refused a call on database "$dbName" from a transaction on "$from": it would wait forever (wait cycle ${cycle.join(' → ')} → $dbName). The call was not run.',
+            code: FluentErrorCode.deadlock,
+            hint: 'Two transactions wait for each other across databases. Take the databases in one order everywhere (always '
+                '"${cycle.first}" before "$from", nesting FluentDb.transaction(dbKey: ...) in that order), or make the cross-database '
+                'call after the transaction ends. Let the error leave the transaction body so it rolls back, then run it again: '
+                'the other transaction has finished by then.',
+          ),
+          tag: 'FluentEngine:deadlock',
+          context: {'db': dbName, 'cycle': [...cycle, dbName]},
+        ),
+      );
+    }
+    final _FluentWait wait = _FluentWait(held, dbName, blockedWhile);
+    _waits.add(wait);
+    return Future<R>.sync(call).whenComplete(() => _waits.remove(wait));
+  }
+
+  /// A path of open waits from [start] to one of [targets] ([start] first, the reached target last), or `null`.
+  static List<String>? _cycleFrom(String start, Set<String> targets) {
+    if (_waits.isEmpty) return null;
+    final Map<String, String?> previous = {start: null};
+    final List<String> todo = [start];
+    while (todo.isNotEmpty) {
+      final String db = todo.removeAt(0);
+      for (final _FluentWait w in _waits) {
+        if (!w.held.any((FluentTransactionScope s) => !s._closed && s.dbName == db)) continue; // the transaction holding [db] does not wait here
+        if (!w.blocked) continue; // a read the watchdog lets in now
+        if (targets.contains(w.target)) {
+          final List<String> path = [w.target];
+          for (String? at = db; at != null; at = previous[at]) {
+            path.insert(0, at);
+          }
+          return path;
+        }
+        if (previous.containsKey(w.target)) continue;
+        previous[w.target] = db;
+        todo.add(w.target);
+      }
+    }
+    return null;
+  }
+
+  static final Object _levelKey = Object();
+
+  /// The calls made in the transaction body (no call of this scope running in the zone).
+  final _FluentCallChain _bodyCalls = _FluentCallChain();
+
+  /// Runs [call], a library call made inside this transaction, after the calls made before it at the same level, in
+  /// call order — like the queue does outside a transaction (G7). Without it, unawaited calls (`Future.wait` of saves)
+  /// would interleave their statements and savepoints: a failing call's `ROLLBACK TO` would take back a sibling's
+  /// writes, and a read would not see the writes called before it. A level is the transaction body, or the code one
+  /// running call runs (a nested transaction's body, relation writes): calls made there wait only for each other,
+  /// never for the call that runs them.
+  Future<R> serialized<R>(Future<R> Function() call) {
+    final Map<FluentTransactionScope, _FluentCallChain>? levels = Zone.current[_levelKey] as Map<FluentTransactionScope, _FluentCallChain>?;
+    final _FluentCallChain chain = levels?[this] ?? _bodyCalls;
+    return chain.add(() => runZoned(call, zoneValues: {_levelKey: {...?levels, this: _FluentCallChain()}}));
+  }
+
   /// Runs [action] in a `SAVEPOINT` of this transaction (a nested `FluentDb.transaction`): when it throws, only its
   /// writes, pending events and [whenCommitted] changes are dropped, its [whenRolledBack] undos run, and the error is rethrown.
-  Future<R> savepoint<R>(Future<R> Function() action) => _inSavepoint((_) => action());
+  Future<R> savepoint<R>(Future<R> Function() action) async {
+    try {
+      return await _inSavepoint((_) => action());
+    } on DatabaseException catch (e, s) {
+      throw FluentLog.raise(sqlError(dbName, e, s), tag: 'FluentDb.transaction');
+    }
+  }
+
+  /// The typed error of a transaction whose statements SQLite refused outside any provider call (`COMMIT`, the
+  /// `RELEASE` of a nested transaction, `BEGIN`): the app gets a [FluentException] with a hint, never the raw
+  /// `DatabaseException` (kept as the cause).
+  static FluentException sqlError(String dbName, DatabaseException e, StackTrace stackTrace) {
+    final String text = e.toString();
+    final bool readOnly = e.isReadOnlyError() || text.contains('readonly database');
+    if (TableHelper.isCorrupt(text)) {
+      return FluentQueryException(
+        'Transaction on database "$dbName" failed: the database file is damaged or not a database',
+        code: FluentErrorCode.databaseCorrupt,
+        hint: 'Restore the file from a backup, or start with an empty database: FluentGroup(resetOnSchemaError: true) recreates it on the next start '
+            '(all data in the file is lost then; the library never deletes the file on its own).',
+        cause: e,
+        stackTrace: stackTrace,
+      );
+    }
+    return FluentQueryException(
+      'Transaction on database "$dbName" failed: ${FluentLog.redact(text)}',
+      code: readOnly ? FluentErrorCode.readOnly : FluentErrorCode.sqlError,
+      hint: 'SQLite could not finish the transaction (a full or failing disk, another connection holding the lock, a read-only file). '
+          'None of its writes were kept and the models are as before: run the transaction again once the cause is gone.',
+      cause: e,
+      stackTrace: stackTrace,
+    );
+  }
 
   /// Runs [action] in the open transaction of [db] / [dbName], or opens one (and a scope for it) when there is none.
   ///
@@ -169,21 +315,38 @@ class FluentTransactionScope {
     final FluentTransactionScope? open = of(dbName);
     if (open != null) return open._inSavepoint(action);
     FluentTransactionScope? scope;
-    return db.transaction((txn) => (scope = FluentTransactionScope(dbName, txn)).run(() => action(txn))).then(
-      (result) {
-        scope?.committed();
-        return result;
-      },
-      onError: (Object e, StackTrace s) {
-        scope?.rolledBack(); // keys its inserts gave the models are taken back: SQLite reuses the rowids
-        Error.throwWithStackTrace(e, s);
-      },
-    );
+    Object? fromAction; // the error [action] threw itself (a provider maps its own SQL errors)
+    return db
+        .transaction(
+          (txn) => (scope = FluentTransactionScope(dbName, txn)).run(() async {
+            try {
+              return await action(scope!.txn);
+            } catch (e) {
+              fromAction = e;
+              rethrow;
+            }
+          }),
+        )
+        .then(
+          (result) {
+            scope?.committed();
+            return result;
+          },
+          onError: (Object e, StackTrace s) {
+            scope?.rolledBack(); // keys its inserts gave the models are taken back: SQLite reuses the rowids
+            // A failing BEGIN / COMMIT is not the action's error: typed, never the raw DatabaseException.
+            if (e is DatabaseException && !identical(e, fromAction)) throw FluentLog.raise(sqlError(dbName, e, s), tag: 'FluentDb.transaction');
+            Error.throwWithStackTrace(e, s);
+          },
+        );
   }
 
   Future<R> _inSavepoint<R>(Future<R> Function(Transaction txn) action) async {
-    final String name = 'fluent_sp_${++_savepoints}'.quotedIdentifier;
-    await txn.execute('SAVEPOINT $name');
+    final int number = ++_savepoints;
+    final String name = 'fluent_sp_$number'.quotedIdentifier;
+    final _FluentLazyTxn lazy = _lazy;
+    // Sent together with the first statement of the call (no round trip of its own); never sent when it runs none.
+    lazy.open(number, name);
     // What the savepoint's writes registered is dropped with them when it rolls back.
     final int events = pendingEvents.length;
     final int touched = pendingTouched.length;
@@ -192,20 +355,20 @@ class FluentTransactionScope {
     final R result;
     try {
       result = await action(txn);
+      // Released together with the next statement of the transaction, or by its COMMIT.
+      lazy.release(number, name);
     } catch (_) {
       if (pendingEvents.length > events) pendingEvents.removeRange(events, pendingEvents.length);
       if (pendingTouched.length > touched) pendingTouched.removeRange(touched, pendingTouched.length);
       if (_afterCommit.length > changes) _afterCommit.removeRange(changes, _afterCommit.length);
       _undo(undos);
       try {
-        await txn.execute('ROLLBACK TO $name');
-        await txn.execute('RELEASE $name');
+        await lazy.rollback(number, name);
       } catch (e) {
         FluentLog.debug('Savepoint not rolled back: $e', tag: 'FluentTransactionScope');
       }
       rethrow;
     }
-    await txn.execute('RELEASE $name');
     return result;
   }
 }
@@ -233,4 +396,270 @@ class FluentReadScope {
 
   /// Runs [body] with [db] as the read connection of [dbName].
   static Future<R> run<R>(String dbName, Database db, Future<R> Function() body) => runZoned(body, zoneValues: {_zoneKey: FluentReadScope._(dbName, db)});
+}
+
+/// A call on [target] made inside the open transactions [held] (one edge "held database → [target]" each, while the
+/// scope is open, and while [blockedWhile] returns true when given), see [FluentTransactionScope.waitingFor].
+class _FluentWait {
+  _FluentWait(this.held, this.target, this.blockedWhile);
+
+  final List<FluentTransactionScope> held;
+  final String target;
+  final bool Function()? blockedWhile;
+
+  /// Whether the call still waits for the transaction holding [target]; a failing check counts as waiting (a cycle
+  /// is then refused rather than waited for).
+  bool get blocked {
+    try {
+      return blockedWhile?.call() ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+}
+
+/// Calls of one level of a transaction, run one after the other in call order (see [FluentTransactionScope.serialized]).
+class _FluentCallChain {
+  /// Completes when the last call added so far completed; `null` when none is running.
+  Future<void>? _tail;
+
+  /// Runs [call] once the calls added before it completed (at once when none runs); its outcome is its caller's.
+  Future<R> add<R>(Future<R> Function() call) {
+    final Future<void>? previous = _tail;
+    final Completer<void> done = Completer<void>.sync();
+    final Future<void> tail = _tail = done.future;
+    final Future<R> result = previous == null ? Future<R>.sync(call) : previous.then((_) => call());
+    result.then<void>((_) {}, onError: (Object _) {}).whenComplete(() {
+      if (identical(_tail, tail)) _tail = null;
+      done.complete();
+    });
+    return result;
+  }
+}
+
+/// A transaction whose savepoint statements travel with the next statement: `SAVEPOINT` of a call is sent in one batch
+/// with its first statement, its `RELEASE` with the next statement of the transaction (or dropped: the COMMIT releases
+/// every savepoint), and a savepoint of a call that sent no statement is never sent at all. Each nested write saves two
+/// round trips to SQLite, and at most a few savepoints are open at once. A rollback runs at once.
+///
+/// A statement whose batch fails may have run some of the statements before it: the savepoint rollback that follows is
+/// best effort (a savepoint that was never opened is simply not there), like the failure of any batch inside a
+/// transaction.
+class _FluentLazyTxn implements Transaction {
+  _FluentLazyTxn(this._inner);
+
+  final Transaction _inner;
+
+  /// Savepoint statements not sent yet, with the number of the savepoint they belong to.
+  final List<({int number, String sql})> _pending = [];
+
+  bool _isOpening(({int number, String sql}) p, int number) => p.number == number && p.sql.startsWith('SAVEPOINT');
+
+  /// Opens savepoint [number] with the next statement.
+  void open(int number, String name) => _pending.add((number: number, sql: 'SAVEPOINT $name'));
+
+  /// Ends savepoint [number]: dropped with everything after it when it was never sent, else released with the next
+  /// statement.
+  void release(int number, String name) {
+    final int i = _pending.indexWhere((p) => _isOpening(p, number));
+    if (i >= 0) {
+      _pending.removeRange(i, _pending.length);
+    } else {
+      _pending.add((number: number, sql: 'RELEASE $name'));
+    }
+  }
+
+  /// Rolls savepoint [number] back now (nothing to do when it was never sent); the savepoints opened inside it go with it.
+  /// The rollback is its own statement, never part of a batch: recovery must not depend on other statements succeeding.
+  Future<void> rollback(int number, String name) async {
+    final int i = _pending.indexWhere((p) => _isOpening(p, number));
+    if (i >= 0) {
+      _pending.removeRange(i, _pending.length);
+      return;
+    }
+    _pending.removeWhere((p) => p.number > number); // released inner savepoints: rolled back with this one
+    await _inner.execute('ROLLBACK TO $name');
+    await _inner.execute('RELEASE $name');
+  }
+
+  /// Sends the pending statements on their own.
+  Future<void> _flush() async {
+    if (_pending.isEmpty) return;
+    final List<({int number, String sql})> taken = _take();
+    final Batch batch = _inner.batch();
+    for (final p in taken) {
+      batch.execute(p.sql);
+    }
+    await _commitTaken(taken, () => batch.commit(noResult: true));
+  }
+
+  List<({int number, String sql})> _take() {
+    final List<({int number, String sql})> taken = List.of(_pending);
+    _pending.clear();
+    return taken;
+  }
+
+  /// Runs [commit] of a batch that carries [taken]. A failed batch may have run any prefix of its statements, so the
+  /// savepoints it opened ([taken]'s `SAVEPOINT`s, whose calls still run) are found again: `ROLLBACK TO` the innermost
+  /// one that exists (tried from the inside out) takes back what the batch did after it (part of a failed statement
+  /// batch) and proves it and the ones outside it exist; the ones inside it were never opened and are opened with the
+  /// next statement (a later rollback of one must find it, or the writes made in it after this failure would stay). Only
+  /// on this error path: one statement per savepoint tried. A lost `RELEASE` only leaves its savepoint open until the
+  /// commit.
+  Future<R> _commitTaken<R>(List<({int number, String sql})> taken, Future<R> Function() commit) async {
+    try {
+      return await commit();
+    } catch (_) {
+      final List<({int number, String sql})> opened = [for (final p in taken) if (p.sql.startsWith('SAVEPOINT')) p];
+      int exists = -1;
+      for (int i = opened.length - 1; i >= 0; i--) {
+        try {
+          await _inner.execute('ROLLBACK TO ${opened[i].sql.substring('SAVEPOINT '.length)}');
+          exists = i;
+          break;
+        } catch (_) {
+          // Not opened: the batch failed before it.
+        }
+      }
+      _pending.insertAll(0, opened.sublist(exists + 1));
+      rethrow;
+    }
+  }
+
+  /// [direct] when nothing is pending, else the pending statements and the statement ([add]) in one batch.
+  Future<Object?> _with(void Function(Batch batch) add, Future<Object?> Function() direct) async {
+    if (_pending.isEmpty) return direct();
+    final List<({int number, String sql})> taken = _take();
+    final Batch batch = _inner.batch();
+    for (final p in taken) {
+      batch.execute(p.sql);
+    }
+    add(batch);
+    final List<Object?> results = await _commitTaken(taken, batch.commit);
+    return results.last;
+  }
+
+  static int _int(Object? result) => result is int ? result : 0;
+
+  static List<Map<String, Object?>> _rows(Object? result) => [for (final Object? r in (result as List<Object?>?) ?? const []) (r! as Map).cast<String, Object?>()];
+
+  @override
+  Future<void> execute(String sql, [List<Object?>? arguments]) => _with((b) => b.execute(sql, arguments), () => _inner.execute(sql, arguments));
+
+  @override
+  Future<int> rawInsert(String sql, [List<Object?>? arguments]) async => _int(await _with((b) => b.rawInsert(sql, arguments), () => _inner.rawInsert(sql, arguments)));
+
+  @override
+  Future<int> insert(String table, Map<String, Object?> values, {String? nullColumnHack, ConflictAlgorithm? conflictAlgorithm}) async => _int(await _with(
+    (b) => b.insert(table, values, nullColumnHack: nullColumnHack, conflictAlgorithm: conflictAlgorithm),
+    () => _inner.insert(table, values, nullColumnHack: nullColumnHack, conflictAlgorithm: conflictAlgorithm),
+  ));
+
+  @override
+  Future<List<Map<String, Object?>>> query(String table, {bool? distinct, List<String>? columns, String? where, List<Object?>? whereArgs, String? groupBy, String? having, String? orderBy, int? limit, int? offset}) async {
+    if (_pending.isEmpty) return _inner.query(table, distinct: distinct, columns: columns, where: where, whereArgs: whereArgs, groupBy: groupBy, having: having, orderBy: orderBy, limit: limit, offset: offset);
+    return _rows(await _with((b) => b.query(table, distinct: distinct, columns: columns, where: where, whereArgs: whereArgs, groupBy: groupBy, having: having, orderBy: orderBy, limit: limit, offset: offset), () async => null));
+  }
+
+  @override
+  Future<List<Map<String, Object?>>> rawQuery(String sql, [List<Object?>? arguments]) async {
+    if (_pending.isEmpty) return _inner.rawQuery(sql, arguments);
+    return _rows(await _with((b) => b.rawQuery(sql, arguments), () async => null));
+  }
+
+  @override
+  Future<QueryCursor> rawQueryCursor(String sql, List<Object?>? arguments, {int? bufferSize}) async {
+    await _flush();
+    return _inner.rawQueryCursor(sql, arguments, bufferSize: bufferSize);
+  }
+
+  @override
+  Future<QueryCursor> queryCursor(String table, {bool? distinct, List<String>? columns, String? where, List<Object?>? whereArgs, String? groupBy, String? having, String? orderBy, int? limit, int? offset, int? bufferSize}) async {
+    await _flush();
+    return _inner.queryCursor(table, distinct: distinct, columns: columns, where: where, whereArgs: whereArgs, groupBy: groupBy, having: having, orderBy: orderBy, limit: limit, offset: offset, bufferSize: bufferSize);
+  }
+
+  @override
+  Future<int> rawUpdate(String sql, [List<Object?>? arguments]) async => _int(await _with((b) => b.rawUpdate(sql, arguments), () => _inner.rawUpdate(sql, arguments)));
+
+  @override
+  Future<int> update(String table, Map<String, Object?> values, {String? where, List<Object?>? whereArgs, ConflictAlgorithm? conflictAlgorithm}) async => _int(await _with(
+    (b) => b.update(table, values, where: where, whereArgs: whereArgs, conflictAlgorithm: conflictAlgorithm),
+    () => _inner.update(table, values, where: where, whereArgs: whereArgs, conflictAlgorithm: conflictAlgorithm),
+  ));
+
+  @override
+  Future<int> rawDelete(String sql, [List<Object?>? arguments]) async => _int(await _with((b) => b.rawDelete(sql, arguments), () => _inner.rawDelete(sql, arguments)));
+
+  @override
+  Future<int> delete(String table, {String? where, List<Object?>? whereArgs}) async =>
+      _int(await _with((b) => b.delete(table, where: where, whereArgs: whereArgs), () => _inner.delete(table, where: where, whereArgs: whereArgs)));
+
+  @override
+  Batch batch() => _FluentLazyBatch(this);
+
+  @override
+  Database get database => _inner.database;
+}
+
+/// A batch of a [_FluentLazyTxn]: the pending savepoint statements go first in the same round trip; their results are
+/// left out of the batch's results.
+class _FluentLazyBatch implements Batch {
+  _FluentLazyBatch(this._txn);
+
+  final _FluentLazyTxn _txn;
+  final List<void Function(Batch batch)> _ops = [];
+
+  Future<List<Object?>> _run(Future<List<Object?>> Function(Batch batch) commit, bool? noResult) async {
+    final List<({int number, String sql})> taken = _txn._take();
+    final Batch batch = _txn._inner.batch();
+    for (final p in taken) {
+      batch.execute(p.sql);
+    }
+    for (final void Function(Batch batch) op in _ops) {
+      op(batch);
+    }
+    final List<Object?> results = await _txn._commitTaken(taken, () => commit(batch));
+    return noResult == true || taken.isEmpty ? results : results.sublist(taken.length);
+  }
+
+  @override
+  Future<List<Object?>> commit({bool? exclusive, bool? noResult, bool? continueOnError}) =>
+      _run((b) => b.commit(exclusive: exclusive, noResult: noResult, continueOnError: continueOnError), noResult);
+
+  @override
+  Future<List<Object?>> apply({bool? noResult, bool? continueOnError}) => _run((b) => b.apply(noResult: noResult, continueOnError: continueOnError), noResult);
+
+  @override
+  void rawInsert(String sql, [List<Object?>? arguments]) => _ops.add((b) => b.rawInsert(sql, arguments));
+
+  @override
+  void insert(String table, Map<String, Object?> values, {String? nullColumnHack, ConflictAlgorithm? conflictAlgorithm}) =>
+      _ops.add((b) => b.insert(table, values, nullColumnHack: nullColumnHack, conflictAlgorithm: conflictAlgorithm));
+
+  @override
+  void rawUpdate(String sql, [List<Object?>? arguments]) => _ops.add((b) => b.rawUpdate(sql, arguments));
+
+  @override
+  void update(String table, Map<String, Object?> values, {String? where, List<Object?>? whereArgs, ConflictAlgorithm? conflictAlgorithm}) =>
+      _ops.add((b) => b.update(table, values, where: where, whereArgs: whereArgs, conflictAlgorithm: conflictAlgorithm));
+
+  @override
+  void rawDelete(String sql, [List<Object?>? arguments]) => _ops.add((b) => b.rawDelete(sql, arguments));
+
+  @override
+  void delete(String table, {String? where, List<Object?>? whereArgs}) => _ops.add((b) => b.delete(table, where: where, whereArgs: whereArgs));
+
+  @override
+  void execute(String sql, [List<Object?>? arguments]) => _ops.add((b) => b.execute(sql, arguments));
+
+  @override
+  void query(String table, {bool? distinct, List<String>? columns, String? where, List<Object?>? whereArgs, String? groupBy, String? having, String? orderBy, int? limit, int? offset}) =>
+      _ops.add((b) => b.query(table, distinct: distinct, columns: columns, where: where, whereArgs: whereArgs, groupBy: groupBy, having: having, orderBy: orderBy, limit: limit, offset: offset));
+
+  @override
+  void rawQuery(String sql, [List<Object?>? arguments]) => _ops.add((b) => b.rawQuery(sql, arguments));
+
+  @override
+  int get length => _ops.length;
 }

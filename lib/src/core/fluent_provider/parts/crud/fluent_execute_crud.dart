@@ -181,7 +181,15 @@ extension _FluentExecuteCrud<T extends FluentStorable> on FluentProvider<T> {
         await _saveGraph(txn, items, task, ctx, strategy: strategy, conflictOn: conflictOn);
         outcomes = [for (final T item in items) ctx.outcomes[item] ?? FluentRowOutcome.skipped];
       } else {
-        final List<_WrittenRow> written = await _writeRows(txn, [for (final T item in items) _prepareSqlJson(item)], strategy, conflictOn: conflictOn, synced: task.helper?.syncWrite ?? false);
+        final List<_WrittenRow> written = await _writeRows(
+          txn,
+          [for (final T item in items) _prepareSqlJson(item)],
+          strategy,
+          conflictOn: conflictOn,
+          synced: task.helper?.syncWrite ?? false,
+          // A merged batch keeps the order of its calls' inserts and updates (G7).
+          calls: task.isBatched ? [for (final FluentTask part in task.mergedTasks!) part.data is List ? (part.data as List).length : (part.data == null ? 0 : 1)] : null,
+        );
         _injectKeys(items, written);
         outcomes = [for (final _WrittenRow w in written) w.$1];
       }
@@ -222,13 +230,13 @@ extension _FluentExecuteCrud<T extends FluentStorable> on FluentProvider<T> {
 
   /// `delete` / `hardDelete` / `restore`: by keys (`helper.arguments`, chunked) or by filter (`helper.where`).
   Future<int> _executeRemove(FluentTask task) {
-    final List<Object?>? ids = task.helper?.arguments;
-    Future<int> each(Transaction txn, Future<int> Function(FluentFilter where) action) =>
-        ids == null ? action(_taskFilter(task)) : _forKeyChunks([...ids.whereType<Object>()], (keys) => action(FluentFilter(keys.whereClause, _sqlArgs(keys.whereArgs)!)));
-
     // The models passed in (`delete(item)`, `deleteAll`, `trash.restore(item)`); a `List<FluentStorable>` when the call
     // came through a base type (`FluentDb.deleteAll`, `Iterable.deleteAll()`), so not tested as `List<T>`.
     final List<FluentStorable>? items = task.data is List ? (task.data! as List).whereType<FluentStorable>().toList(growable: false) : null;
+    // Their keys as they are now: a save called before this call may have given a new model its key (G7).
+    final List<Object?>? ids = items != null && task.helper?.arguments != null ? [for (final FluentStorable item in items) item.primaryKeyValue] : task.helper?.arguments;
+    Future<int> each(Transaction txn, Future<int> Function(FluentFilter where) action) =>
+        ids == null ? action(_taskFilter(task)) : _forKeyChunks([...ids.whereType<Object>()], (keys) => action(FluentFilter(keys.whereClause, _sqlArgs(keys.whereArgs)!)));
 
     /// Gives [items] the stamps stored now, once the transaction commits (a rollback leaves them as they were).
     Future<void> stampModels(Transaction txn) async {

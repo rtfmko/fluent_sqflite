@@ -64,7 +64,7 @@ StreamSubscription<FluentRemoteEvent<Article>> sub = articles.watchRemote(
 });
 ```
 
-Phases: `cached` → `fetching` → `fresh` or `failed`; with `keepWatching` (default) later changes re-emit the rows.
+Phases: `cached` → `fetching` → `fresh` or `failed` (`event.error` is a `FluentSyncException`; the error `fetch` threw is its `cause`); with `keepWatching` (default) later changes re-emit the rows.
 `store`: `merge` (default), `mirror` (also delete cached rows of `where` missing from the answer, in one transaction; not with `limit`),
 `replace` (swap the rows of `where`; not with `limit`), `none` (do not store). `source`: `cacheThenRemote` (default),
 `remoteOnly`, `cacheOnly`. Errors: `retries`, `retryDelay` (no retry on 4xx except 408 / 429), `clearCacheOn: {401}`.
@@ -113,6 +113,8 @@ are reported in `deletedKeys` of their table.
 `soft` (trash; models without a trash keep the rows, with a warning), `hard`, `keep` (ignore the server's deletions). The version columns are `sync_version` / `synced_version`
 (`syncVersionColumn` / `syncedVersionColumn` on the provider rename them). `retries: 3, retryDelay: Duration(seconds: 1)` retries a failed sync with exponential backoff and jitter
 (not on 4xx except 408 / 429); sync again from the app's connectivity listener when the device is back online.
+A sync never reads uncommitted data: during a `FluentDb.transaction` on the same database it waits for the commit, at most
+`FluentConfig.committedReadTimeout` (30 s), then fails with the transient `FluentErrorCode.databaseBusy` (retried by `retries`).
 
 ```dart
 notes.watchSyncStatus().listen((FluentSyncStatus s) => setState(() => _status = s)); // state (FluentSyncState idle / syncing / failed), pending, lastSyncedAt, lastError

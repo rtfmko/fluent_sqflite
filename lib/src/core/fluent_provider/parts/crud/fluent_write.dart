@@ -63,6 +63,8 @@ extension FluentWrite<T extends FluentStorable> on FluentProvider<T> {
     final List<T> list = items.toList(growable: false);
     if (list.isEmpty) return FluentSaveResult.empty;
     _checkConflictOn(conflictOn);
+    // Rows with an expiry: reads called from now on hide expired rows (the row writer marks it again when it runs).
+    if (!_mayExpire && list.any((item) => item.timeToLive != null)) _mayExpire = true;
     final List<FluentRowOutcome> outcomes = await _run<List<FluentRowOutcome>>(
       FluentDbAction.save,
       data: list,
@@ -108,7 +110,15 @@ extension FluentWrite<T extends FluentStorable> on FluentProvider<T> {
       policy: policy,
       tag: tag,
     );
-    return outcomes.where((o) => o == FluentRowOutcome.updated).length;
+    // The same key twice is written once (the last one wins): counted once.
+    final Set<String> rows = {};
+    int updated = 0;
+    for (int i = 0; i < outcomes.length; i++) {
+      if (outcomes[i] != FluentRowOutcome.updated) continue;
+      final Object? key = list[i].primaryKeyValue;
+      if (key == null || rows.add(_keyText(key))) updated++;
+    }
+    return updated;
   }
 
   /// Sets [fields] (column → Dart value, or a [FluentUpdate] computed by SQLite) on the row with key [id]; returns 1

@@ -43,11 +43,14 @@ extension _FluentMapper<T extends FluentStorable> on FluentProvider<T> {
 
       final FluentConverter<Object?, Object?>? converter = _converters[key];
       if (converter != null) {
-        finalSqlJson[key] = _convert(key, value, converter, toSql: true);
+        final Object? stored = _convert(key, value, converter, toSql: true);
+        FluentSqlSanitizer.checkStored(stored, _numericColumns[key], tableName: tableName, key: key);
+        finalSqlJson[key] = stored;
         continue;
       }
 
       final ({dynamic value, String? metaType}) result = FluentSqlSanitizer.sanitize(value: value, config: _tableConfig, tableName: tableName, key: key);
+      FluentSqlSanitizer.checkStored(result.value, _numericColumns[key], tableName: tableName, key: key);
       finalSqlJson[key] = result.value;
 
       // The column kind already tells how to read the value back: no per-row metadata needed.
@@ -57,7 +60,7 @@ extension _FluentMapper<T extends FluentStorable> on FluentProvider<T> {
       }
     }
 
-    final String metaColumn = FluentDbColumn.systemMetadata().name;
+    const String metaColumn = _metadataColumn;
     if (typeMetadata != null && typeMetadata.isNotEmpty) {
       finalSqlJson[metaColumn] = jsonEncode(typeMetadata);
     } else if (validColumns.contains(metaColumn)) {
@@ -86,6 +89,7 @@ extension _FluentMapper<T extends FluentStorable> on FluentProvider<T> {
     final int? expiry = timeToLive == null ? null : FluentClock.now().add(timeToLive).millisecondsSinceEpoch;
     if (expiry != null) {
       finalSqlJson[_expiryColumn] = expiry;
+      _mayExpire = true;
     }
 
     return finalSqlJson;

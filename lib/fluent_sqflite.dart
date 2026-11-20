@@ -59,6 +59,7 @@ export 'src/utils/utils.dart'
         FluentQuotedRow,
         FluentJsonExtension,
         FluentKeyCondition,
+        FluentListCondition,
         FluentRelatedCondition,
         FluentRelatedMode,
         FluentSearchCondition,

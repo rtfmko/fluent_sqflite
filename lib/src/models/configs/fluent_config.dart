@@ -23,21 +23,32 @@ class FluentConfig {
   /// in (default 2 s, `null` turns it off).
   ///
   /// A transaction that awaits a call made outside it after it started would wait forever: that call is queued
-  /// behind the transaction. The watchdog logs a warning with a hint and runs the waiting **reads** inside the
-  /// transaction, so such a transaction can finish. Waiting writes are not moved into it (a rollback would undo
+  /// behind the transaction. The watchdog logs a warning with a hint and, once the transaction has run no database
+  /// call for this long (it waits for something outside it), runs the waiting **reads** inside the transaction, so
+  /// such a transaction can finish. A slow transaction that keeps working never shows its uncommitted changes. Waiting writes are not moved into it (a rollback would undo
   /// writes already reported as successful); they keep waiting for the transaction to end.
   final Duration? transactionWatchdog;
+
+  /// How long a read of the library's sync bookkeeping (what `syncWithServer` pushes, the local rows a merge combines,
+  /// the time of the last pull / fetch) waits for a transaction on its database to end (default 30 s, `null` waits
+  /// as long as it takes).
+  ///
+  /// These reads must see committed data only, so the [transactionWatchdog] never moves them into a transaction:
+  /// they wait for its commit. After this time the call is refused with `FluentErrorCode.databaseBusy` (a transient
+  /// error: `retries` of `syncWithServer` / `watchRemote` run it again later), since the transaction may be waiting
+  /// for the sync itself and would never end.
+  final Duration? committedReadTimeout;
 
   /// A queue paused with `FluentDb.pauseQueue` longer than this is resumed with a warning (default 60 s, `null`
   /// keeps it paused until `resumeQueue`).
   final Duration? pauseWatchdog;
 
   /// How often the trash is purged while the app runs (default daily; it is always purged at `init`); `null` purges
-  /// only at `init`.
+  /// only at `init`. At least [minMaintenanceInterval]: a shorter one is raised to it (with a warning).
   final Duration? trashPurgeInterval;
 
   /// How often SQLite refreshes its query planner statistics (`PRAGMA optimize`) while the app runs (default every
-  /// 6 hours; it also runs on `FluentDb.close`); `null` runs it only on close.
+  /// 6 hours; it also runs on `FluentDb.close`); `null` runs it only on close. At least [minMaintenanceInterval].
   final Duration? optimizeInterval;
 
   /// Whether big lists are turned into models in a background isolate (keeps the UI smooth). Default
@@ -98,6 +109,7 @@ class FluentConfig {
   /// Creates the library settings; every value has a default tuned for apps.
   const FluentConfig({
     this.transactionWatchdog = const Duration(seconds: 2),
+    this.committedReadTimeout = const Duration(seconds: 30),
     this.pauseWatchdog = const Duration(seconds: 60),
     this.trashPurgeInterval = const Duration(hours: 24),
     this.optimizeInterval = const Duration(hours: 6),
@@ -114,24 +126,43 @@ class FluentConfig {
     this.batchKeys = FluentBatchKeys.fromRows,
   });
 
+  /// The shortest [trashPurgeInterval] / [optimizeInterval] (1 s): a shorter one would run its job again as soon as
+  /// it ends, so the library would never be idle (a busy loop on the device).
+  static const Duration minMaintenanceInterval = Duration(seconds: 1);
+
   /// This config with every interval that cannot work (zero or negative: a timer that never waits, a watchdog that
-  /// fires at once) replaced by its default; [onFixed] hears each replacement (`name`, the bad value, the default).
+  /// fires at once) replaced by its default, and maintenance intervals below [minMaintenanceInterval] raised to it;
+  /// [onFixed] hears each replacement (`name`, the bad value, the value used).
   @internal
   FluentConfig withSafeIntervals(void Function(String name, Duration bad, Duration fallback) onFixed) {
     const FluentConfig defaults = FluentConfig();
-    Duration? check(String name, Duration? value, Duration? fallback) {
-      if (value == null || value > Duration.zero) return value;
-      onFixed(name, value, fallback!);
-      return fallback;
+    Duration? check(String name, Duration? value, Duration? fallback, {Duration? min}) {
+      if (value == null) return value;
+      if (value <= Duration.zero) {
+        onFixed(name, value, fallback!);
+        return fallback;
+      }
+      if (min != null && value < min) {
+        onFixed(name, value, min);
+        return min;
+      }
+      return value;
     }
 
     final Duration? tx = check('transactionWatchdog', transactionWatchdog, defaults.transactionWatchdog);
+    final Duration? committed = check('committedReadTimeout', committedReadTimeout, defaults.committedReadTimeout);
     final Duration? pause = check('pauseWatchdog', pauseWatchdog, defaults.pauseWatchdog);
-    final Duration? purge = check('trashPurgeInterval', trashPurgeInterval, defaults.trashPurgeInterval);
-    final Duration? optimize = check('optimizeInterval', optimizeInterval, defaults.optimizeInterval);
-    if (identical(tx, transactionWatchdog) && identical(pause, pauseWatchdog) && identical(purge, trashPurgeInterval) && identical(optimize, optimizeInterval)) return this;
+    final Duration? purge = check('trashPurgeInterval', trashPurgeInterval, defaults.trashPurgeInterval, min: minMaintenanceInterval);
+    final Duration? optimize = check('optimizeInterval', optimizeInterval, defaults.optimizeInterval, min: minMaintenanceInterval);
+    final int? readers = readConnections;
+    final int? safeReaders = readers?.clamp(0, 4);
+    if (readers != null && safeReaders != readers) {
+      onFixed('readConnections', Duration(milliseconds: readers), Duration(milliseconds: safeReaders!));
+    }
+    if (safeReaders == readConnections && identical(tx, transactionWatchdog) && identical(committed, committedReadTimeout) && identical(pause, pauseWatchdog) && identical(purge, trashPurgeInterval) && identical(optimize, optimizeInterval)) return this;
     return FluentConfig(
       transactionWatchdog: tx,
+      committedReadTimeout: committed,
       pauseWatchdog: pause,
       trashPurgeInterval: purge,
       optimizeInterval: optimize,
@@ -144,7 +175,7 @@ class FluentConfig {
       indexReferences: indexReferences,
       autoRelations: autoRelations,
       fullText: fullText,
-      readConnections: readConnections,
+      readConnections: safeReaders,
       batchKeys: batchKeys,
     );
   }

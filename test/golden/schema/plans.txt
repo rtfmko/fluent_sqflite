@@ -1,0 +1,88 @@
+=== unchanged
+=== Migration plan of "golden_schema" ===
+  nothing to change
+
+losesData: false
+rebuilds: false
+isEmpty: true
+
+=== add column
+=== Migration plan of "golden_schema" ===
+  t:
+    - added column "extra"
+
+losesData: false
+rebuilds: false
+isEmpty: false
+
+=== rename by oldName
+=== Migration plan of "golden_schema" ===
+  t:
+    - renamed column "name" to "title"
+
+losesData: false
+rebuilds: false
+isEmpty: false
+
+=== remove column (archived)
+=== Migration plan of "golden_schema" ===
+  t:
+    - archived column "nick" as "__fluent_removed_nick_r2"
+  [autoFix] Column "nick" of "t" is no longer in the model; its data is kept in "__fluent_removed_nick_r2".
+
+losesData: false
+rebuilds: false
+isEmpty: false
+
+=== remove column (dropped)
+=== Migration plan of "golden_schema" ===
+  t:
+    ⚠ dropped column "nick" with its data
+
+losesData: true
+rebuilds: false
+isEmpty: false
+
+=== type change
+=== Migration plan of "golden_schema" ===
+  t:
+    - changed definition of "age"
+    - rebuilt table
+    - created index "idx_t_expiry_date"
+  [warning] Column "age" of "t" changes from TEXT to INTEGER; the existing values are copied as they are.
+
+losesData: false
+rebuilds: true
+isEmpty: false
+
+=== unique + check + index
+=== Migration plan of "golden_schema" ===
+  t:
+    - changed definition of "name"
+    - table CHECK constraints changed
+    - rebuilt table
+    - created index "idx_t_expiry_date"
+    - created index "idx_t_nick"
+
+losesData: false
+rebuilds: true
+isEmpty: false
+
+=== new table, old table not declared
+=== Migration plan of "golden_schema" ===
+  v:
+    - created table with 4 columns
+    - created index "idx_v_expiry_date"
+
+losesData: false
+rebuilds: false
+isEmpty: false
+
+=== step
+=== Migration plan of "golden_schema" ===
+  t:
+    - step "fix": 1 SQL statement(s)
+
+losesData: false
+rebuilds: false
+isEmpty: false

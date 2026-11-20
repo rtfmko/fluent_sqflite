@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:fluent_sqflite/src/internal.dart';
 import 'package:fluent_sqflite_test/fluent_sqflite_test.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -35,6 +37,25 @@ void main() {
       expect(FluentClock.now(), DateTime.utc(2030));
       expect(FluentClock.now(), DateTime.utc(2030, 1, 1, 0, 0, 1));
       expect(FluentClock.millis, DateTime.utc(2030, 1, 1, 0, 0, 2).millisecondsSinceEpoch);
+    });
+
+    test('a clock move runs due timers in the zone they were created in, never in the zone of the caller', () async {
+      // Crud fuzz seed 57345: a test moved the clock inside a nested transaction; the trash purge ran in that zone,
+      // joined the transaction with a savepoint of its own and released it out of order ("no such savepoint").
+      final Object key = Object();
+      DateTime now = DateTime.utc(2030);
+      FluentClock.testNow = () => now;
+      final List<Object?> seen = [];
+      final FluentClockTimer timer = FluentClockTimer(const Duration(hours: 1), () async => seen.add(Zone.current[key]));
+      final FluentClockAlarm alarm = FluentClockAlarm(DateTime.utc(2030, 1, 1, 1).millisecondsSinceEpoch, () => seen.add(Zone.current[key]));
+      addTearDown(timer.cancel);
+      addTearDown(alarm.cancel);
+      runZoned(() {
+        now = now.add(const Duration(hours: 2));
+        FluentClock.testNow = () => now;
+      }, zoneValues: {key: 'caller'});
+      await Future<void>.delayed(Duration.zero);
+      expect(seen, [null, null], reason: 'both ran, outside the caller zone');
     });
   });
 }

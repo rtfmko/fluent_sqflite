@@ -33,13 +33,20 @@ metadata:
 - Always pass both generic types: `FluentRelation.many<Article, Comment>(...)`.
 - Read the relation in `fromCacheJson` under its name: `json['author'] as Person?`,
   `(json['comments'] as List?)?.cast<Comment>()`. Keep the field nullable: `null` means "not loaded".
-- A `null` relation on save means "not loaded": stored data is untouched. A list (even empty) replaces the stored
-  one — removed `many` children are deleted, removed `manyToMany` links are unlinked. Use `keepMissing: true` or
+- A `null` relation on save means "not loaded": stored data is untouched. A list replaces the stored one — removed
+  `many` children are deleted, removed `manyToMany` links are unlinked (an empty list only on a read model or with
+  `relationSync: replace`, see below). Use `keepMissing: true` or
   `attach` / `detach` to change lists partially.
 - A save never removes: anything for a relation with `limit` (with `where`: only matching rows), trashed / expired
   children and targets (their links stay), nothing for `unloadedRelations` (`FluentLoad.none`, lazy, depth cut-off,
   failed load; new children are still saved). Children read from the trash are not restored by saving the parent
   (`trash.restore`). `insertOnly` on an existing row writes nothing for its relations.
+- Rebuilt models (`copyWith`): the read list instance carries what the read showed, so a copy that keeps the list
+  removes only what the read showed (nothing for an unloaded list, even with `replace`); a list read for another
+  relation / owner only adds. An empty list on a model the app built (no read behind it or the list, `const []`)
+  removes nothing (`relationListKept` warning): clear with `relationSync: FluentRelationSyncMode.replace`, `detach`
+  or `delete`. A new non-empty list (`[...list]`) replaces like a read list; edit the read list in place to keep the
+  view rules of the read. Default unloaded lists to `?? []` (own instance) rather than `const []`.
 - `findParents` of a `oneOf` relation covers every listed type, also without `via`.
 - `cleanOrphans` keeps references into rows quarantined in `__fluent_rejected_*` and reports them (`danglingReferences`).
 - Reads load the eager relations one level deep (`relations: FluentLoad.eager`, `maxDepth: 1`). For lists use

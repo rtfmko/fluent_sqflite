@@ -35,8 +35,9 @@ metadata:
 - `aggregate(orderBy:)` names group columns or value names only.
 - Projections are maps (never partial models: saving one would overwrite the missing columns).
 
-- `FluentFilter.ids` takes up to 900 keys (use `findByIds` beyond); `findPage(orderBy:)` needs columns `buildJson`
-  writes; negative `limit` / `offset` are refused.
+- `FluentFilter.ids` / `inList` / `notInList` take any number of values in every call (beyond 900 the library uses a
+  temporary table; never chunk key lists yourself); `findPage(orderBy:)` needs columns `buildJson` writes; negative
+  `limit` / `offset` are refused.
 
 ## Basic reads
 

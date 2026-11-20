@@ -36,9 +36,63 @@ mixin FluentSqlSanitizer {
     return (value: encoded.value, metaType: encoded.tag);
   }
 
+  static final RegExp _decimalText = RegExp(r'^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$');
+  static final RegExp _integerText = RegExp(r'^[+-]?\d+$');
+
+  /// The last check before a value (already in its stored form: after the codec or the column's converter) is written:
+  /// the one place for what SQLite would silently change. Refused with a [FluentArgumentException]
+  /// ([FluentErrorCode.unsupportedValue]) and a hint, nothing is written:
+  /// - text that is no number (or an integer beyond 64 bits, which SQLite turns into a rounded double) in an
+  ///   INTEGER / REAL column ([type]; numeric text that converts without loss stays allowed);
+  /// - text with a lone UTF-16 surrogate (UTF-8 would replace it with U+FFFD).
+  /// Cheap: only text is looked at, the numeric rule only for numeric columns.
+  static void checkStored(Object? stored, FluentDbDataType? type, {String? tableName, required String key}) {
+    if (stored is! String) return;
+    if (_hasLoneSurrogate(stored)) {
+      throw _unsupported(key, stored, 'the text contains a lone UTF-16 surrogate, which UTF-8 storage would silently replace with U+FFFD${tableName == null ? '' : ' (table "$tableName")'}',
+        'Remove or replace the broken character before saving or store the value as a Uint8List / with a FluentConverter that encodes it.',
+      );
+    }
+    if (type != FluentDbDataType.integer && type != FluentDbDataType.real) return;
+    final String text = stored.trim();
+    final bool fits = _decimalText.hasMatch(text) && (!_integerText.hasMatch(text) || int.tryParse(text) != null);
+    if (fits) return;
+    throw _unsupported(key, stored, 'a text value cannot be stored in the ${type == FluentDbDataType.integer ? 'INTEGER' : 'REAL'} column without SQLite changing it (not a number, or an integer beyond 64 bits)${tableName == null ? '' : ' (table "$tableName")'}',
+      'Save a number, or declare the column as TEXT (or a BigInt / FluentConverter column with a TEXT type) when it holds text or integers beyond 64 bits.',
+    );
+  }
+
+  static bool _hasLoneSurrogate(String text) {
+    final int n = text.length;
+    for (int i = 0; i < n; i++) {
+      final int c = text.codeUnitAt(i);
+      if (c < 0xD800 || c > 0xDFFF) continue;
+      if (c <= 0xDBFF && i + 1 < n && (text.codeUnitAt(i + 1) & 0xFC00) == 0xDC00) {
+        i++;
+        continue;
+      }
+      return true;
+    }
+    return false;
+  }
+
   /// Reports once per column that the stored form of [value] drops its [lost] part.
   static void _reportLost(String lost, String? tableName, String? key, Object? value) {
     final String column = key ?? 'unknown';
+    if (lost == FluentTypeCodecs.ambiguousHour) {
+      FluentLog.issue(
+        FluentIssueKind.precisionLost,
+        'A local DateTime of "$column"${tableName == null ? '' : ' in "$tableName"'} lies in the hour repeated when the clocks go back; '
+        'ISO text of a local time has no offset, so it reads back one hour earlier (the first of the two instants with that wall-clock time).',
+        table: tableName,
+        subject: '$column:hour',
+        tag: 'FluentSqlSanitizer',
+        hint: 'Save UTC values (value.toUtc(), read back as UTC) or store the column as a timestamp, which keeps the instant: '
+            'FluentTableConfig(dateTimeFormat: FluentDateTimeFormat.timestamp). The wall-clock time itself was saved.',
+        code: '@override\nFluentTableConfig get tableConfig => const FluentTableConfig(dateTimeFormat: FluentDateTimeFormat.timestamp);',
+      );
+      return;
+    }
     FluentLog.issue(
       FluentIssueKind.precisionLost,
       'The ${value.runtimeType} values of "$column"${tableName == null ? '' : ' in "$tableName"'} lose their $lost: the timestamp format keeps milliseconds.',

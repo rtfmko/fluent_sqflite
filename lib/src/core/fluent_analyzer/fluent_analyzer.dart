@@ -92,6 +92,11 @@ class FluentAnalyzer {
 
   final Stopwatch _stopwatch = Stopwatch()..start();
   final Map<String, _Burst> _bursts = {};
+
+  /// The most counters [_bursts] keeps; above it old ones are dropped (at most once per second, [_prunedAt]). Pruning
+  /// on every call once the map was full made each call scan thousands of counters (reads of distinct keys).
+  static const int _maxBursts = 2000;
+  int _prunedAt = -1 << 62;
   final Set<String> _explained = {};
 
   /// The slowest recent call per database (what may have held the queue).
@@ -127,7 +132,12 @@ class FluentAnalyzer {
     b
       ..count += 1
       ..last = now;
-    if (_bursts.length > 2000) _bursts.removeWhere((_, v) => now - v.last > pollingSpan);
+    if (_bursts.length > _maxBursts && now - _prunedAt >= 1000) {
+      _prunedAt = now;
+      _bursts.removeWhere((_, v) => now - v.last > pollingSpan);
+      // Still full (many distinct reads within the polling span): drop the oldest half (insertion order).
+      if (_bursts.length > _maxBursts) _bursts.keys.take(_bursts.length - _maxBursts ~/ 2).toList().forEach(_bursts.remove);
+    }
     return b.count;
   }
 
@@ -159,6 +169,7 @@ class FluentAnalyzer {
         title: 'Watch "${task.table}" instead of reading it again and again',
         details: 'The same ${task.action.name} ran $pollingRuns times while the data did not change (a timer or a refresh loop). '
             'watch() reads once and emits again only after a write that changes the table.',
+        fix: 'Replace the timer or refresh loop with FluentDb.watch<$model>(...): it reads once and emits again only after a write to the table.',
         code: 'StreamBuilder<List<$model>>(\n'
             '  stream: FluentDb.watch<$model>(where: ...),\n'
             '  builder: (context, snapshot) => ...,\n'
@@ -180,6 +191,7 @@ class FluentAnalyzer {
           title: 'Batch the calls of "${task.dbName}" instead of queueing thousands',
           details: '$queued calls of "${task.dbName}" were queued at once (the last one: ${task.action.name} on "${task.table}"). '
               'Each waits for the ones before it; one batched call does the same work in one transaction.',
+          fix: 'Save many rows with one saveAll call, or await each call so the queue stays short.',
           code: 'await FluentDb.saveAll<${_model(task.dbName, task.table)}>(items); // instead of items.forEach(FluentDb.save)\n'
               '// or await each call, so the app sees errors and the queue stays short',
         ),
@@ -199,6 +211,7 @@ class FluentAnalyzer {
         title: 'Calls of "${task.dbName}" wait long in the queue',
         details: '${task.action.name} on "${task.table}" waited $waitedMs ms before it could start.$heldBy '
             'A write runs alone and every call queued after it waits; long transactions and big writes hold everything.',
+        fix: 'Keep transactions short (no network or UI waits inside) and split big writes into chunks, so queued calls can start.',
         code: '// keep FluentDb.transaction short (no network / UI waits inside)\n'
             '// split big imports: for (final chunk in items.slices(500)) await FluentDb.saveAll<Model>(chunk);\n'
             "debugPrint('\${FluentDb.engineStats()}'); // queue and wait times",
@@ -266,6 +279,7 @@ class FluentAnalyzer {
           title: 'Declare the values of the enum field "$table.${c.name}"',
           details: '$model stores an enum in "${c.name}" but enumValues does not list its values, so reads return the stored String '
               '(fromCacheJson casting it to the enum fails) and filters compare names by hand.',
+          fix: 'Add the enum to enumValues of $model: {"column": EnumType.values}.',
           code: 'class $model extends FluentStorable {\n'
               '  @override\n'
               "  Map<String, List<Enum>> get enumValues => {'${c.name}': YourEnum.values};\n"
@@ -295,6 +309,7 @@ class FluentAnalyzer {
           details: isKey
               ? 'It repeats the primary key, which SQLite already indexes. Every write updates it for nothing.'
               : 'The index on ($table(${by!.join(', ')})) starts with the same columns and serves the same queries. Every write updates both.',
+          fix: 'Remove this FluentIndex from the indexes of $model; the other index (or the key) serves the same queries.',
           code: "// in $model.indexes, remove: FluentIndex([${index.columns.map((c) => "'$c'").join(', ')}])",
         ),
       );
@@ -309,6 +324,7 @@ class FluentAnalyzer {
           database: db,
           table: table,
           title: 'Give synced "$table" rows keys made on the device',
+          fix: 'Use a key made on the device (a text UUID) instead of the auto-increment "$key", or keep the local id and match server rows by their own id with FluentTableConfig(serverKey: [...]).',
           details: '"$table" syncs with a server but its key "$key" is an auto-increment number: two devices (or a device and the '
               'server) create the same id for different rows, and a pull overwrites one with the other.',
           code: '// a text key created on the device (e.g. a UUID), in $model:\n'
@@ -385,6 +401,7 @@ class FluentAnalyzer {
         details: '${task.action.name} with ${FluentTableStatsTracker.shapeOf(task)} takes $measured.$planText '
             'An index on these columns (equality filters first, then the range or the order) lets SQLite jump to the rows; '
             'it is created on the next start.',
+        fix: 'Add a FluentIndex on these columns to the indexes of the model (equality columns first, then range or order); it is created on the next start.',
         code: indexExample(model, columns),
       ),
     );
@@ -411,6 +428,7 @@ class FluentAnalyzer {
         title: 'Save "${task.table}" rows with saveAll instead of one by one',
         details: '$saveLoopCalls single saves of "${task.table}" ran one after another within ${window.inSeconds} s (each awaited, so they '
             'could not be merged). Every save is its own transaction; saveAll writes all rows in one.',
+        fix: 'Collect the rows and save them with one saveAll call, or wrap the loop in FluentDb.transaction.',
         code: 'await FluentDb.saveAll<$model>(items);\n'
             '// instead of: for (final item in items) await FluentDb.save<$model>(item);',
       ),
@@ -427,6 +445,7 @@ class FluentAnalyzer {
         title: 'Read "${task.table}" rows by a list of keys instead of one by one',
         details: '$lookupLoopCalls findById calls of "${task.table}" ran one after another within ${window.inSeconds} s (N+1 reads). '
             'One query with all keys is much faster; if the rows belong to other models, a relation loads them in batches.',
+        fix: 'Read all keys with one findByIds call, or declare a relation so the rows are loaded in batches.',
         code: 'final List<$model> rows = await FluentDb.findByIds<$model>(ids);\n'
             '// instead of: for (final id in ids) await FluentDb.findById<$model>(id);',
       ),
@@ -443,6 +462,7 @@ class FluentAnalyzer {
         title: 'Read "${task.table}" in pages',
         details: 'One read returned $rows rows without a limit ($elapsedMs ms, all of them in memory as models). '
             'Lists usually show a page at a time; findPage loads the next page when the user scrolls.',
+        fix: 'Read a page at a time with findPage (orderBy + limit) or pass a limit.',
         code: "FluentPage<$model> page = await FluentDb.findPage<$model>(orderBy: 'id', limit: 50);\n"
             "page = await FluentDb.findPage<$model>(orderBy: 'id', limit: 50, after: page.next); // next page",
       ),
@@ -459,6 +479,7 @@ class FluentAnalyzer {
         title: 'Page "${task.table}" with findPage instead of a big offset',
         details: 'A read of "${task.table}" skips $offset rows: SQLite still reads every skipped row, so each page is slower than the last. '
             'findPage continues after the last row of the previous page, so every page costs the same.',
+        fix: 'Page with findPage (after: previous page next) instead of a big offset.',
         code: "FluentPage<$model> page = await FluentDb.findPage<$model>(orderBy: 'id', limit: 50, after: previous?.next);",
       ),
     );
@@ -484,6 +505,7 @@ class FluentAnalyzer {
           title: 'Search "${task.table}.$column" by prefix if you can',
           details: 'A LIKE pattern that starts with % (contains / endsWith) cannot use an index: SQLite reads every row. '
               'A prefix search (startsWith) can, with an index on a NOCASE column.',
+          fix: 'Use FluentFilter.startsWith with an index on a NOCASE column, or a full-text index (FluentFilter.search) for words inside text.',
           code: "FluentFilter.startsWith('$column', text) // instead of FluentFilter.contains('$column', text)\n"
               '// in the model:\n'
               "FluentDbColumn.text('$column', collation: FluentCollation.noCase) // in missingColumns\n"
@@ -502,6 +524,7 @@ class FluentAnalyzer {
         table: table,
         title: 'Load fewer relation levels of "$table"',
         details: 'Reads of "$table" load relations several levels deep and take ~${averageMs.round()} ms on average.',
+        fix: 'Load fewer levels (maxDepth: 1 or FluentLoad.none) and mark big relations lazy, loading them only when needed.',
         code: 'await FluentDb.find<$model>(maxDepth: 1); // or relations: FluentLoad.none for lists\n'
             "// and load big relations only when needed: FluentRelation.many(..., lazy: true) + model.loadRelations(names: ['...'])",
       ),
@@ -519,6 +542,7 @@ class FluentAnalyzer {
         title: 'Split big writes of "${task.table}"',
         details: '${task.action.name} of $items row(s) on "${task.table}" took $elapsedMs ms. A write runs alone: every other call of '
             'the database waits for it. Smaller chunks let reads in between.',
+        fix: 'Save in chunks (for example 500 rows per call) so reads can run between the writes.',
         code: 'for (final chunk in items.slices(500)) {\n'
             '  await FluentDb.saveAll<$model>(chunk);\n'
             '}',

@@ -22,7 +22,8 @@ metadata:
 - A removed field is archived (`__fluent_removed_<name>_r<rev>`), not dropped. Drop it on purpose with
   `FluentDbMigration(id: ..., dropColumns: ['x'])`; bring it back with `restoreColumns: {'x': 'y'}`.
 - `oldName` plus a new column under the old name: the data moves, the new column starts empty. Two columns with the same
-  `oldName`: the first gets the data, the second stays empty (`schemaFallback`). A step that leaves a model column missing
+  `oldName`: the first gets the data, the second stays empty (`schemaFallback`). `oldName` onto a name a live column holds:
+  the old holder is archived ("replaced by ...") and the rename runs; a swap exchanges the values once. A step that leaves a model column missing
   fails the start (`schemaConflict`), nothing changes.
 - A new `NOT NULL` field needs a `defaultValue`, or a step that fills it; until every row has a value it stays nullable.
 - Data changes go into one-time steps with a unique `version` or `id`. Never edit or reorder a step that may have
@@ -89,7 +90,7 @@ FluentDbMigration(
 ),
 ```
 
-The warning at start names the exact quarantine table and revision.
+The warning at start names the exact quarantine table and revision. Children of a quarantined parent keep their reference (`danglingReferences`, whole again once the parent row is moved back).
 
 ## Before applying
 

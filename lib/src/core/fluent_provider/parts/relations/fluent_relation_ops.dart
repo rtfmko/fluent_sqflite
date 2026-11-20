@@ -48,7 +48,7 @@ extension FluentRelationOps<T extends FluentRelations> on FluentProvider<T> {
 
       final FluentTask task = FluentTask(action: FluentDbAction.findById, table: tableName, dbName: dbName, maxDepth: maxDepth, ignoreLazy: names.isEmpty);
       final List<Map<String, dynamic>> hydrated = await _processRowsBatch(rows, task, force: names.where(known.contains).toSet());
-      return _assembleModel(hydrated.first);
+      return _rememberLoads(hydrated, [_assembleModel(hydrated.first)]).first;
     });
   }
 
@@ -96,6 +96,7 @@ extension FluentRelationOps<T extends FluentRelations> on FluentProvider<T> {
   /// `SELECT COUNT(*)` of the rows of [target] matching [where] (related / search conditions resolved on [target]).
   Future<int> _countRows(FluentProvider target, FluentFilter where) async {
     final FluentFilter resolved = target._resolveRelated(where);
+    await target._flushValueLists();
     final List<Map<String, Object?>> rows = await target.executor.rawQuery(
       'SELECT COUNT(*) AS c FROM ${target.tableName.quotedIdentifier}${resolved.whereClause.isEmpty ? '' : ' WHERE ${resolved.whereClause}'}',
       target._sqlArgs(resolved.whereArgs),

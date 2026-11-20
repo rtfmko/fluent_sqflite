@@ -2,6 +2,7 @@
 // The setup examples spell out default values on purpose (they document them).
 // ignore_for_file: avoid_redundant_argument_values
 import 'dart:async';
+import 'dart:io';
 
 import 'package:fluent_sqflite/fluent_sqflite.dart';
 import 'package:fluent_sqflite_test/fluent_sqflite_test.dart';
@@ -450,6 +451,8 @@ void main() {
     expect(stats.queries, isNotEmpty);
     FluentDb.configure(const FluentConfig(optimizeInterval: null));
     expect(FluentDb.config.optimizeInterval, isNull);
+    FluentDb.configure(const FluentConfig(trashPurgeInterval: Duration(milliseconds: 5)));
+    expect(FluentDb.config.trashPurgeInterval, FluentConfig.minMaintenanceInterval, reason: 'raised to 1 s (configFallback)');
     FluentDb.configure(const FluentConfig());
   });
 
@@ -597,6 +600,42 @@ void main() {
     }
   });
 
+  test('error codes (errors guide): databaseNotOpen for an unopened dbKey, databaseCorrupt for a damaged file', () async {
+    try {
+      await FluentDb.find<Post>(dbKey: FluentDbKey('docs_nowhere'));
+      fail('expected an error');
+    } on FluentException catch (e) {
+      expect(e.code, FluentErrorCode.databaseNotOpen);
+      expect(e.hint, contains('FluentDb.init'));
+    }
+    expect(FluentErrorCode.databaseNotFound.name, 'databaseNotFound', reason: 'a missing read-only file only');
+
+    await db.close();
+    final Directory dir = await Directory.systemTemp.createTemp('fluent_docs_corrupt');
+    try {
+      final FluentDbKey key = FluentDbKey('docs_corrupt');
+      await File('${dir.path}/docs_corrupt.db').writeAsBytes(List<int>.generate(4096, (i) => (i * 7) % 251));
+      try {
+        await FluentDb.init([FluentGroup(dbKey: key, providerList: [PostProvider()], directory: dir.path)]);
+        fail('expected an error');
+      } on FluentException catch (e) {
+        expect(e.code, FluentErrorCode.databaseCorrupt);
+        expect(e.hint, allOf(contains('backup'), contains('resetOnSchemaError')));
+      }
+      expect(FluentDb.isOpen(dbKey: key), isFalse);
+      // The documented way out: start empty on purpose (the file's data is lost).
+      await FluentDb.init([FluentGroup(dbKey: key, providerList: [PostProvider()], directory: dir.path, resetOnSchemaError: true)]);
+      expect(FluentDb.isOpen(dbKey: key), isTrue);
+    } finally {
+      await FluentDb.close();
+      try {
+        await dir.delete(recursive: true);
+      } on FileSystemException {
+        // Windows may still hold the file for a moment.
+      }
+    }
+  });
+
   test('known bugs fixes: utc epoch converter, copyWith clears with null, converter value check', () {
     const FluentEpochDateTimeConverter converter = FluentEpochDateTimeConverter(utc: true);
     final DateTime at = DateTime.utc(2026, 11, 4, 9);
@@ -647,6 +686,9 @@ void main() {
     expect(config.batchKeys, FluentBatchKeys.fromModels);
     expect(const FluentConfig().batchKeys, FluentBatchKeys.fromRows);
     expect(posts.policy, const ExecutionPolicy());
+    // doc/sync.md: sync reads wait for a transaction at most committedReadTimeout, then fail with databaseBusy.
+    expect(const FluentConfig().committedReadTimeout, const Duration(seconds: 30));
+    expect(FluentErrorCode.values, contains(FluentErrorCode.databaseBusy));
   });
 
   test('round 3: FluentCancelToken stops syncWithServer', () async {
@@ -656,5 +698,54 @@ void main() {
     expect(done.isCancelled, isTrue);
     expect('$done', contains('cancelled'));
     expect(FluentErrorCode.syncCancelled.name, 'syncCancelled');
+  });
+
+  test('guarantees: a wait cycle between databases fails with FluentErrorCode.deadlock', () async {
+    await db.close();
+    final PostProvider a = PostProvider();
+    final PostProvider b = PostProvider();
+    final FluentDbKey keyA = FluentDbKey('docs_dl_a_${DateTime.now().microsecondsSinceEpoch}');
+    final FluentDbKey keyB = FluentDbKey('docs_dl_b_${DateTime.now().microsecondsSinceEpoch}');
+    await FluentDb.init([
+      FluentGroup(dbKey: keyA, providerList: [a], inMemory: true),
+      FluentGroup(dbKey: keyB, providerList: [b], inMemory: true),
+    ]);
+    try {
+      final Completer<void> aIn = Completer<void>();
+      final Completer<void> bIn = Completer<void>();
+      final Future<void> ab = FluentDb.transaction(() async {
+        await a.save(Post(title: 'a'));
+        aIn.complete();
+        await bIn.future;
+        await FluentDb.transaction(() => b.save(Post(title: 'b')), dbKey: keyB);
+      }, dbKey: keyA);
+      final Future<Object?> ba = FluentDb.transaction(() async {
+        await b.save(Post(title: 'c'));
+        bIn.complete();
+        await aIn.future;
+        await Future<void>.delayed(const Duration(milliseconds: 20)); // A -> B waits first: this call closes the cycle
+        await FluentDb.transaction(() => a.save(Post(title: 'd')), dbKey: keyA);
+      }, dbKey: keyB).then<Object?>((_) => null, onError: (Object e) => e);
+
+      await ab.timeout(const Duration(seconds: 15));
+      final Object? refused = await ba.timeout(const Duration(seconds: 15));
+      expect(refused, isA<FluentEngineException>());
+      expect((refused! as FluentEngineException).code, FluentErrorCode.deadlock);
+      expect((refused as FluentEngineException).hint, isNotNull);
+      expect(await a.count(), 1);
+      expect(await b.count(), 1, reason: 'the refused transaction rolled back as a whole');
+    } finally {
+      await FluentDb.close();
+    }
+  });
+
+  test('guarantees: the failed event of watchRemote carries a FluentSyncException, the fetch error is its cause', () async {
+    final FluentRemoteEvent<Post> event = await posts
+        .watchRemote(fetch: () async => throw TimeoutException('too slow'), keepWatching: false)
+        .last;
+    expect(event.hasError, isTrue);
+    final Object? error = event.error;
+    expect(error, isA<FluentSyncException>());
+    expect((error! as FluentSyncException).cause, isA<TimeoutException>());
   });
 }

@@ -168,7 +168,9 @@ class FaultyDatabaseFactory {
 
   void _check(SqlCall call) {
     if (_dead) {
-      if (call.method == 'closeDatabase' || call.method == 'deleteDatabase' || call.method == 'databaseExists' || call.method == 'getDatabasesPath') return;
+      // ROLLBACK passes too: SQLite rolls back an open transaction of a killed process when the file is opened again,
+      // and sqflite would otherwise keep waiting for that transaction to end (every later call on the connection hangs).
+      if (call.isRollback || call.method == 'closeDatabase' || call.method == 'deleteDatabase' || call.method == 'databaseExists' || call.method == 'getDatabasesPath') return;
       injected.add(call);
       throw SqfliteDatabaseException('SqliteException(${FaultKind.ioError.code}): ${FaultKind.ioError.text} (the app died)', null, resultCode: FaultKind.ioError.code);
     }

@@ -37,7 +37,7 @@ metadata:
 - Database names (`FluentDbKey('app')`) use letters, digits and `_` only.
 
 - NaN doubles cannot be saved; the timestamp format keeps milliseconds (cut microseconds are reported:
-  `precisionLost`); unknown stored enum values read as `null` (nullable) with a `mappingValue` warning. One provider
+  `precisionLost`; so is a local ISO time in the hour repeated when the clocks go back, which reads back 1 h earlier); unknown stored enum values read as `null` (nullable) with a `mappingValue` warning. One provider
   instance per group.
 - Default names: `HTTPAuthor` → `http_author`, `Item2` → `item2`, `Box<Note>` → `box_note`; 1.x names
   (`h_t_t_p_author`, `item_2`) are renamed at the first start (`legacyNameAdopted`). Raw SQL uses the new names.

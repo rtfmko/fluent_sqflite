@@ -150,6 +150,16 @@ class FluentGroup {
     final Map<String, Type> names = <String, Type>{};
     for (final FluentProvider dao in providerList) {
       final String tableName = dao.tableName;
+      if (tableName.trim().isEmpty) {
+        throw FluentLog.raise(
+          FluentSchemaException(
+            '${dao.runtimeType} has an empty table name (database "${dbKey.dbName}").',
+            modelName: tableName,
+            hint: "Return a name from the provider: @override String get tableName => 'items';",
+          ),
+          tag: 'FluentGroup:validation',
+        );
+      }
       if (names.containsKey(tableName)) {
         throw FluentLog.raise(
           FluentSchemaException(

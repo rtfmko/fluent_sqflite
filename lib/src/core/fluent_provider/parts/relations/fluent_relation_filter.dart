@@ -67,6 +67,7 @@ extension _FluentRelationFilter<T extends FluentStorable> on FluentProvider<T> {
         final FluentRelatedCondition related => _relatedSql(related, outer, aliases),
         final FluentSearchCondition search => _searchSql(search, outer),
         final FluentKeyCondition keys => _idsSql(keys),
+        final FluentListCondition list => _listSql(list),
       };
       sql.write(condition.whereClause);
       final List<Object?> conditionArgs = condition.whereArgs;
@@ -79,22 +80,6 @@ extension _FluentRelationFilter<T extends FluentStorable> on FluentProvider<T> {
     sql.write(clause.substring(pos));
     take(argIndex, raw.length);
     return FluentFilter(sql.toString(), FluentFilterArgs(out, outColumns.every((c) => c == null) ? const [] : outColumns));
-  }
-
-  /// The key condition of `FluentFilter.ids`; one statement cannot hold more variables than SQLite allows.
-  FluentFilter _idsSql(FluentKeyCondition keys) {
-    if (keys.ids.length > keysPerChunk(_maxParamsPerChunk)) {
-      throw FluentLog.raise(
-        FluentArgumentException(
-          'ids',
-          'FluentFilter.ids got ${keys.ids.length} keys for "$tableName"; one statement takes at most ${keysPerChunk(_maxParamsPerChunk)} (SQLite limits its variables).',
-          hint: 'A single WHERE cannot be split. Read with findByIds(ids) (it chunks), or call the write / delete once per chunk of '
-              '${keysPerChunk(_maxParamsPerChunk)} ids.',
-        ),
-        tag: '$tableName:ids',
-      );
-    }
-    return keysFilter(keys.ids);
   }
 
   /// The `?` placeholders in [sql], outside string literals, quoted identifiers and comments.
@@ -279,6 +264,7 @@ extension _FluentRelationFilter<T extends FluentStorable> on FluentProvider<T> {
         title: 'Index the reference columns of relation "${link.name}"',
         details: 'indexReferences is off for "$dbName", so "$table"(${columns.join(', ')}) has no index: loading "${link.name}" or '
             'filtering by it reads every row of "$table", and so does deleting a "${link.owner.tableName}" row.',
+        fix: 'Turn on FluentDbConfig(indexReferences: true), or add a FluentIndex on the reference columns of the model.',
         code: linked
             ? 'FluentGroup(..., config: const FluentDbConfig(indexReferences: true))'
             : 'FluentGroup(..., config: const FluentDbConfig(indexReferences: true))\n'

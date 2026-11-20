@@ -52,6 +52,7 @@ extension _FluentDbMaintenance on FluentDb {
       FluentLog.info('Database "$dbName": dangling references removed.', tag: 'FluentDb:maintenance');
     } catch (e, st) {
       // The caller receives the error: logged once on its way (nothing was changed).
+      if (e is DatabaseException) throw FluentLog.raise(FluentTransactionScope.sqlError(dbName, e, st), tag: 'FluentDb:cleanOrphans'); // typed, the original is the cause
       FluentLog.report(e, stackTrace: st, tag: 'FluentDb:maintenance');
       rethrow;
     }

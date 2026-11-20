@@ -215,7 +215,7 @@ void main() {
 
     test('trash on an unknown database fails through the future, not synchronously', () async {
       final trash = FluentDb.trash<Comment>(dbKey: FluentDbKey('nope'));
-      await expectLater(trash.find(), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.providerNotFound)));
+      await expectLater(trash.find(), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotOpen)));
     });
   });
 
@@ -235,7 +235,7 @@ void main() {
     test('a dbKey that has no such database', () async {
       await expectLater(
         FluentDb.find<Gadget>(dbKey: FluentDbKey('elsewhere')),
-        throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.providerNotFound).having((e) => e.message, 'message', contains('"elsewhere"'))),
+        throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotOpen).having((e) => e.message, 'message', contains('"elsewhere"'))),
       );
     });
 
@@ -267,7 +267,10 @@ void main() {
       await expectLater(FluentDb.find<Gadget>(), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.notInitialized)));
       await expectLater(FluentDb.save<Gadget>(Gadget(name: 'x')), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.notInitialized)));
       await expectLater(FluentDb.clear(), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.notInitialized)));
-      await expectLater(FluentDb.clear(dbKey: FluentDbKey('x')), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotFound)));
+      await expectLater(FluentDb.clear(dbKey: FluentDbKey('x')), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotOpen)));
+      // G25: a named database that is not open is never skipped silently.
+      await expectLater(FluentDb.cleanOrphans(dbKey: FluentDbKey('x')), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotOpen)));
+      await expectLater(FluentDb.schemaReport(dbKey: FluentDbKey('x')), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotOpen)));
       await expectLater(FluentDb.transaction(() async => 1), throwsA(isA<FluentArgumentException>()));
       expect(FluentDb.isOpen(), isFalse);
       expect(FluentDb.isOpen(dbKey: FluentDbKey('x')), isFalse);
@@ -506,7 +509,7 @@ void main() {
         FluentDb.transaction(() async => 1),
         throwsA(isA<FluentArgumentException>().having((e) => '${e.message} ${e.cause}', 'message', anything)),
       );
-      await expectLater(FluentDb.transaction(() async => 1, dbKey: FluentDbKey('tx_c')), throwsA(isA<FluentArgumentException>()));
+      await expectLater(FluentDb.transaction(() async => 1, dbKey: FluentDbKey('tx_c')), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotOpen)));
       expect(await FluentDb.transaction(() async => FluentDb.count<Gadget>(), dbKey: FluentDbKey('tx_a')), 0);
       await FluentDb.transaction(() async {
         await FluentDb.save<Gadget>(Gadget(name: 'a'), dbKey: FluentDbKey('tx_a'));
@@ -548,11 +551,11 @@ void main() {
       await sub.cancel();
     });
 
-    test('an unknown database is refused with databaseNotFound and a list of the open ones', () async {
+    test('an unknown database is refused with databaseNotOpen and a list of the open ones', () async {
       await open();
       await expectLater(
         FluentDb.clear(dbKey: FluentDbKey('ghost')),
-        throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotFound).having((e) => e.hint, 'hint', contains(db.name))),
+        throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotOpen).having((e) => e.hint, 'hint', contains(db.name))),
       );
     });
 
@@ -570,7 +573,7 @@ void main() {
       final reports = await FluentDb.schemaReport();
       expect(reports.single.database, db.name);
       expect(reports.single.tables.map((t) => t.table), containsAll(['gadgets', 'comments']));
-      expect(await FluentDb.schemaReport(dbKey: FluentDbKey('other')), isEmpty);
+      await expectLater(FluentDb.schemaReport(dbKey: FluentDbKey('other')), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotOpen)), reason: 'G25: an unknown dbKey is refused, not skipped');
       final inTx = await FluentDb.transaction(() => FluentDb.schemaReport(dbKey: db.key));
       expect(inTx.single.tables, isNotEmpty);
     });
@@ -578,7 +581,7 @@ void main() {
     test('schemaReport skips a closed connection; purgeArchivedColumns skips unknown and closed databases', () async {
       final g = GadgetProvider();
       await open([g]);
-      await FluentDb.purgeArchivedColumns(olderThan: Duration.zero, dbKey: FluentDbKey('other'));
+      await expectLater(FluentDb.purgeArchivedColumns(olderThan: Duration.zero, dbKey: FluentDbKey('other')), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotOpen)));
       await FluentDb.purgeArchivedColumns(olderThan: Duration.zero);
       await g.db.close();
       expect(await FluentDb.schemaReport(), isEmpty);
@@ -592,7 +595,7 @@ void main() {
       await open();
       await FluentDb.cleanOrphans();
       await FluentDb.cleanOrphans(dbKey: db.key);
-      await FluentDb.cleanOrphans(dbKey: FluentDbKey('other'));
+      await expectLater(FluentDb.cleanOrphans(dbKey: FluentDbKey('other')), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotOpen)));
     });
 
     test('configure replaces the settings and config reads them back', () async {

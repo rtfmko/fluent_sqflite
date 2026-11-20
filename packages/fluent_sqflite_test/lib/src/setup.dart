@@ -17,7 +17,8 @@ import 'fluent_test_db.dart';
 /// Prepares fluent_sqflite for the tests of one file; call it once at the top of `main()`.
 ///
 /// * sqflite runs through FFI (SQLite of the desktop; no device or emulator needed);
-/// * the file gets its own temporary databases directory, removed after its last test;
+/// * the file gets its own temporary databases directory, removed after its last test (under the system temporary
+///   directory, or under the `FLUENT_TEST_TMP` directory when that environment variable is set — e.g. a faster disk);
 /// * library logs are off unless [logging] (default: when the `FLUENT_LOG` environment variable is set) — the issues
 ///   are still collected in `FluentTestDb.issues`;
 /// * the logging setup (sink, level, mute, `showSqlArguments`) is reset after every test, so a test that calls
@@ -30,7 +31,9 @@ void setUpFluentTests({bool? logging}) {
   setUpAll(() async {
     sqfliteFfiInit();
     databaseFactoryOrNull = databaseFactoryFfi; // the setter without the "changing the default factory" warning
-    dir = await Directory.systemTemp.createTemp('fluent_sqflite_test_');
+    final String? base = Platform.environment['FLUENT_TEST_TMP'];
+    final Directory parent = base == null || base.isEmpty ? Directory.systemTemp : await Directory(base).create(recursive: true);
+    dir = await parent.createTemp('fluent_sqflite_test_');
     await databaseFactory.setDatabasesPath(dir.path);
     FluentDb.setupLogging(enabled: logsOn);
   });

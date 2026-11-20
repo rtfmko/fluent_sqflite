@@ -270,15 +270,18 @@ abstract class FluentStorable {
       uniqueColumns[column.name] = column;
     }
 
+    // A column of missingColumns may replace the inferred definition of a buildJson field (the way to attach a
+    // converter or a type): no warning. Only a name declared twice in missingColumns is a true duplicate.
+    final Set<String> declared = {};
     for (final FluentDbColumn column in missingColumns) {
-      if (uniqueColumns.containsKey(column.name)) {
+      if (!declared.add(column.name)) {
         FluentLog.issue(
           FluentIssueKind.schemaFallback,
           'Duplicate column "${column.name}" detected in model "$currentType".',
           tag: 'FluentStorable:tableSchema',
           hint:
-              'This field exists in buildJson() AND missingColumns. '
-              'If you wanted to override the type, keep it in missingColumns only.',
+              'The column "${column.name}" is declared twice in missingColumns(); the last declaration wins. '
+              'Keep one definition.',
         );
       }
       uniqueColumns[column.name] = column;
@@ -324,7 +327,7 @@ abstract class FluentStorable {
       return FluentDbColumn.text(key).copyWith(valueKind: FluentValueKind.json);
     }
     if (value is Enum) {
-      if (!enumValues.containsKey(key)) {
+      if (!enumValues.containsKey(key) && !missingColumns.any((FluentDbColumn c) => c.name == key)) {
         FluentLog.issue(
           FluentIssueKind.schemaFallback,
           'Enum field "$key" of $runtimeType is stored (by ${tableConfig.storeEnumsAsNames ? 'name' : 'index'}) but cannot be read back as ${value.runtimeType}: enumValues has no entry for it.',

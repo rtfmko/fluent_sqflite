@@ -1,0 +1,200 @@
+# bool / plain / timestamp
+bool(true) -> integer 1 | meta null
+bool(false) -> integer 0 | meta null
+
+# int / plain / timestamp
+int(0) -> integer 0 | meta null
+int(1) -> integer 1 | meta null
+int(-1) -> integer -1 | meta null
+int(42) -> integer 42 | meta null
+int(9223372036854775807) -> integer 9223372036854775807 | meta null
+int(-9223372036854775808) -> integer -9223372036854775808 | meta null
+int(9007199254740993) -> integer 9007199254740993 | meta null
+int(-9007199254740993) -> integer -9007199254740993 | meta null
+
+# double / plain / timestamp
+double(0.0) -> real 0.0 | meta null
+double(-0.0) -> real 0.0 | meta null
+double(1.5) -> real 1.5 | meta null
+double(-1.5) -> real -1.5 | meta null
+double(5e-324) -> real 5e-324 | meta null
+double(1.7976931348623157e+308) -> real 1.7976931348623157e+308 | meta null
+double(-1.7976931348623157e+308) -> real -1.7976931348623157e+308 | meta null
+double(1e-300) -> real 1e-300 | meta null
+double(0.1) -> real 0.1 | meta null
+double(3.0) -> real 3.0 | meta null
+double(Infinity) -> real Infinity | meta null
+double(-Infinity) -> real -Infinity | meta null
+
+# String / plain / timestamp
+String() -> text  | meta null
+String(a) -> text a | meta null
+String(it's) -> text it's | meta null
+String(say "x") -> text say "x" | meta null
+String(ä ß ж 漢字 🙂) -> text ä ß ж 漢字 🙂 | meta null
+String(line
+break	tab) -> text line
+break	tab | meta null
+String(Robert'); DROP TABLE vals;--) -> text Robert'); DROP TABLE vals;-- | meta null
+String(%_\) -> text %_\ | meta null
+String( lead and trail ) -> text  lead and trail  | meta null
+String({"a":1}) -> text {"a":1} | meta null
+String(123) -> text 123 | meta null
+String(007) -> text 007 | meta null
+String(1e3) -> text 1e3 | meta null
+String(null) -> text null | meta null
+String(true) -> text true | meta null
+String(len 5000) -> text xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx... (5000 chars) | meta null
+String(​‮) -> text ​‮ | meta null
+String(é) -> text é | meta null
+String(é) -> text é | meta null
+
+# DateTime / plain / iso8601
+DateTime(1970-01-01T00:00:00.000Z) -> text 1970-01-01T00:00:00.000000Z | meta {"v":"datetime_utc"}
+DateTime(2024-05-06T07:08:09.010Z) -> text 2024-05-06T07:08:09.010000Z | meta {"v":"datetime_utc"}
+DateTime(2024-05-06T07:08:09.010007Z) -> text 2024-05-06T07:08:09.010007Z | meta {"v":"datetime_utc"}
+DateTime(1969-12-31T23:59:59.999999Z) -> text 1969-12-31T23:59:59.999999Z | meta {"v":"datetime_utc"}
+DateTime(0001-01-01T00:00:00.000Z) -> text 0001-01-01T00:00:00.000000Z | meta {"v":"datetime_utc"}
+DateTime(-271821-04-20T00:00:00.000Z) -> text -271821-04-20T00:00:00.000000Z | meta {"v":"datetime_utc"}
+DateTime(+275760-09-13T00:00:00.000Z) -> text +275760-09-13T00:00:00.000000Z | meta {"v":"datetime_utc"}
+
+# DateTime / plain / timestamp
+DateTime(1970-01-01T00:00:00.000Z) -> integer 0 | meta {"v":"datetime_utc"}
+DateTime(2024-05-06T07:08:09.010Z) -> integer 1714979289010 | meta {"v":"datetime_utc"}
+DateTime(2024-05-06T07:08:09.010007Z) -> integer 1714979289010 | meta {"v":"datetime_utc"}
+DateTime(1969-12-31T23:59:59.999999Z) -> integer -1 | meta {"v":"datetime_utc"}
+DateTime(0001-01-01T00:00:00.000Z) -> integer -62135596800000 | meta {"v":"datetime_utc"}
+DateTime(-271821-04-20T00:00:00.000Z) -> integer -8640000000000000 | meta {"v":"datetime_utc"}
+DateTime(+275760-09-13T00:00:00.000Z) -> integer 8640000000000000 | meta {"v":"datetime_utc"}
+
+# DateTime / iso converter (toUtc) / timestamp
+DateTime(1970-01-01T00:00:00.000Z) -> text 1970-01-01T00:00:00.000000Z | meta null
+DateTime(2024-05-06T07:08:09.010Z) -> text 2024-05-06T07:08:09.010000Z | meta null
+DateTime(2024-05-06T07:08:09.010007Z) -> text 2024-05-06T07:08:09.010007Z | meta null
+DateTime(1969-12-31T23:59:59.999999Z) -> text 1969-12-31T23:59:59.999999Z | meta null
+DateTime(0001-01-01T00:00:00.000Z) -> text 0001-01-01T00:00:00.000000Z | meta null
+
+# DateTime / iso converter (keep zone) / timestamp
+DateTime(1970-01-01T00:00:00.000Z) -> text 1970-01-01T00:00:00.000000Z | meta null
+DateTime(2024-05-06T07:08:09.010Z) -> text 2024-05-06T07:08:09.010000Z | meta null
+DateTime(2024-05-06T07:08:09.010007Z) -> text 2024-05-06T07:08:09.010007Z | meta null
+DateTime(1969-12-31T23:59:59.999999Z) -> text 1969-12-31T23:59:59.999999Z | meta null
+DateTime(0001-01-01T00:00:00.000Z) -> text 0001-01-01T00:00:00.000000Z | meta null
+
+# DateTime / epoch converter (local) / timestamp
+DateTime(1970-01-01T00:00:00.000Z) -> integer 0 | meta null
+DateTime(2024-05-06T07:08:09.010Z) -> integer 1714979289010 | meta null
+DateTime(2024-05-06T07:08:09.010007Z) -> integer 1714979289010 | meta null
+DateTime(1969-12-31T23:59:59.999999Z) -> integer -1 | meta null
+DateTime(0001-01-01T00:00:00.000Z) -> integer -62135596800000 | meta null
+DateTime(-271821-04-20T00:00:00.000Z) -> integer -8640000000000000 | meta null
+DateTime(+275760-09-13T00:00:00.000Z) -> integer 8640000000000000 | meta null
+
+# DateTime / epoch converter (utc) / timestamp
+DateTime(1970-01-01T00:00:00.000Z) -> integer 0 | meta null
+DateTime(2024-05-06T07:08:09.010Z) -> integer 1714979289010 | meta null
+DateTime(2024-05-06T07:08:09.010007Z) -> integer 1714979289010 | meta null
+DateTime(1969-12-31T23:59:59.999999Z) -> integer -1 | meta null
+DateTime(0001-01-01T00:00:00.000Z) -> integer -62135596800000 | meta null
+DateTime(-271821-04-20T00:00:00.000Z) -> integer -8640000000000000 | meta null
+DateTime(+275760-09-13T00:00:00.000Z) -> integer 8640000000000000 | meta null
+
+# Duration / plain / timestamp
+Duration(0:00:00.000000) -> integer 0 | meta null
+Duration(0:00:00.000001) -> integer 1 | meta null
+Duration(-0:00:00.000001) -> integer -1 | meta null
+Duration(8765:00:00.000000) -> integer 31554000000000 | meta null
+Duration(-9600:00:00.000000) -> integer -34560000000000 | meta null
+Duration(2562047788:00:54.775807) -> integer 9223372036854775807 | meta null
+Duration(-2562047788:00:54.775808) -> integer -9223372036854775808 | meta null
+
+# BigInt / plain / timestamp
+BigInt(0) -> text 0 | meta null
+BigInt(1) -> text 1 | meta null
+BigInt(-1) -> text -1 | meta null
+BigInt(18446744073709551616) -> text 18446744073709551616 | meta null
+BigInt(-1606938044258990275541962092341162602522202993782792835301376) -> text -16069380442589902755419620923411626025222029937827928353013... (62 chars) | meta null
+BigInt(123456789012345678901234567890) -> text 123456789012345678901234567890 | meta null
+
+# Uri / plain / timestamp
+Uri() -> text  | meta null
+Uri(https://example.com/a?b=c&d=%20#frag) -> text https://example.com/a?b=c&d=%20#frag | meta null
+Uri(mailto:x@y.z) -> text mailto:x@y.z | meta null
+Uri(a/c) -> text a/c | meta null
+Uri(https://%D0%BF%D1%80%D0%B8%D0%BC%D0%B5%D1%80.%D1%80%D1%84/%D0%BF%D1%83%D1%82%D1%8C?q=%E6%BC%A2%E5%AD%97) -> text https://%D0%BF%D1%80%D0%B8%D0%BC%D0%B5%D1%80.%D1%80%D1%84/%D... (103 chars) | meta null
+Uri(file:///C:/x/y%20z.txt) -> text file:///C:/x/y%20z.txt | meta null
+
+# RegExp / plain / timestamp
+RegExp(, cs=true ml=false u=false da=false) -> text  | meta {"v":"regexp"}
+RegExp(a+b, cs=true ml=false u=false da=false) -> text a+b | meta {"v":"regexp"}
+RegExp(\d{3}-\d{4}, cs=true ml=false u=false da=false) -> text \d{3}-\d{4} | meta {"v":"regexp"}
+RegExp(abc, cs=false ml=false u=false da=false) -> text ["abc",false,false,false,false] | meta {"v":"regexp_flags"}
+RegExp(^x$, cs=true ml=true u=false da=false) -> text ["^x$",true,true,false,false] | meta {"v":"regexp_flags"}
+RegExp([😀], cs=true ml=false u=true da=false) -> text ["[😀]",true,false,true,false] | meta {"v":"regexp_flags"}
+RegExp(a.b, cs=true ml=false u=false da=true) -> text ["a.b",true,false,false,true] | meta {"v":"regexp_flags"}
+RegExp(p, cs=false ml=true u=true da=true) -> text ["p",false,true,true,true] | meta {"v":"regexp_flags"}
+RegExp(["\[\],]+, cs=true ml=false u=false da=false) -> text ["\[\],]+ | meta {"v":"regexp"}
+
+# Color / plain / timestamp
+Color(0xff123456) -> integer 4279383126 | meta null
+Color(0x0) -> integer 0 | meta null
+Color(0xffffffff) -> integer 4294967295 | meta null
+Color(0x1020304) -> integer 16909060 | meta null
+Color(0x80ff0000) -> integer 2164195328 | meta null
+
+# Locale / plain / timestamp
+Locale(en) -> text en | meta null
+Locale(en_US) -> text en-US | meta null
+Locale(zh_Hant_TW) -> text zh-Hant-TW | meta null
+Locale(sr_Latn) -> text sr-Latn | meta null
+Locale(pt_BR) -> text pt-BR | meta null
+
+# TimeOfDay / plain / timestamp
+TimeOfDay(0:0) -> text 00:00 | meta null
+TimeOfDay(23:59) -> text 23:59 | meta null
+TimeOfDay(9:5) -> text 09:05 | meta null
+TimeOfDay(12:0) -> text 12:00 | meta null
+
+# enum / enumValues by name / timestamp
+Tone(Tone.calm) -> text calm | meta null
+Tone(Tone.loud) -> text loud | meta null
+Tone(Tone.weird) -> text weird | meta null
+
+# enum / enumValues by index / timestamp
+Tone(Tone.calm) -> text 0 | meta null
+Tone(Tone.loud) -> text 1 | meta null
+Tone(Tone.weird) -> text 2 | meta null
+
+# enum / enum converter by name / timestamp
+Tone(Tone.calm) -> text calm | meta null
+Tone(Tone.loud) -> text loud | meta null
+Tone(Tone.weird) -> text weird | meta null
+
+# enum / enum converter by index / timestamp
+Tone(Tone.calm) -> integer 0 | meta null
+Tone(Tone.loud) -> integer 1 | meta null
+Tone(Tone.weird) -> integer 2 | meta null
+
+# json list / plain / timestamp
+json([]) -> text [] | meta null
+json([1,"a",true,null,1.5,-0.0]) -> text [1,"a",true,null,1.5,-0.0] | meta null
+json([[1,2,[]],"ä 漢字 🙂","it's \"q\""]) -> text [[1,2,[]],"ä 漢字 🙂","it's \"q\""] | meta null
+json([9007199254740993,-9223372036854775808]) -> text [9007199254740993,-9223372036854775808] | meta null
+json(["{\"a\":1}","null"]) -> text ["{\"a\":1}","null"] | meta null
+json({"a":1,"nested":{"x":true,"l":[1,2,3],"n":null},"":"empty key","ключ":"значение"}) -> text {"a":1,"nested":{"x":true,"l":[1,2,3],"n":null},"":"empty ke... (81 chars) | meta null
+json({}) -> text {} | meta null
+
+# json list / json converter / timestamp
+json([]) -> text [] | meta null
+json([1,"a",true,null,1.5,-0.0]) -> text [1,"a",true,null,1.5,-0.0] | meta null
+json([[1,2,[]],"ä 漢字 🙂","it's \"q\""]) -> text [[1,2,[]],"ä 漢字 🙂","it's \"q\""] | meta null
+json([9007199254740993,-9223372036854775808]) -> text [9007199254740993,-9223372036854775808] | meta null
+json(["{\"a\":1}","null"]) -> text ["{\"a\":1}","null"] | meta null
+json({"a":1,"nested":{"x":true,"l":[1,2,3],"n":null},"":"empty key","ключ":"значение"}) -> text {"a":1,"nested":{"x":true,"l":[1,2,3],"n":null},"":"empty ke... (81 chars) | meta null
+json({}) -> text {} | meta null
+
+# Uint8List / plain / timestamp
+Uint8List([]) -> blob x'' (0 bytes) | meta null
+Uint8List([0]) -> blob x'00' (1 bytes) | meta null
+Uint8List([0, 1, 2, 255, 0, 128]) -> blob x'000102ff0080' (6 bytes) | meta null
+Uint8List([0, 1, 2, 3, 4, 5, 6, 7]...) -> blob x'0001020304050607' (70000 bytes) | meta null

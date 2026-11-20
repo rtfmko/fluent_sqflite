@@ -29,13 +29,14 @@ metadata:
   arguments and paths (`<path hidden>`) stay hidden unless `showSqlArguments: true`). `setupLogging(removeOnRecord: true)`
   removes the `onRecord` sink (`onRecord: null` keeps it). `storedFormatAdopted` is an `autoFix`: values written by an
   earlier version were converted once at start; nothing to do.
+- Guarantees (what the library promises and its limits): `doc/guarantees.md` of the package. `FluentErrorCode.deadlock`: a call that would close a wait cycle between databases is refused; take the databases in one order.
 
 - `FluentLogRecord.error` / `FluentIssue.error` of a foreign error is a `FluentRedactedError` (`type`, redacted
   `message`) unless `FluentLog.showSqlArguments` is on; send that to crash reporters.
 
 - `brokenTrigger`: drop and recreate the trigger with SQL that uses the current columns (the issue has both).
   `legacyNameAdopted`: a 1.x table / column got its 2.0 name, nothing to do. `precisionLost`: use iso8601 or round to
-  milliseconds. `batchKeysMismatch`: a key matched in another form (case-insensitive); set `batchKeys: fromModels` if
+  milliseconds; a local time in the repeated hour of a clock change: save UTC or use the timestamp format. `batchKeysMismatch`: a key matched in another form (case-insensitive); set `batchKeys: fromModels` if
   it is frequent.
 
 ## Logging

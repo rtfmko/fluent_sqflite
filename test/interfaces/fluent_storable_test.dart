@@ -80,6 +80,14 @@ class Duplicate extends FluentStorable {
   List<FluentDbColumn> get missingColumns => [FluentDbColumn.text('email', isUnique: true), FluentDbColumn.integer('extra')];
 }
 
+class DeclaredTwice extends FluentStorable {
+  @override
+  Map<String, dynamic> buildJson() => {'id': 1};
+
+  @override
+  List<FluentDbColumn> get missingColumns => [FluentDbColumn.text('tag'), FluentDbColumn.text('tag', isUnique: true)];
+}
+
 class Composite extends FluentStorable {
   Composite(this.userId, this.day);
   final int userId;
@@ -288,14 +296,18 @@ void main() {
       }
     });
 
-    test('missingColumns override an inferred column and add new ones; a duplicate is a schemaFallback issue', () async {
+    test('missingColumns override an inferred column and add new ones; no warning for the override; a name declared twice in missingColumns is a schemaFallback issue', () async {
       final FluentTestDb db = FluentTestDb();
       await db.open([]);
       final List<FluentDbColumn> cols = Duplicate().tableSchema;
       expect(cols.map((c) => c.name), ['id', 'email', 'extra']);
       await db.settle();
       expect(cols.firstWhere((c) => c.name == 'email').isUnique, isTrue);
-      expect(db.issues.where((i) => i.kind == FluentIssueKind.schemaFallback && i.title.contains('email')), isNotEmpty);
+      expect(db.issues.where((i) => i.kind == FluentIssueKind.schemaFallback && i.title.contains('email')), isEmpty, reason: 'overriding a buildJson field is the documented usage');
+      final List<FluentDbColumn> twice = DeclaredTwice().tableSchema;
+      await db.settle();
+      expect(twice.firstWhere((c) => c.name == 'tag').isUnique, isTrue, reason: 'the last declaration wins');
+      expect(db.issues.where((i) => i.kind == FluentIssueKind.schemaFallback && i.title.contains('"tag"')), isNotEmpty);
       await db.close();
     });
   });

@@ -4,6 +4,49 @@
 
 part of '../../fluent_provider.dart';
 
+/// What a read put into one relation list. It is kept by the list instance ([_listLoads]), so a model rebuilt from
+/// the read one (`copyWith`, or a new instance given the same list) still tells the save what the list shows.
+class _ListLoad {
+  const _ListLoad(this.link, this.owner, {required this.loaded});
+
+  /// The relation the list was read for (links are rebuilt by `init`: a list read before is then "another relation").
+  final FluentRelationLink link;
+
+  /// `_tupleKey` of the owner's stored key.
+  final String owner;
+
+  /// `false`: the read did not load the relation; the list is what `fromCacheJson` defaulted it to.
+  final bool loaded;
+}
+
+/// Load info of the relation lists models got from a read, by list instance (set by `_rememberLoads`).
+final Expando<_ListLoad> _listLoads = Expando<_ListLoad>('fluent relation list loads');
+
+/// Models built by a read (their relation lists are what the read showed, see `unloadedRelations`).
+final Expando<bool> _readModels = Expando<bool>('fluent read models');
+
+/// Whether each list type may be shared between models (const / unmodifiable lists are canonicalized or reused, so
+/// load info cannot be kept by the instance). Cached per runtime type except on the web, where every list has one type.
+final Map<Type, bool> _sharedListTypes = {};
+
+/// Whether [list] may be the same instance in several models (a `const []` default): `length` cannot be set.
+bool _maybeShared(List<Object?> list) {
+  const bool web = identical(0, 0.0);
+  if (!web) {
+    final bool? known = _sharedListTypes[list.runtimeType];
+    if (known != null) return known;
+  }
+  bool shared;
+  try {
+    list.length = list.length;
+    shared = false;
+  } on UnsupportedError {
+    shared = true;
+  }
+  if (!web) _sharedListTypes[list.runtimeType] = shared;
+  return shared;
+}
+
 /// Loading related models: one batched query per relation and level for all rows at once (no N+1), split into chunks
 /// below the SQL argument limit.
 extension _FluentRelationReader<T extends FluentStorable> on FluentProvider<T> {
@@ -13,7 +56,35 @@ extension _FluentRelationReader<T extends FluentStorable> on FluentProvider<T> {
   /// Builds models from raw [rows], loading their relations.
   Future<List<T>> _assembleRows(List<Map<String, dynamic>> rows, FluentTask task) async {
     if (rows.isEmpty) return <T>[];
-    return _mapRows(_links.isEmpty ? rows : await _processRowsBatch(rows, task));
+    if (_links.isEmpty) return _mapRows(rows);
+    final List<Map<String, dynamic>> hydrated = await _processRowsBatch(rows, task);
+    return _rememberLoads(hydrated, await _mapRows(hydrated));
+  }
+
+  /// Marks [models] (built from [rows], in the same order) as read and remembers by each relation list instance what
+  /// the read put into it ([_ListLoad]): a save of a model rebuilt from these (`copyWith`) then removes only what the
+  /// list showed. Only Expando writes; empty lists that may be shared (`const []`) are not marked.
+  List<M> _rememberLoads<M extends FluentStorable>(List<Map<String, dynamic>> rows, List<M> models) {
+    final List<FluentRelationLink> lists = [for (final FluentRelationLink l in _links) if (l.isList && !l.isThrough) l];
+    for (int i = 0; i < models.length && i < rows.length; i++) {
+      final FluentStorable model = models[i];
+      _readModels[model] = true;
+      if (lists.isEmpty) continue;
+      final Object? id = idFromRow(rows[i]);
+      if (id == null) continue;
+      final String owner = _tupleKey(_normalizeKey(id));
+      try {
+        Map<String, dynamic>? json;
+        for (final FluentRelationLink link in lists) {
+          final Object? value = link.found ? (json ??= model.buildJson())[link.name] : link.relation.selectFrom(model);
+          if (value is! List<Object?> || (value.isEmpty && _maybeShared(value))) continue;
+          _listLoads[value] = _ListLoad(link, owner, loaded: !model.unloadedRelations.contains(link.name));
+        }
+      } catch (_) {
+        // The app's select / buildJson failed: the save reports it; without load info the list is the app's own.
+      }
+    }
+    return models;
   }
 
   /// Returns mutable copies of [rows] with the related models stored under each relation name.
@@ -235,6 +306,7 @@ extension _FluentRelationReader<T extends FluentStorable> on FluentProvider<T> {
     link.owner._hintReferenceIndex(link);
     FluentFilter where = filter;
     if (applyListOptions && link.relation.where != null) where = where.and(_resolveRelated(link.relation.where!));
+    await _flushValueLists();
     where = where.and(includeDeleted ? _visibility(deletedOnly: false, includeDeleted: true) : _relationVisibility(link));
     final String? orderBy = applyListOptions ? link.relation.orderBy : null;
     final int? limit = link.relation.limit;
@@ -306,6 +378,7 @@ extension _FluentRelationReader<T extends FluentStorable> on FluentProvider<T> {
     if (link.relation.where != null) {
       // Related / search / key conditions written as SQL on this table (the statement names it by its own name).
       final FluentFilter where = _resolveRelated(link.relation.where!);
+      await _flushValueLists();
       conditions.add('(${where.whereClause})');
       args.addAll(_sqlArgs(where.whereArgs) ?? const []);
     }
@@ -327,7 +400,8 @@ extension _FluentRelationReader<T extends FluentStorable> on FluentProvider<T> {
   /// Loads the next relation level of [rows] and builds models, aligned with [rows].
   Future<List<FluentStorable>> _assembleRelated(List<Map<String, dynamic>> rows, FluentTask task, int level) async {
     if (rows.isEmpty) return const [];
-    return _mapRows(await _processRowsBatch(rows, task, currentDepth: level));
+    final List<Map<String, dynamic>> hydrated = await _processRowsBatch(rows, task, currentDepth: level);
+    return _rememberLoads(hydrated, await _mapRows(hydrated));
   }
 
   /// Turns relation values of an assembled row into typed models (also accepts raw maps, e.g. API JSON).

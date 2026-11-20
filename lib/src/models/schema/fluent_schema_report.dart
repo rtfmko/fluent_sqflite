@@ -69,10 +69,12 @@ class FluentTableSnapshot {
     Set<String>? pendingNotNull,
     Map<String, String>? steps,
     Map<String, String>? relations,
+    Map<String, String>? swaps,
     this.fingerprint,
     this.tableSql,
   }) : columns = columns ?? {},
        relations = relations ?? {},
+       swaps = swaps ?? {},
        key = key ?? [],
        checks = checks ?? [],
        indexes = indexes ?? {},
@@ -95,6 +97,7 @@ class FluentTableSnapshot {
       pendingNotNull: (json['pendingNotNull'] as List<dynamic>? ?? const []).cast<String>().toSet(),
       steps: (json['steps'] as Map<String, dynamic>? ?? const {}).map((k, v) => MapEntry(k, v as String)),
       relations: (json['relations'] as Map<String, dynamic>? ?? const {}).map((k, v) => MapEntry(k, v as String)),
+      swaps: (json['swaps'] as Map<String, dynamic>? ?? const {}).map((k, v) => MapEntry(k, v as String)),
       fingerprint: json['fingerprint'] as String?,
       tableSql: json['tableSql'] as String?,
     );
@@ -134,6 +137,10 @@ class FluentTableSnapshot {
   /// changes its kind between versions.
   final Map<String, String> relations;
 
+  /// Renames that exchange names between columns of the model (new name → `oldName`) already applied: both names are
+  /// live columns afterwards, so only this record tells a second start that the swap ran (a swap must not run twice).
+  final Map<String, String> swaps;
+
   /// Fingerprint of everything the last full sync of this table was based on (model, steps, relations, settings);
   /// while it matches, a start skips the schema sync.
   String? fingerprint;
@@ -153,6 +160,7 @@ class FluentTableSnapshot {
     'pendingNotNull': pendingNotNull.toList(),
     'steps': steps,
     if (relations.isNotEmpty) 'relations': relations,
+    if (swaps.isNotEmpty) 'swaps': swaps,
     if (fingerprint != null) 'fingerprint': fingerprint,
     if (tableSql != null) 'tableSql': tableSql,
   });

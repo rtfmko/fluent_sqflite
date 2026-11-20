@@ -7,6 +7,9 @@ part of '../fluent_provider.dart';
 /// Parameters per statement chunk: below SQLite's default limit of 999 bound variables.
 const int _maxParamsPerChunk = 900;
 
+/// The name of the type metadata column (`FluentDbColumn.systemMetadata()`), without building the column each time.
+const String _metadataColumn = '_fs_metadata';
+
 /// The last soft-delete stamp handed out (epoch milliseconds), see `_softDeleteStamp`.
 int _lastSoftDeleteStamp = 0;
 
@@ -22,7 +25,7 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
   /// Dispatches a CRUD task of this table through [FluentDbInternals.executeTask].
   ///
   /// [relations] / [maxDepth] say which relations reads load (`FluentLoad.none` travels as depth 0); [tag] marks the
-  /// change events.
+  /// change events; [committedOnly] reads see committed data only (see `FluentTask.committedOnly`).
   Future<R> _run<R>(
     FluentDbAction action, {
     TableHelper? helper,
@@ -31,6 +34,7 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
     FluentLoad relations = FluentLoad.eager,
     int maxDepth = 1,
     Object? tag,
+    bool committedOnly = false,
   }) =>
       // Future.sync: an error while the task is built (a provider that is not registered) fails the Future, it never
       // throws at the call. The task is still queued synchronously, so the call order is kept.
@@ -47,6 +51,7 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
             tag: tag,
             maxDepth: relations == FluentLoad.none ? 0 : maxDepth.clamp(1, _FluentRelationReader.maxDepthLimit),
             ignoreLazy: relations == FluentLoad.all,
+            committedOnly: committedOnly,
           ),
         ),
       );
@@ -105,7 +110,7 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
     FluentFilter filter = FluentFilter.empty;
     final String? deleted = _softDeleteColumn;
     if (deleted != null && !includeDeleted) filter = deletedOnly ? FluentFilter.isNotNull(deleted.quotedIdentifier) : FluentFilter.isNull(deleted.quotedIdentifier);
-    if (!includeExpired) {
+    if (!includeExpired && _mayExpire) {
       // "Now" is evaluated by SQLite when the query runs (not when it is queued), and identical reads keep identical
       // SQL, so the engine can still answer them with one query.
       final String expiry = _expiryColumn.quotedIdentifier;
@@ -291,9 +296,27 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
   /// Rows repeating the same match values in one call are written once (the last one wins; the first for
   /// `insertOnly`) and share its outcome and key. Writes use one `UPDATE` and one `INSERT` batch at most (no
   /// `RETURNING` / `ON CONFLICT`, so every SQLite version works). Returns the outcome and key of every row.
-  Future<List<_WrittenRow>> _writeRows(DatabaseExecutor ex, List<Map<String, dynamic>> rows, FluentSaveStrategy strategy, {List<String>? conflictOn, bool synced = false}) async {
+  ///
+  /// [calls]: the row counts of the calls of a merged batch (the engine's adjacent saves), in call order. One call
+  /// writes its updates before its inserts; across calls that order must not change (G7): an insert of an earlier call
+  /// that clashes with a UNIQUE value a later call's update frees fails when the calls run one by one. The calls are
+  /// then written in groups ([_orderedCallGroups]) that keep the order of every insert and update across calls.
+  Future<List<_WrittenRow>> _writeRows(DatabaseExecutor ex, List<Map<String, dynamic>> rows, FluentSaveStrategy strategy, {List<String>? conflictOn, bool synced = false, List<int>? calls}) async {
     final Set<String> keys = keyColumnNames;
     final List<String> match = conflictOn ?? keys.toList();
+    if (calls != null && calls.length > 1) {
+      final List<int> groups = await _orderedCallGroups(ex, rows, calls, strategy, match);
+      if (groups.length > 1) {
+        FluentLog.debug('Merged saves written in ${groups.length} groups to keep their order', tag: '$tableName:save', context: {'calls': calls.length, 'rows': rows.length});
+        final List<_WrittenRow> written = [];
+        int start = 0;
+        for (final int size in groups) {
+          written.addAll(await _writeRows(ex, rows.sublist(start, start + size), strategy, conflictOn: conflictOn, synced: synced));
+          start += size;
+        }
+        return written;
+      }
+    }
     final int n = rows.length;
     final List<FluentRowOutcome?> outcomes = List<FluentRowOutcome?>.filled(n, null);
     final List<Object?> ids = [for (final Map<String, dynamic> r in rows) idFromRow(r)];
@@ -337,7 +360,7 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
     // Rows whose match is in the trash.
     final Set<int> revived = {};
     final Set<int> inPlace = {}; // server writes to a trashed row: updated, left in the trash
-    if (deleted != null) {
+    if (deleted != null && _mayHaveTrash) {
       final Map<String, int> byMatch = {for (int i = 0; i < n; i++) if (writes(i) && matchKeys[i] != null) matchKeys[i]!: i};
       final Map<String, Object> trashed = byMatch.isEmpty ? const {} : await _trashedMatches(ex, match, [for (final int i in byMatch.values) rows[i]], live: conflictOn != null);
       if (trashed.isNotEmpty) {
@@ -424,9 +447,11 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
     if (toUpdate.isNotEmpty) {
       final Batch updates = ex.batch();
       // patch: the type tags of the patched fields are merged into the stored ones afterwards (see _mergePatchTags).
-      final String meta = FluentDbColumn.systemMetadata().name;
+      const String meta = _metadataColumn;
       final bool patch = strategy == FluentSaveStrategy.patch;
       final Map<int, ({FluentFilter where, Set<String> fields})> patched = {};
+      // Rows of one model have the same columns: the statement is built once per shape, only the arguments change.
+      final _StatementCache cache = _StatementCache();
       for (final int i in toUpdate) {
         final Map<String, Object?> set = {
           for (final MapEntry<String, dynamic> e in rows[i].entries)
@@ -434,8 +459,13 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
           if (times != null) times.updated: now,
           if (times != null && overExpired.contains(i)) times.created: now,
         };
-        final FluentFilter where = matchOf(i);
+        // A live row matched by values that are all set: the condition is the same SQL for every such row.
+        final bool plainMatch = trashedId[i] == null && match.every((c) => rows[i][c] != null);
+        final FluentFilter where = plainMatch && cache.matchClause != null && !patch ? FluentFilter.empty : matchOf(i);
+        if (plainMatch && cache.matchClause == null && FluentFilterArgs.rawOf(where.whereArgs).length == match.length) cache.matchClause = where.whereClause;
         if (patch) patched[i] = (where: where, fields: set.keys.toSet());
+        final String whereClause = plainMatch && cache.matchClause != null ? cache.matchClause! : where.whereClause;
+        final List<Object?> whereArgs = plainMatch && cache.matchClause != null ? [for (final String c in match) rows[i][c]] : (_sqlArgs(where.whereArgs) ?? const []);
         final List<String> extra = [
           // A model without timeToLive keeps the stored expiry of a live row; a row that expired already is made
           // live again (the save renews it: it would stay invisible otherwise).
@@ -445,12 +475,10 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
         if (set.isEmpty && extra.isEmpty) {
           // Nothing to change: a no-op update still tells whether the row exists.
           final String first = match.first.quotedIdentifier;
-          updates.rawUpdate('UPDATE ${tableName.quotedIdentifier} SET $first = $first WHERE ${where.whereClause}', _sqlArgs(where.whereArgs));
-        } else if (extra.isEmpty) {
-          updates.update(tableName.quotedIdentifier, set.quotedKeys, where: where.whereClause, whereArgs: _sqlArgs(where.whereArgs));
+          updates.rawUpdate('UPDATE ${tableName.quotedIdentifier} SET $first = $first WHERE $whereClause', whereArgs);
         } else {
-          final (String sql, List<Object?> args) = _updateSql(set, where, extra);
-          updates.rawUpdate(sql, args);
+          final String sql = cache.update(set.keys, extra, whereClause, () => _updateSql(set, FluentFilter(whereClause), extra).$1);
+          updates.rawUpdate(sql, [...set.values, ...whereArgs]);
         }
       }
       final List<Object?> results = await updates.commit();
@@ -468,15 +496,25 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
       if (patched.isNotEmpty && tableColumns.contains(meta)) await _mergePatchTags(ex, rows, patched);
     }
 
+    toInsert.sort(); // in item order, as one call per item would insert them: generated keys do not depend on merging (G7)
     if (toInsert.isNotEmpty) {
       final Batch inserts = ex.batch();
       final ({String version, String synced})? sync = _syncColumns;
+      final _StatementCache cache = _StatementCache();
+      final String table = tableName.quotedIdentifier;
       for (final int i in toInsert) {
-        inserts.insert(tableName.quotedIdentifier, {
+        final Map<String, Object?> row = {
           ...rows[i],
           if (times != null) ...{times.created: now, times.updated: now},
           if (sync != null) ...{sync.version: 1, sync.synced: synced ? 1 : 0},
-        }.quotedKeys);
+        };
+        if (row.isEmpty) {
+          inserts.insert(table, row);
+          continue;
+        }
+        // Built once per shape of row (same columns in the same order), like sqflite's insert would build it.
+        final String sql = cache.insert(row.keys, () => 'INSERT INTO $table (${row.keys.map((k) => k.quotedIdentifier).join(', ')}) VALUES (${List.filled(row.length, '?').join(', ')})');
+        inserts.rawInsert(sql, row.values.toList());
       }
       // Results (row ids) are only read back when a generated key is needed: skipping them saves a lot on big batches.
       final bool rowIdKey = !hasCompositeKey && primaryKeyColumns.first.type == FluentDbDataType.integer;
@@ -512,6 +550,46 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
       await _dropTombstonesOfWritten(ex, [for (int i = 0; i < n; i++) if (writes(i) && ids[i] != null && (outcomes[i] == FluentRowOutcome.inserted || outcomes[i] == FluentRowOutcome.updated || outcomes[i] == FluentRowOutcome.restored)) ids[i]!]);
     }
     return [for (int i = 0; i < n; i++) (outcomes[i]!, ids[i])];
+  }
+
+  /// The row counts of the groups the calls of a merged batch are written in (see [_writeRows]); one group when one
+  /// `_writeRows` keeps their order.
+  ///
+  /// One `_writeRows` runs every update before every insert. That is the order of the calls when no call that inserts
+  /// a row comes before a call that updates one: a call joins the group unless it updates a row and an earlier call of
+  /// the group inserts one. A row without match values inserts (`upsert` / `insertOnly`); a row with them updates
+  /// (or is skipped) when a row with those values exists (in the trash, expired or live), and inserts otherwise.
+  /// `updateOnly` / `patch` never insert. The engine merges only calls with different match values, so an earlier
+  /// group never changes which rows of a later one exist.
+  Future<List<int>> _orderedCallGroups(DatabaseExecutor ex, List<Map<String, dynamic>> rows, List<int> calls, FluentSaveStrategy strategy, List<String> match) async {
+    final int all = calls.fold(0, (a, b) => a + b);
+    if (strategy == FluentSaveStrategy.updateOnly || strategy == FluentSaveStrategy.patch || all != rows.length) return [rows.length];
+    bool keyed(Map<String, dynamic> row) => match.every((c) => row[c] != null);
+    // Only a call with match values after an earlier call can be reordered: no query otherwise.
+    bool laterKeyed = false;
+    for (int c = 1, start = calls.first; c < calls.length && !laterKeyed; start += calls[c], c++) {
+      laterKeyed = rows.sublist(start, start + calls[c]).any(keyed);
+    }
+    if (!laterKeyed) return [rows.length];
+    final Map<String, Object?> existing = await _existingByMatch(ex, match, rows.where(keyed).toList());
+    bool exists(Map<String, dynamic> row) => existing.containsKey(_valuesKey(match, [for (final String c in match) row[c]]));
+    final List<int> groups = [];
+    bool groupInserts = false;
+    int start = 0;
+    for (final int size in calls) {
+      final List<Map<String, dynamic>> call = rows.sublist(start, start + size);
+      start += size;
+      final bool updates = call.any((r) => keyed(r) && exists(r));
+      final bool inserts = call.any((r) => !keyed(r) || !exists(r));
+      if (groups.isEmpty || (updates && groupInserts)) {
+        groups.add(size);
+        groupInserts = inserts;
+      } else {
+        groups.last += size;
+        groupInserts = groupInserts || inserts;
+      }
+    }
+    return groups;
   }
 
   /// Stored keys of the trashed rows whose [match] columns equal those of [rows], by match value (see
@@ -552,7 +630,7 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
   /// After a `patch`: replaces the stored type tags of the patched fields with their new tags and keeps the tags of
   /// the untouched fields. Two batches: read the stored tags, write the changed ones.
   Future<void> _mergePatchTags(DatabaseExecutor ex, List<Map<String, dynamic>> rows, Map<int, ({FluentFilter where, Set<String> fields})> patched) async {
-    final String meta = FluentDbColumn.systemMetadata().name;
+    const String meta = _metadataColumn;
     final List<int> order = patched.keys.toList();
     final Batch reads = ex.batch();
     for (final int i in order) {
@@ -766,10 +844,13 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
       }
       final FluentConverter<Object?, Object?>? converter = _converters[e.key];
       if (converter != null) {
-        set[e.key] = _convert(e.key, e.value, converter, toSql: true);
+        final Object? stored = _convert(e.key, e.value, converter, toSql: true);
+        FluentSqlSanitizer.checkStored(stored, _numericColumns[e.key], tableName: tableName, key: e.key);
+        set[e.key] = stored;
         continue;
       }
       final ({dynamic value, String? metaType}) result = FluentSqlSanitizer.sanitize(value: e.value, config: _tableConfig, tableName: tableName, key: e.key);
+      FluentSqlSanitizer.checkStored(result.value, _numericColumns[e.key], tableName: tableName, key: e.key);
       set[e.key] = result.value;
       if (result.metaType != null && result.metaType != _valueKinds[e.key]?.tag) tags[e.key] = result.metaType!;
     }
@@ -777,7 +858,7 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
     final ({String created, String updated})? times = _timestampColumns;
     if (times != null) set.putIfAbsent(times.updated, _now);
 
-    final String meta = FluentDbColumn.systemMetadata().name;
+    const String meta = _metadataColumn;
     if (tableColumns.contains(meta)) {
       // Rows whose stored tags change: with new tags every row carrying metadata, otherwise only rows whose tags name
       // an updated column (a text pre-filter on the JSON keys, checked exactly below).
@@ -874,7 +955,7 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
     return _lastSoftDeleteStamp;
   }
 
-  /// Converts soft-delete stamps stored as ISO text (`iso8601` tables before 2.0.0-dev.3, 1.x, or a cascade from
+  /// Converts soft-delete stamps stored as ISO text (`iso8601` tables before 2.0.0-dev.2, 1.x, or a cascade from
   /// such a table) to epoch milliseconds, so filters, cursors and the order on the column see one form. Runs in the
   /// schema sync of the table (the stamp format is part of its fingerprint, so an older database is converted once).
   ///
@@ -919,6 +1000,7 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
   /// Soft-deletes the not yet deleted rows matching [where]; owned soft-deletable children get the same [stamp].
   Future<int> _softDeleteWhere(DatabaseExecutor ex, FluentFilter where, Object stamp, {bool synced = false}) async {
     final String column = _softDeleteColumn!;
+    _mayHaveTrash = true; // saves look for their keys in the trash from now on
     final FluentFilter alive = where.and(FluentFilter.isNull(column.quotedIdentifier));
     final List<FluentRelationLink> cascade = _softCascadeLinks.toList();
     if (cascade.isEmpty) return _touched(FluentDbAction.delete, await _setRows(ex, {column: stamp}, alive, synced: synced));
@@ -1145,7 +1227,10 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
     final ({String version, String synced})? sync = _syncColumns;
     if (sync != null) deleted = deleted.and(FluentFilter('${sync.version.quotedIdentifier} <= ${sync.synced.quotedIdentifier}'));
     if (olderThan <= Duration.zero) return deleted;
-    final DateTime cutoff = FluentClock.now().subtract(olderThan);
+    final DateTime now = FluentClock.now();
+    // A period reaching before the earliest DateTime (e.g. "keep forever" as a huge Duration) matches no row.
+    if (olderThan.inMilliseconds > now.millisecondsSinceEpoch + 8640000000000000) return deleted.and(const FluentFilter('0 = 1'));
+    final DateTime cutoff = now.subtract(olderThan);
     final String c = column.quotedIdentifier;
     return deleted.and(
       FluentFilter("(typeof($c) IN ('integer', 'real') AND $c < ?) OR (typeof($c) = 'text' AND $c < ?)", [cutoff.millisecondsSinceEpoch, fluentIsoText(cutoff)]),
@@ -1161,6 +1246,16 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
   FluentException _sqlError(DatabaseException e, StackTrace stackTrace, String operation) {
     // Match SQLite's messages ("... constraint failed"), never the statement text the error also contains.
     final String text = e.toString();
+    if (TableHelper.isCorrupt(text)) {
+      return FluentQueryException(
+        '$operation on "$tableName" failed: the database file is damaged or not a database',
+        code: FluentErrorCode.databaseCorrupt,
+        hint: 'Restore the file from a backup, or start with an empty database: FluentGroup(resetOnSchemaError: true) recreates it on the next start '
+            '(all data in the file is lost then; the library never deletes the file on its own).',
+        cause: e,
+        stackTrace: stackTrace,
+      );
+    }
     if (e.isReadOnlyError() || text.contains('readonly database')) {
       return FluentQueryException(
         '$operation on "$tableName" failed: the database is read-only',
@@ -1253,4 +1348,33 @@ extension _FluentCrudHelper<T extends FluentStorable> on FluentProvider<T> {
     FluentRelationSyncMode.replace => false,
     null => null,
   };
+}
+
+/// The last statement built for a batch of row writes: rows with the same columns (and condition) reuse it.
+class _StatementCache {
+  /// The condition of a live row matched by non-null values (the same SQL for every such row).
+  String? matchClause;
+
+  List<String>? _keys;
+  List<String>? _extra;
+  String? _where;
+  String? _sql;
+
+  /// The `UPDATE` for [keys] / [extra] / [where]: the last one when they are the same, else [build]'s.
+  String update(Iterable<String> keys, List<String> extra, String where, String Function() build) {
+    final List<String> k = keys.toList(growable: false);
+    if (_sql != null && _where == where && listEquals(_keys, k) && listEquals(_extra, extra)) return _sql!;
+    _keys = k;
+    _extra = extra;
+    _where = where;
+    return _sql = build();
+  }
+
+  /// The `INSERT` for [keys]: the last one when they are the same, else [build]'s.
+  String insert(Iterable<String> keys, String Function() build) {
+    final List<String> k = keys.toList(growable: false);
+    if (_sql != null && listEquals(_keys, k)) return _sql!;
+    _keys = k;
+    return _sql = build();
+  }
 }

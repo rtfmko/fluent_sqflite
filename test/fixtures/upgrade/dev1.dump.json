@@ -1,0 +1,390 @@
+{
+ "__fluent_fts": {
+  "sql": "CREATE TABLE \"__fluent_fts\" (tbl TEXT PRIMARY KEY, definition TEXT NOT NULL, revision INTEGER NOT NULL)",
+  "rows": []
+ },
+ "__fluent_schema": {
+  "sql": "CREATE TABLE \"__fluent_schema\" (\"table_name\" TEXT PRIMARY KEY, \"revision\" INTEGER NOT NULL, \"snapshot\" TEXT NOT NULL, \"updated_at\" INTEGER NOT NULL)",
+  "rows": [
+   {
+    "table_name": "fx_tags",
+    "revision": 1,
+    "snapshot": "{\"columns\":{\"id\":\"\\\"id\\\" INTEGER PRIMARY KEY AUTOINCREMENT\",\"label\":\"\\\"label\\\" TEXT\",\"_fs_metadata\":\"\\\"_fs_metadata\\\" TEXT\",\"expiry_date\":\"\\\"expiry_date\\\" INTEGER\"},\"key\":[\"id\"],\"checks\":[],\"withoutRowId\":false,\"indexes\":{\"idx_fx_tags_expiry_date\":\"CREATE INDEX \\\"idx_fx_tags_expiry_date\\\" ON \\\"fx_tags\\\" (\\\"expiry_date\\\") WHERE \\\"expiry_date\\\" IS NOT NULL\"},\"archived\":[],\"pendingNotNull\":[],\"steps\":{},\"fingerprint\":\"0bfadb7e\",\"tableSql\":\"4295b2ba\"}",
+    "updated_at": 1772366400000
+   },
+   {
+    "table_name": "fx_books",
+    "revision": 1,
+    "snapshot": "{\"columns\":{\"id\":\"\\\"id\\\" INTEGER PRIMARY KEY AUTOINCREMENT\",\"title\":\"\\\"title\\\" TEXT\",\"pages\":\"\\\"pages\\\" INTEGER\",\"_fs_metadata\":\"\\\"_fs_metadata\\\" TEXT\",\"expiry_date\":\"\\\"expiry_date\\\" INTEGER\",\"fx_author_id\":\"\\\"fx_author_id\\\" INTEGER REFERENCES \\\"fx_authors\\\"(\\\"id\\\") ON DELETE CASCADE\",\"deleted_at\":\"\\\"deleted_at\\\" INTEGER\",\"created_at\":\"\\\"created_at\\\" INTEGER\",\"updated_at\":\"\\\"updated_at\\\" INTEGER\"},\"key\":[\"id\"],\"checks\":[],\"withoutRowId\":false,\"indexes\":{\"idx_fx_books_fx_author_id\":\"CREATE INDEX \\\"idx_fx_books_fx_author_id\\\" ON \\\"fx_books\\\" (\\\"fx_author_id\\\")\",\"idx_fx_books_expiry_date\":\"CREATE INDEX \\\"idx_fx_books_expiry_date\\\" ON \\\"fx_books\\\" (\\\"expiry_date\\\") WHERE \\\"expiry_date\\\" IS NOT NULL\",\"idx_fx_books_deleted_at\":\"CREATE INDEX \\\"idx_fx_books_deleted_at\\\" ON \\\"fx_books\\\" (\\\"deleted_at\\\") WHERE \\\"deleted_at\\\" IS NOT NULL\"},\"archived\":[],\"pendingNotNull\":[],\"steps\":{},\"fingerprint\":\"7ac86327\",\"tableSql\":\"0183cc6a\"}",
+    "updated_at": 1772366400000
+   },
+   {
+    "table_name": "fx_authors",
+    "revision": 1,
+    "snapshot": "{\"columns\":{\"id\":\"\\\"id\\\" INTEGER PRIMARY KEY AUTOINCREMENT\",\"name\":\"\\\"name\\\" TEXT\",\"born\":\"\\\"born\\\" INTEGER\",\"rating\":\"\\\"rating\\\" REAL\",\"active\":\"\\\"active\\\" INTEGER CHECK (\\\"active\\\" IN (0, 1))\",\"_fs_metadata\":\"\\\"_fs_metadata\\\" TEXT\",\"expiry_date\":\"\\\"expiry_date\\\" INTEGER\"},\"key\":[\"id\"],\"checks\":[],\"withoutRowId\":false,\"indexes\":{\"idx_fx_authors_expiry_date\":\"CREATE INDEX \\\"idx_fx_authors_expiry_date\\\" ON \\\"fx_authors\\\" (\\\"expiry_date\\\") WHERE \\\"expiry_date\\\" IS NOT NULL\"},\"archived\":[],\"pendingNotNull\":[],\"steps\":{},\"relations\":{\"books\":\"owned|fx_books|fx_author_id\",\"tags\":\"link|fx_authors_fx_tags|fx_author_id|fx_tag_id\"},\"fingerprint\":\"76544459\",\"tableSql\":\"ced30d4a\"}",
+    "updated_at": 1772366400000
+   },
+   {
+    "table_name": "fx_events",
+    "revision": 1,
+    "snapshot": "{\"columns\":{\"id\":\"\\\"id\\\" INTEGER PRIMARY KEY AUTOINCREMENT\",\"at\":\"\\\"at\\\" INTEGER\",\"note\":\"\\\"note\\\" TEXT\",\"_fs_metadata\":\"\\\"_fs_metadata\\\" TEXT\",\"expiry_date\":\"\\\"expiry_date\\\" INTEGER\"},\"key\":[\"id\"],\"checks\":[],\"withoutRowId\":false,\"indexes\":{\"idx_fx_events_expiry_date\":\"CREATE INDEX \\\"idx_fx_events_expiry_date\\\" ON \\\"fx_events\\\" (\\\"expiry_date\\\") WHERE \\\"expiry_date\\\" IS NOT NULL\"},\"archived\":[],\"pendingNotNull\":[],\"steps\":{},\"fingerprint\":\"abe3e368\",\"tableSql\":\"c60d4305\"}",
+    "updated_at": 1772366400000
+   },
+   {
+    "table_name": "fx_todos",
+    "revision": 1,
+    "snapshot": "{\"columns\":{\"id\":\"\\\"id\\\" INTEGER PRIMARY KEY AUTOINCREMENT\",\"text\":\"\\\"text\\\" TEXT\",\"done\":\"\\\"done\\\" INTEGER CHECK (\\\"done\\\" IN (0, 1))\",\"_fs_metadata\":\"\\\"_fs_metadata\\\" TEXT\",\"expiry_date\":\"\\\"expiry_date\\\" INTEGER\",\"sync_version\":\"\\\"sync_version\\\" INTEGER NOT NULL DEFAULT 1\",\"synced_version\":\"\\\"synced_version\\\" INTEGER NOT NULL DEFAULT 0\"},\"key\":[\"id\"],\"checks\":[],\"withoutRowId\":false,\"indexes\":{\"idx_fx_todos_expiry_date\":\"CREATE INDEX \\\"idx_fx_todos_expiry_date\\\" ON \\\"fx_todos\\\" (\\\"expiry_date\\\") WHERE \\\"expiry_date\\\" IS NOT NULL\"},\"archived\":[],\"pendingNotNull\":[],\"steps\":{},\"fingerprint\":\"d92634c4\",\"tableSql\":\"62445649\"}",
+    "updated_at": 1772366400000
+   },
+   {
+    "table_name": "fx_cached",
+    "revision": 1,
+    "snapshot": "{\"columns\":{\"id\":\"\\\"id\\\" INTEGER PRIMARY KEY AUTOINCREMENT\",\"value\":\"\\\"value\\\" TEXT\",\"_fs_metadata\":\"\\\"_fs_metadata\\\" TEXT\",\"expiry_date\":\"\\\"expiry_date\\\" INTEGER\"},\"key\":[\"id\"],\"checks\":[],\"withoutRowId\":false,\"indexes\":{\"idx_fx_cached_expiry_date\":\"CREATE INDEX \\\"idx_fx_cached_expiry_date\\\" ON \\\"fx_cached\\\" (\\\"expiry_date\\\") WHERE \\\"expiry_date\\\" IS NOT NULL\"},\"archived\":[],\"pendingNotNull\":[],\"steps\":{},\"fingerprint\":\"c6324b6d\",\"tableSql\":\"1dfc03a2\"}",
+    "updated_at": 1772366400000
+   }
+  ]
+ },
+ "__fluent_schema_history": {
+  "sql": "CREATE TABLE \"__fluent_schema_history\" (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT, \"table_name\" TEXT NOT NULL, \"from_revision\" INTEGER NOT NULL, \"to_revision\" INTEGER NOT NULL, \"changes\" TEXT NOT NULL, \"success\" INTEGER NOT NULL, \"error\" TEXT, \"duration_ms\" INTEGER NOT NULL, \"applied_at\" INTEGER NOT NULL)",
+  "rows": [
+   {
+    "id": 1,
+    "table_name": "fx_tags",
+    "from_revision": 0,
+    "to_revision": 1,
+    "changes": "[\"created table with 4 columns\",\"created index \\\"idx_fx_tags_expiry_date\\\"\"]",
+    "success": 1,
+    "error": null,
+    "duration_ms": 9,
+    "applied_at": 1772366400000
+   },
+   {
+    "id": 2,
+    "table_name": "fx_books",
+    "from_revision": 0,
+    "to_revision": 1,
+    "changes": "[\"created table with 9 columns\",\"created index \\\"idx_fx_books_fx_author_id\\\"\",\"created index \\\"idx_fx_books_expiry_date\\\"\",\"created index \\\"idx_fx_books_deleted_at\\\"\"]",
+    "success": 1,
+    "error": null,
+    "duration_ms": 3,
+    "applied_at": 1772366400000
+   },
+   {
+    "id": 3,
+    "table_name": "fx_authors",
+    "from_revision": 0,
+    "to_revision": 1,
+    "changes": "[\"created table with 7 columns\",\"created index \\\"idx_fx_authors_expiry_date\\\"\"]",
+    "success": 1,
+    "error": null,
+    "duration_ms": 2,
+    "applied_at": 1772366400000
+   },
+   {
+    "id": 4,
+    "table_name": "fx_events",
+    "from_revision": 0,
+    "to_revision": 1,
+    "changes": "[\"created table with 5 columns\",\"created index \\\"idx_fx_events_expiry_date\\\"\"]",
+    "success": 1,
+    "error": null,
+    "duration_ms": 1,
+    "applied_at": 1772366400000
+   },
+   {
+    "id": 5,
+    "table_name": "fx_todos",
+    "from_revision": 0,
+    "to_revision": 1,
+    "changes": "[\"created table with 7 columns\",\"created index \\\"idx_fx_todos_expiry_date\\\"\"]",
+    "success": 1,
+    "error": null,
+    "duration_ms": 2,
+    "applied_at": 1772366400000
+   },
+   {
+    "id": 6,
+    "table_name": "fx_cached",
+    "from_revision": 0,
+    "to_revision": 1,
+    "changes": "[\"created table with 4 columns\",\"created index \\\"idx_fx_cached_expiry_date\\\"\"]",
+    "success": 1,
+    "error": null,
+    "duration_ms": 1,
+    "applied_at": 1772366400000
+   }
+  ]
+ },
+ "__fluent_stats": {
+  "sql": "CREATE TABLE \"__fluent_stats\" (key TEXT PRIMARY KEY, tbl TEXT NOT NULL, action TEXT NOT NULL, shape TEXT NOT NULL, avg_ms REAL NOT NULL, avg_rows REAL, samples INTEGER NOT NULL, failures INTEGER NOT NULL, last_used INTEGER NOT NULL)",
+  "rows": [
+   {
+    "key": "fx_authors|save|",
+    "tbl": "fx_authors",
+    "action": "save",
+    "shape": "",
+    "avg_ms": 15.8,
+    "avg_rows": null,
+    "samples": 2,
+    "failures": 0,
+    "last_used": 1772366400000
+   },
+   {
+    "key": "fx_books|purgeDeleted|",
+    "tbl": "fx_books",
+    "action": "purgeDeleted",
+    "shape": "",
+    "avg_ms": 2.0,
+    "avg_rows": null,
+    "samples": 1,
+    "failures": 0,
+    "last_used": 1772366400000
+   },
+   {
+    "key": "fx_books|delete|",
+    "tbl": "fx_books",
+    "action": "delete",
+    "shape": "",
+    "avg_ms": 2.0,
+    "avg_rows": null,
+    "samples": 1,
+    "failures": 0,
+    "last_used": 1772370000000
+   },
+   {
+    "key": "fx_events|save|",
+    "tbl": "fx_events",
+    "action": "save",
+    "shape": "",
+    "avg_ms": 1.0,
+    "avg_rows": null,
+    "samples": 2,
+    "failures": 0,
+    "last_used": 1772370000000
+   },
+   {
+    "key": "fx_todos|save|",
+    "tbl": "fx_todos",
+    "action": "save",
+    "shape": "",
+    "avg_ms": 0.8,
+    "avg_rows": null,
+    "samples": 4,
+    "failures": 0,
+    "last_used": 1772370000000
+   },
+   {
+    "key": "fx_todos|relationRead|",
+    "tbl": "fx_todos",
+    "action": "relationRead",
+    "shape": "",
+    "avg_ms": 3.2,
+    "avg_rows": null,
+    "samples": 2,
+    "failures": 0,
+    "last_used": 1772370000000
+   },
+   {
+    "key": "fx_todos|relationWrite|",
+    "tbl": "fx_todos",
+    "action": "relationWrite",
+    "shape": "",
+    "avg_ms": 1.0,
+    "avg_rows": null,
+    "samples": 1,
+    "failures": 0,
+    "last_used": 1772370000000
+   },
+   {
+    "key": "fx_todos|hardDelete|",
+    "tbl": "fx_todos",
+    "action": "hardDelete",
+    "shape": "",
+    "avg_ms": 2.0,
+    "avg_rows": null,
+    "samples": 1,
+    "failures": 0,
+    "last_used": 1772370000000
+   },
+   {
+    "key": "fx_cached|save|",
+    "tbl": "fx_cached",
+    "action": "save",
+    "shape": "",
+    "avg_ms": 0.8,
+    "avg_rows": null,
+    "samples": 2,
+    "failures": 0,
+    "last_used": 1772370000000
+   }
+  ]
+ },
+ "__fluent_sync_state": {
+  "sql": "CREATE TABLE __fluent_sync_state (tbl TEXT PRIMARY KEY, last_pull INTEGER)",
+  "rows": []
+ },
+ "__fluent_tombstones": {
+  "sql": "CREATE TABLE __fluent_tombstones (tbl TEXT NOT NULL, key TEXT NOT NULL, deleted_at INTEGER NOT NULL, PRIMARY KEY (tbl, key))",
+  "rows": [
+   {
+    "tbl": "fx_todos",
+    "key": "3",
+    "deleted_at": 1772370000000
+   }
+  ]
+ },
+ "fx_authors": {
+  "sql": "CREATE TABLE \"fx_authors\" (\n  \"id\" INTEGER PRIMARY KEY AUTOINCREMENT,\n  \"name\" TEXT,\n  \"born\" INTEGER,\n  \"rating\" REAL,\n  \"active\" INTEGER CHECK (\"active\" IN (0, 1)),\n  \"_fs_metadata\" TEXT,\n  \"expiry_date\" INTEGER\n)",
+  "rows": [
+   {
+    "id": 1,
+    "name": "Ann",
+    "born": 327400215123,
+    "rating": 4.5,
+    "active": 1,
+    "_fs_metadata": "{\"born\":\"datetime_utc\"}",
+    "expiry_date": null
+   },
+   {
+    "id": 2,
+    "name": "Bob",
+    "born": 631249445000,
+    "rating": -0.125,
+    "active": 0,
+    "_fs_metadata": "{\"born\":\"datetime_utc\"}",
+    "expiry_date": null
+   }
+  ]
+ },
+ "fx_authors_fx_tags": {
+  "sql": "CREATE TABLE \"fx_authors_fx_tags\" (\n  \"fx_author_id\" INTEGER NOT NULL,\n  \"fx_tag_id\" INTEGER NOT NULL,\n  PRIMARY KEY (\"fx_author_id\", \"fx_tag_id\"),\n  FOREIGN KEY (\"fx_author_id\") REFERENCES \"fx_authors\"(\"id\") ON DELETE CASCADE,\n  FOREIGN KEY (\"fx_tag_id\") REFERENCES \"fx_tags\"(\"id\") ON DELETE CASCADE\n)",
+  "rows": [
+   {
+    "fx_author_id": 1,
+    "fx_tag_id": 20
+   },
+   {
+    "fx_author_id": 1,
+    "fx_tag_id": 21
+   },
+   {
+    "fx_author_id": 2,
+    "fx_tag_id": 20
+   }
+  ]
+ },
+ "fx_books": {
+  "sql": "CREATE TABLE \"fx_books\" (\n  \"id\" INTEGER PRIMARY KEY AUTOINCREMENT,\n  \"title\" TEXT,\n  \"pages\" INTEGER,\n  \"_fs_metadata\" TEXT,\n  \"expiry_date\" INTEGER,\n  \"fx_author_id\" INTEGER REFERENCES \"fx_authors\"(\"id\") ON DELETE CASCADE,\n  \"deleted_at\" INTEGER,\n  \"created_at\" INTEGER,\n  \"updated_at\" INTEGER\n)",
+  "rows": [
+   {
+    "id": 10,
+    "title": "First",
+    "pages": 100,
+    "_fs_metadata": null,
+    "expiry_date": null,
+    "fx_author_id": 1,
+    "deleted_at": null,
+    "created_at": 1772366400000,
+    "updated_at": 1772366400000
+   },
+   {
+    "id": 11,
+    "title": "Second",
+    "pages": 250,
+    "_fs_metadata": null,
+    "expiry_date": null,
+    "fx_author_id": 1,
+    "deleted_at": 1772370000000,
+    "created_at": 1772366400000,
+    "updated_at": 1772366400000
+   },
+   {
+    "id": 12,
+    "title": "Third",
+    "pages": 7,
+    "_fs_metadata": null,
+    "expiry_date": null,
+    "fx_author_id": 2,
+    "deleted_at": null,
+    "created_at": 1772366400000,
+    "updated_at": 1772366400000
+   }
+  ]
+ },
+ "fx_cached": {
+  "sql": "CREATE TABLE \"fx_cached\" (\n  \"id\" INTEGER PRIMARY KEY AUTOINCREMENT,\n  \"value\" TEXT,\n  \"_fs_metadata\" TEXT,\n  \"expiry_date\" INTEGER\n)",
+  "rows": [
+   {
+    "id": 1,
+    "value": "fresh",
+    "_fs_metadata": null,
+    "expiry_date": 2087730000000
+   },
+   {
+    "id": 2,
+    "value": "forever",
+    "_fs_metadata": null,
+    "expiry_date": null
+   }
+  ]
+ },
+ "fx_events": {
+  "sql": "CREATE TABLE \"fx_events\" (\n  \"id\" INTEGER PRIMARY KEY AUTOINCREMENT,\n  \"at\" INTEGER,\n  \"note\" TEXT,\n  \"_fs_metadata\" TEXT,\n  \"expiry_date\" INTEGER\n)",
+  "rows": [
+   {
+    "id": 1,
+    "at": "2026-02-03T04:05:06.007008Z",
+    "note": "utc",
+    "_fs_metadata": "{\"at\":\"datetime_utc\"}",
+    "expiry_date": null
+   },
+   {
+    "id": 2,
+    "at": "2026-02-03T04:05:06.000Z",
+    "note": "second",
+    "_fs_metadata": "{\"at\":\"datetime_utc\"}",
+    "expiry_date": null
+   }
+  ]
+ },
+ "fx_tags": {
+  "sql": "CREATE TABLE \"fx_tags\" (\n  \"id\" INTEGER PRIMARY KEY AUTOINCREMENT,\n  \"label\" TEXT,\n  \"_fs_metadata\" TEXT,\n  \"expiry_date\" INTEGER\n)",
+  "rows": [
+   {
+    "id": 20,
+    "label": "x",
+    "_fs_metadata": null,
+    "expiry_date": null
+   },
+   {
+    "id": 21,
+    "label": "y",
+    "_fs_metadata": null,
+    "expiry_date": null
+   }
+  ]
+ },
+ "fx_todos": {
+  "sql": "CREATE TABLE \"fx_todos\" (\n  \"id\" INTEGER PRIMARY KEY AUTOINCREMENT,\n  \"text\" TEXT,\n  \"done\" INTEGER CHECK (\"done\" IN (0, 1)),\n  \"_fs_metadata\" TEXT,\n  \"expiry_date\" INTEGER,\n  \"sync_version\" INTEGER NOT NULL DEFAULT 1,\n  \"synced_version\" INTEGER NOT NULL DEFAULT 0\n)",
+  "rows": [
+   {
+    "id": 1,
+    "text": "pushed then edited",
+    "done": 1,
+    "_fs_metadata": null,
+    "expiry_date": null,
+    "sync_version": 2,
+    "synced_version": 1
+   },
+   {
+    "id": 2,
+    "text": "pending",
+    "done": 0,
+    "_fs_metadata": null,
+    "expiry_date": null,
+    "sync_version": 1,
+    "synced_version": 0
+   }
+  ]
+ }
+}

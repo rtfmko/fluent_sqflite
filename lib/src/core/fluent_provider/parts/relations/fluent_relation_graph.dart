@@ -246,6 +246,12 @@ FluentFilter _storedEq(String column, Object? value) => value == null ? FluentFi
 /// `"column" IN (...)` on values that are already stored (see [_storedEq]).
 FluentFilter _storedIn(String column, List<Object> values) => values.isEmpty ? const FluentFilter('1 = 0') : FluentFilter('${column.quotedIdentifier} IN (${List.filled(values.length, '?').join(', ')})', values);
 
+/// `"column" IN (...)` on Dart values the column converts (like [FluentFilter.inList], but always bound arguments:
+/// internal key lists are chunked by their callers, never moved to a temporary table).
+FluentFilter _dartIn(String column, List<Object> values) => values.isEmpty
+    ? const FluentFilter('1 = 0')
+    : FluentFilter('${column.quotedIdentifier} IN (${List.filled(values.length, '?').join(', ')})', FluentFilterArgs(values, List<String?>.filled(values.length, column)));
+
 /// A filter matching rows whose [columns] equal one of [ids] (plain values or [FluentKey]s keyed by [keyColumns]).
 /// `null` ids match nothing (a missing key refers to no row) and are left out. [stored]: the values are SQLite values
 /// (read from rows, or from reference columns) and are used as they are; otherwise they are Dart values that the
@@ -254,7 +260,7 @@ FluentFilter _tupleFilter(List<String> columns, List<String> keyColumns, List<Ob
   if (columns.length == 1) {
     final List<Object> values = [for (final Object? id in ids) if ((id is FluentKey ? id[keyColumns.first] : id) case final Object v) v];
     if (values.isEmpty) return const FluentFilter('1 = 0');
-    return stored ? _storedIn(columns.first, values) : FluentFilter.inList(columns.first.quotedIdentifier, values);
+    return stored ? _storedIn(columns.first, values) : _dartIn(columns.first, values);
   }
   final List<FluentKey> keys = [
     for (final Object? id in ids)
@@ -1148,7 +1154,14 @@ extension FluentRelationSchema<T extends FluentStorable> on FluentProvider<T> {
   }
 
   /// Names of the declared relations (never stored as columns).
-  Set<String> get _relationNames => {for (final FluentRelationLink l in _links) l.name};
+  Set<String> get _relationNames {
+    // Asked for every saved row: built once per relation graph (the graph build fills [_links] in place).
+    final Set<String>? cached = _linkNames;
+    if (cached != null && identical(_linkNamesOf, _links) && _linkNamesCount == _links.length) return cached;
+    _linkNamesOf = _links;
+    _linkNamesCount = _links.length;
+    return _linkNames = Set.unmodifiable({for (final FluentRelationLink l in _links) l.name});
+  }
 
   /// Adds reference columns of [_links] (`one`) and [_incomingLinks] (owned children) to [finalMap].
   ///

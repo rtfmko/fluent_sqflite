@@ -184,7 +184,18 @@ What a save never removes (children and links are only removed when the list rea
 * children read from the trash (`includeDeleted`) are not restored by saving the parent: use `trash.restore`;
 * relations in `model.unloadedRelations` (read with `FluentLoad.none`, `lazy`, cut by `maxDepth`, or a failed load): nothing
   is removed, new children in them are still saved;
+* a model rebuilt from a read (`copyWith`, or a new instance given the read lists): a read remembers, by list instance,
+  what it put into each list, so the same list in a new model removes only what the read showed (nothing for a list
+  the read did not load, even with `relationSync: replace`). A list read for another relation or owner only adds;
+* an **empty** list on a model the app built (no read behind the model or its list, e.g. `Article(id: 1, comments: [])`,
+  a `const []` default, or `[...list]` emptied): nothing is removed, a `relationListKept` warning says so. Clear on
+  purpose with `relationSync: FluentRelationSyncMode.replace`, `detach` or `delete`;
 * `insertOnly` on a row that exists writes nothing for its relations.
+
+A list the app builds with items (`[...list]`, `list.where(...).toList()`, a new list) is the full state like a read
+list: under a relation without `limit` it replaces the owned children / links. Edit the read list in place (or keep
+it) when only the read view should change; `fromCacheJson` defaults like `?? []` (a new list per model) keep the load
+info, a shared `const []` cannot carry it.
 
 ```dart
 await Article(title: 'Hi', author: ann, comments: [Comment(text: 'first')], tags: [dart, flutter]).save();

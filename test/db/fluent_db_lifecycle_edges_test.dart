@@ -116,7 +116,7 @@ void main() {
       FluentDb.setupLogging(enabled: true, console: false, level: FluentLogLevel.warning, onRecord: records.add);
       await expectLater(
         FluentDb.init([FluentGroup(dbKey: FluentDbKey('damaged_file'), providerList: [GadgetProvider()])]),
-        throwsA(isA<FluentException>()),
+        throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseCorrupt).having((e) => e.hint, 'hint', allOf(contains('backup'), contains('resetOnSchemaError'))).having((e) => e.cause, 'cause', isNotNull)),
       );
       expect(FluentDb.isOpen(), isFalse);
       expect(FluentDb.isOpen(dbKey: FluentDbKey('damaged_file')), isFalse);
@@ -126,6 +126,15 @@ void main() {
       expect(FluentDb.isOpen(), isTrue);
       await FluentDb.save<Gadget>(Gadget(name: 'ok'));
       expect(await FluentDb.count<Gadget>(), 1);
+    });
+
+    test('the corruption check recognizes the SQLite messages and nothing else', () {
+      expect(TableHelper.isCorrupt('SqliteException(26): file is not a database (code 26)'), isTrue);
+      expect(TableHelper.isCorrupt('database disk image is malformed (code 11 SQLITE_CORRUPT)'), isTrue);
+      expect(TableHelper.isCorrupt('SQLITE_NOTADB'), isTrue);
+      expect(TableHelper.isCorrupt('UNIQUE constraint failed: gadgets.name'), isFalse);
+      expect(TableHelper.isCorrupt('disk I/O error (code 10)'), isFalse);
+      expect(TableHelper.isCorrupt(null), isFalse);
     });
 
     test('resetOnSchemaError recreates a damaged file and reports the automatic change', () async {
@@ -197,12 +206,12 @@ void main() {
       expect(await FluentDb.count<Page>(), 1);
     });
 
-    test('deleteDatabases: nothing open, or an unknown / closed key, is refused with databaseNotFound', () async {
-      await expectLater(FluentDb.deleteDatabases(), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotFound).having((e) => e.message, 'message', contains('No database is open'))));
+    test('deleteDatabases: nothing open, or an unknown / closed key, is refused with databaseNotOpen', () async {
+      await expectLater(FluentDb.deleteDatabases(), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotOpen).having((e) => e.message, 'message', contains('No database is open'))));
       await FluentDb.init([FluentGroup(dbKey: FluentDbKey('del_db'), providerList: [GadgetProvider()], inMemory: true)]);
       await expectLater(
         FluentDb.deleteDatabases(dbKey: FluentDbKey('del_other')),
-        throwsA(isA<FluentConfigException>().having((e) => e.message, 'message', contains('"del_other" is not open'))),
+        throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotOpen).having((e) => e.message, 'message', contains('"del_other" is not open'))),
       );
     });
 
@@ -319,9 +328,10 @@ void main() {
 
     test('the optimize timer queues PRAGMA optimize on its own', () async {
       db = FluentTestDb(name: 'timer_opt', persistent: true);
-      await db!.open([GadgetProvider()], fluentConfig: const FluentConfig(optimizeInterval: Duration(milliseconds: 30), trashPurgeInterval: null));
+      await db!.open([GadgetProvider()], fluentConfig: const FluentConfig(optimizeInterval: Duration(seconds: 1), trashPurgeInterval: null));
       await db!.settle();
       final int before = FluentDb.engineStats().completed;
+      db!.clock.advance(const Duration(seconds: 2));
       await waitUntil(() async => FluentDb.engineStats().completed > before, db!);
       expect(FluentDbInternals.maintenanceTimers, (purge: false, optimize: true));
     });
@@ -334,10 +344,15 @@ void main() {
       expect(File(path).existsSync(), isTrue);
       await FluentDb.init(
         [FluentGroup(dbKey: FluentDbKey('timer_ro'), providerList: [GadgetProvider()], readOnly: true)],
-        config: const FluentConfig(optimizeInterval: Duration(milliseconds: 20), trashPurgeInterval: null),
+        config: const FluentConfig(optimizeInterval: Duration(seconds: 1), trashPurgeInterval: null),
       );
       final int before = FluentDb.engineStats().completed;
-      await Future<void>.delayed(const Duration(milliseconds: 120));
+      final FluentTestClock clock = FluentTestClock();
+      addTearDown(clock.reset);
+      for (int i = 0; i < 3; i++) {
+        clock.advance(const Duration(seconds: 2));
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
       await idle();
       expect(FluentDb.engineStats().completed, before, reason: 'no PRAGMA optimize was queued on a read-only file');
       await FluentDb.close();
@@ -352,7 +367,9 @@ void main() {
       await FluentDb.delete<Comment>(a);
       db!.clock.advance(const Duration(days: 2));
       expect(await FluentDb.withTrash<Comment>().count(), 2, reason: 'still in the trash: nothing purged yet');
-      FluentDb.configure(const FluentConfig(trashRetention: Duration(days: 1), trashPurgeInterval: Duration(milliseconds: 30), optimizeInterval: null));
+      FluentDb.configure(const FluentConfig(trashRetention: Duration(days: 1), trashPurgeInterval: Duration(seconds: 1), optimizeInterval: null));
+      await db!.settle(); // the timers restart in the queue
+      db!.clock.advance(const Duration(seconds: 2));
       await waitUntil(() async => await FluentDb.withTrash<Comment>().count() == 1, db!);
       expect(FluentDbInternals.maintenanceTimers, (purge: true, optimize: false));
       FluentDb.configure(const FluentConfig(trashPurgeInterval: null, optimizeInterval: null));
@@ -405,7 +422,7 @@ void main() {
 
     test('timers stop with close and are not started before init', () async {
       expect(FluentDbInternals.maintenanceTimers, (purge: false, optimize: false));
-      FluentDb.configure(const FluentConfig(optimizeInterval: Duration(milliseconds: 30)));
+      FluentDb.configure(const FluentConfig(optimizeInterval: Duration(seconds: 1)));
       await Future<void>.delayed(Duration.zero);
       expect(FluentDbInternals.maintenanceTimers, (purge: false, optimize: false));
       db = FluentTestDb();

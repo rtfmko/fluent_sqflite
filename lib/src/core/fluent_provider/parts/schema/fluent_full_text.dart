@@ -292,6 +292,7 @@ extension FluentFullTextSchema<T extends FluentStorable> on FluentProvider<T> {
         details: 'The full-text index of "$tableName" is not available (FluentDbConfig.fullText is off, or the SQLite of this '
             'device has no FTS), so FluentFilter.search compares words with LIKE: every row is read, words match anywhere inside '
             'other words, and only ASCII letters ignore case.',
+        fix: 'Turn the full-text index on (FluentDbConfig(fullText: FluentFullText.auto)) or accept that searches compare words with LIKE.',
         code: 'FluentGroup(..., config: const FluentDbConfig(fullText: FluentFullText.auto))',
       ),
     );

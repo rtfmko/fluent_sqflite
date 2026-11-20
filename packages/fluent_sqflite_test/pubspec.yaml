@@ -1,6 +1,6 @@
 name: fluent_sqflite_test
 description: "Test helpers for fluent_sqflite: databases in memory, a clock you can move, waiting for streams, and the issues a test raised."
-version: 2.0.0-dev.2
+version: 2.0.0-dev.3
 homepage: https://github.com/rtfmko/fluent_sqflite
 # Until fluent_sqflite 2.0.0 is on pub.dev: then remove this line and depend on fluent_sqflite: 2.0.0.
 publish_to: none

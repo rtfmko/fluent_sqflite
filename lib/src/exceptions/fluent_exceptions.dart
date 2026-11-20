@@ -15,8 +15,14 @@ enum FluentErrorCode {
   /// A database name contains characters other than letters, digits and `_`.
   invalidDatabaseName,
 
-  /// No database group with the requested key is open, or the file of a read-only group does not exist.
+  /// The file of a read-only group (`FluentGroup.readOnly`) does not exist.
   databaseNotFound,
+
+  /// A call names a database (`dbKey`) that is not open: never initialized, closed, or deleted without `reopen`.
+  databaseNotOpen,
+
+  /// SQLite reports the file as damaged or not a database (`SQLITE_NOTADB` / `SQLITE_CORRUPT`).
+  databaseCorrupt,
 
   /// No provider is registered for the requested model / table.
   providerNotFound,
@@ -83,6 +89,15 @@ enum FluentErrorCode {
 
   /// The call came while the databases were closed (`FluentDb.close`), or they were closed before it ran.
   engineClosed,
+
+  /// The call was refused because it would close a wait-for cycle between databases: a transaction holding one
+  /// database waits for another one whose transaction (directly or through others) waits for the first (A → B → A).
+  deadlock,
+
+  /// A sync read (`syncWithServer`, `watchRemote`) waited longer than `FluentConfig.committedReadTimeout` for a
+  /// transaction on the same database and was not run: it never reads uncommitted data, and that transaction may be
+  /// waiting for the sync itself. Transient: nothing was lost, a later attempt (`retries`) runs it.
+  databaseBusy,
 
   /// An unexpected internal failure.
   engineError,

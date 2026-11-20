@@ -135,12 +135,16 @@ class FluentLog {
 
   static FluentIssue _redactedIssue(FluentIssue i) {
     final Object? error = _redactedError(i.error);
-    if (identical(error, i.error)) return i;
+    final bool text = !_showSqlArguments;
+    final String title = text ? redact(i.title) : i.title;
+    final String? details = text && i.details != null ? redact(i.details!) : i.details;
+    final String? fix = text && i.fix != null ? redact(i.fix!) : i.fix;
+    if (identical(error, i.error) && title == i.title && details == i.details && fix == i.fix) return i;
     return FluentIssue(
       kind: i.kind,
-      title: i.title,
-      details: i.details,
-      fix: i.fix,
+      title: title,
+      details: details,
+      fix: fix,
       code: i.code,
       database: i.database,
       table: i.table,

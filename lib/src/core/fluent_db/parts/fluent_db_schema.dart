@@ -121,8 +121,15 @@ extension _FluentDbSchema on FluentDb {
 
       // Only a schema change (a rebuild with foreign keys off) can leave rows pointing nowhere.
       if (foreignKeysOn && (ctx.changes.isNotEmpty || checkForeignKeys)) {
-        final List<Map<String, Object?>> found = await db.rawQuery('PRAGMA foreign_key_check');
-        if (found.isNotEmpty) {
+        // The changes are committed: a check that fails must not fail the start (the start-up maintenance checks again).
+        List<Map<String, Object?>>? found;
+        try {
+          found = await db.rawQuery('PRAGMA foreign_key_check');
+        } catch (e, st) {
+          FluentLog.report(e, stackTrace: st, tag: 'FluentDb:syncSchema');
+          violations = true;
+        }
+        if (found != null && found.isNotEmpty) {
           violations = true;
           FluentLog.issue(
             FluentIssueKind.danglingReferences,

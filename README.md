@@ -30,7 +30,7 @@ dependencies:
   fluent_sqflite: ^2.0.0
 ```
 
-Until 2.0.0 is out, `^2.0.0` does not resolve a pre-release: name the version (`fluent_sqflite: 2.0.0-dev.2`) or use git
+Until 2.0.0 is out, `^2.0.0` does not resolve a pre-release: name the version (`fluent_sqflite: 2.0.0-dev.3`) or use git
 (`fluent_sqflite: {git: {url: https://github.com/rtfmko/fluent_sqflite, ref: main}}`).
 
 Works on Android and iOS (sqflite). For desktop use [sqflite_common_ffi](https://pub.dev/packages/sqflite_common_ffi); for tests,
@@ -115,6 +115,7 @@ The same calls exist as statics (`FluentDb.find<Note>(...)`) and on models (`not
 | [Sync](doc/sync.md) | `watchRemote`, `FluentSyncable` push / pull, conflicts, server keys, tombstones |
 | [Performance](doc/performance.md) | read pool, isolate mapping, analyzer hints, `fluent_sqflite_benchmark` |
 | [Errors and logging](doc/errors-and-logging.md) | `FluentException`, `FluentErrorCode`, `setupLogging`, hints |
+| [Guarantees](doc/guarantees.md) | the 31 promises (atomic writes, no data loss, no hang, ...), how each is tested, and their limits |
 | [Testing](doc/testing.md) | `fluent_sqflite_test`: `FluentTestDb`, moving the clock, `settle`, issues |
 | [Upgrading from 1.x](doc/ai/migrations.md) | every renamed or removed member |
 

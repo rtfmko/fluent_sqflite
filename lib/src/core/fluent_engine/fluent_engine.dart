@@ -37,11 +37,59 @@ class FluentEngine {
   final Map<String, FluentDbConfig> _configs = {};
 
   /// Waiting tasks per database, in call order (the scheduler only looks at the head of each queue).
-  final Map<String, List<FluentTask>> _queues = {};
+  final Map<String, _FluentDbQueue> _queues = {};
 
   /// Number of writes queued per database so far: reads may share a result only within one epoch, so a read called
   /// after a write never gets the result of a read that ran before it.
   final Map<String, int> _writeEpochs = {};
+
+  /// Results of finished expensive `count` calls by collapse key (fingerprint + write epoch), until the next write of
+  /// any database is queued ([_enqueue] empties it): a count read again before anything changed costs one
+  /// `PRAGMA data_version` instead of a scan. Only counts that cost at least [_cachedCountMs] on average, cannot depend
+  /// on the time (no expiry condition with SQLite's `now`) and finished while no write ran on their database (a read the
+  /// transaction watchdog let into a transaction saw uncommitted data) are kept. Commits of other connections (another
+  /// isolate or process on the same file) change `data_version`: such an entry is dropped, never served stale.
+  final Map<String, ({int count, int dataVersion})> _countCache = {};
+
+  /// The average cost from which a count is cached (cheaper ones cost about what the `data_version` check costs).
+  static const int _cachedCountMs = 2;
+
+  /// `PRAGMA data_version` of [dbName]'s main connection (changes when another connection commits), `null` when it
+  /// cannot be read.
+  Future<int?> _dataVersion(String dbName) async {
+    final Database? db = _databases[dbName];
+    if (db == null || !db.isOpen) return null;
+    try {
+      return Sqflite.firstIntValue(await db.rawQuery('PRAGMA data_version'));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Counts answered by [_countCache].
+  int _cachedCounts = 0;
+
+  /// The cache key of each queued count that may be answered from [_countCache], by task id.
+  final Map<int, String> _countKeys = {};
+
+  /// Runs the count [task] (cache key [key]) when its turn came: the cached value when nothing changed since (same
+  /// write epoch, same `data_version`: no other connection committed), else the count, which is then kept. `null` result
+  /// means run it normally; the returned record says whether the value came from the cache.
+  Future<({Object? value, bool cached})> _cachedCount(String key, FluentTask task, Future<Object?> Function() run) async {
+    final int? version = await _dataVersion(task.dbName);
+    final ({int count, int dataVersion})? hit = _countCache[key];
+    if (version != null && hit != null && hit.dataVersion == version && key.endsWith('#${_writeEpochs[task.dbName] ?? 0}')) {
+      _cachedCounts++;
+      return (value: hit.count, cached: true);
+    }
+    final Object? result = await run();
+    // Still the same epoch (no write queued since) and no write running (never a transaction's uncommitted view).
+    if (version != null && result is int && key.endsWith('#${_writeEpochs[task.dbName] ?? 0}') && (_activeWritesPerDb[task.dbName] ?? 0) == 0) {
+      if (_countCache.length >= 256) _countCache.clear();
+      _countCache[key] = (count: result, dataVersion: version);
+    }
+    return (value: result, cached: false);
+  }
 
   int get _queuedCount => _queues.values.fold(0, (sum, q) => sum + q.length);
 
@@ -91,6 +139,10 @@ class FluentEngine {
 
   /// Priorities raised by collapsed reads (task id -> priority), see [dispatch].
   final Map<int, int> _raisedPriority = {};
+
+  /// The zones of calls answered by a queued read (collapsed onto it, by task id): they wait for that read as if they
+  /// were queued themselves (a pause holding the read holds their transactions, see [_heldByPause]).
+  final Map<int, List<Zone>> _collapsedCallers = {};
 
   /// The queued task answering each collapse key (to raise its priority).
   final Map<String, FluentTask> _collapseHeads = {};
@@ -158,6 +210,21 @@ class FluentEngine {
   static int Function()? clock;
 
   int get _nowMs => clock?.call() ?? _clock.elapsedMilliseconds;
+
+  /// What the engine holds right now (queues, running tasks, pauses, waits between transactions): printed by tests
+  /// when calls never complete, to show what waits for what.
+  @visibleForTesting
+  String debugState() {
+    final StringBuffer sb = StringBuffer('accepting: $_accepting, generation: $_generation, pending: ${_pendingRequests.keys.toList()}\n');
+    sb.writeln('paused: global $_isGlobalPaused, dbs $_pausedDbs, pause waiters: ${_dbPauseCompleters.keys.toList()}${_globalPauseCompleter != null ? ' + global' : ''}');
+    sb.writeln('active reads: $_activeReadsPerDb, active writes: $_activeWritesPerDb, held by pause: ${_heldByPause()}');
+    for (final MapEntry<String, _FluentDbQueue> e in _queues.entries) {
+      sb.writeln('queue ${e.key}: ${[for (final FluentTask t in e.value) '#${t.id} ${t.action.name} ${t.table}${_callerZones[t.id] == null ? '' : ' scopes ${FluentTransactionScope._scopesOf(_callerZones[t.id]!).values.map((s) => '${s.dbName}${s.closed ? '(closed)' : ''}').toList()}'}']}');
+    }
+    sb.writeln('collapses: ${_activeCollapses.keys.length}, calls run in write groups: $_groupedWriteCalls, counts from cache: $_cachedCounts');
+    sb.write('waits: ${[for (final _FluentWait w in FluentTransactionScope._waits) '${w.held.map((s) => '${s.dbName}${s.closed ? '(closed)' : ''}').toList()} -> ${w.target}${w.blocked ? ' blocked' : ''}']}');
+    return sb.toString();
+  }
 
   // Scheduler counters (see [stats]).
   int _startedTasks = 0;
@@ -336,7 +403,9 @@ class FluentEngine {
   void applyConfig(FluentConfig config) => _config = config;
 
   /// Pauses the queue of [dbName] (every database when `null`): queued and new tasks wait until [resumeQueue];
-  /// completes when the tasks already running have finished (at once when none run).
+  /// completes when the tasks already running have finished (at once when none run). A running transaction that waits
+  /// for a call the pause holds (a call on a paused database, directly or through other transactions) cannot finish
+  /// before [resumeQueue]: the pause does not wait for it (it would wait forever, G12), it goes on after the resume.
   ///
   /// The pause watchdog (`FluentConfig.pauseWatchdog`) resumes a queue left paused too long, with a warning.
   /// Called from inside a running task or transaction, the pause would wait for itself: it is ignored and reported
@@ -359,7 +428,7 @@ class FluentEngine {
 
       final int active = (_activeReadsPerDb[dbName] ?? 0) + (_activeWritesPerDb[dbName] ?? 0);
 
-      if (active == 0) {
+      if (active == 0 || _heldByPause().contains(dbName)) {
         FluentLog.debug('Queue for "$dbName" paused (Idle).', tag: 'FluentEngine:pause');
         return;
       }
@@ -372,7 +441,7 @@ class FluentEngine {
       _isGlobalPaused = true;
       final int totalActive = _globalActiveReads + _globalActiveWrites;
 
-      if (totalActive == 0) {
+      if (totalActive == 0 || _allDrained(_heldByPause())) {
         FluentLog.debug('Global engine paused (Idle).', tag: 'FluentEngine:pause');
         return;
       }
@@ -421,12 +490,15 @@ class FluentEngine {
     _processNext();
   }
 
-  /// Called after every finished task: completes the pause of each paused database (and the global pause) that has no
-  /// running task left, so its [pauseQueue] caller continues.
+  /// Called after every finished task (and every call queued while paused): completes the pause of each paused
+  /// database (and the global pause) that has no running task left, or only one that waits for the pause (see
+  /// [_heldByPause]), so its [pauseQueue] caller continues.
   void _checkPauseState() {
     if (_pausedDbs.isEmpty && !_isGlobalPaused) return;
+    if (_dbPauseCompleters.isEmpty && _globalPauseCompleter == null) return; // nobody waits for a drain
+    final Set<String> held = _heldByPause();
     for (final String db in _pausedDbs.toList()) {
-      if ((_activeReadsPerDb[db] ?? 0) == 0 && (_activeWritesPerDb[db] ?? 0) == 0) {
+      if (((_activeReadsPerDb[db] ?? 0) == 0 && (_activeWritesPerDb[db] ?? 0) == 0) || held.contains(db)) {
         if (_dbPauseCompleters[db]?.isCompleted == false) {
           _dbPauseCompleters[db]!.complete();
           FluentLog.debug('Queue for "$db" drained. Caller unblocked.', tag: 'FluentEngine:pause');
@@ -436,7 +508,7 @@ class FluentEngine {
     }
 
     if (_isGlobalPaused) {
-      if (_globalActiveReads == 0 && _globalActiveWrites == 0) {
+      if (_allDrained(held)) {
         if (_globalPauseCompleter?.isCompleted == false) {
           _globalPauseCompleter!.complete();
           FluentLog.debug('Global engine drained. Caller unblocked.', tag: 'FluentEngine:pause');
@@ -446,13 +518,69 @@ class FluentEngine {
     }
   }
 
+  /// Whether no database runs a task, except the databases in [held] (see [_heldByPause]).
+  bool _allDrained(Set<String> held) {
+    for (final String db in {..._activeReadsPerDb.keys, ..._activeWritesPerDb.keys}) {
+      if (held.contains(db)) continue;
+      if ((_activeReadsPerDb[db] ?? 0) > 0 || (_activeWritesPerDb[db] ?? 0) > 0) return false;
+    }
+    return true;
+  }
+
+  /// The databases whose running transaction waits for the pause: it made a call that is queued on a paused database,
+  /// or waits for the transaction of such a database (the wait-for graph of [FluentTransactionScope.waitingFor]).
+  /// Their transaction cannot end before [resumeQueue], so a pause never waits for them.
+  Set<String> _heldByPause() {
+    final Set<String> held = {};
+    for (final MapEntry<String, _FluentDbQueue> entry in _queues.entries) {
+      if (!_isGlobalPaused && !_pausedDbs.contains(entry.key)) continue;
+      for (final FluentTask t in entry.value) {
+        // The caller of the queued task, and the callers of identical reads answered by it (collapsed onto it).
+        for (final Zone caller in [?_callerZones[t.id], ...?_collapsedCallers[t.id]]) {
+          for (final FluentTransactionScope s in FluentTransactionScope._scopesOf(caller).values) {
+            if (!s.closed && s.dbName != entry.key) held.add(s.dbName);
+          }
+        }
+      }
+    }
+    if (held.isEmpty) return held;
+    for (bool grew = true; grew;) {
+      grew = false;
+      for (final _FluentWait w in FluentTransactionScope._waits) {
+        if (!held.contains(w.target) || !w.blocked) continue;
+        for (final FluentTransactionScope s in w.held) {
+          if (!s.closed && held.add(s.dbName)) grew = true;
+        }
+      }
+    }
+    return held;
+  }
+
   /// Submits [task] and completes with its result.
   ///
   /// An identical read already in flight (same fingerprint) answers this one too, unless the policy sets
   /// `cancelIfDuplicate: false`; every caller gets its own copy of a list result, but the models in it are the same
   /// instances (changing a model changes it for every caller of the collapsed read). When the read is still queued it
   /// runs with the higher priority of the two calls.
-  Future<dynamic> dispatch(FluentTask task) async {
+  ///
+  /// Called from inside an open transaction on another database, the call is refused with a
+  /// [FluentErrorCode.deadlock] error when it would close a wait-for cycle between databases (see
+  /// [FluentTransactionScope.waitingFor]). A read counts always while the transaction watchdog is off; while it is on,
+  /// only as long as a write queued before it waits (the watchdog lets a read into the running transaction of its
+  /// database, but never past a queued write: G7). A [FluentTask.committedOnly] read is never let in: it counts always.
+  Future<dynamic> dispatch(FluentTask task) {
+    if (task.isWriteOp || task.committedOnly || _config.transactionWatchdog == null) return FluentTransactionScope.waitingFor(task.dbName, () => _dispatch(task));
+    // Tasks queued before this read have smaller ids; an identical read it collapses onto is behind the same writes
+    // (its collapse key holds the write epoch).
+    final int before = _idCounter + 1;
+    final String db = task.dbName;
+    return FluentTransactionScope.waitingFor(db, () => _dispatch(task), blockedWhile: () => _writeQueuedBefore(db, before));
+  }
+
+  /// Whether a write that got its id before [id] still waits in the queue of [dbName].
+  bool _writeQueuedBefore(String dbName, int id) => _queues[dbName]?.hasWriteBefore(id) ?? false;
+
+  Future<dynamic> _dispatch(FluentTask task) async {
     if (!_accepting) {
       throw FluentLog.raise(
         FluentCancelledException(
@@ -469,6 +597,10 @@ class FluentEngine {
     if (!canCollapse) return _executeTaskInPipeline(task);
 
     final String key = '${task.fingerprint}#${_writeEpochs[task.dbName] ?? 0}';
+    final bool cachable = task.action == FluentDbAction.count &&
+        !task.committedOnly &&
+        !(task.helper?.where?.contains("julianday('now')") ?? false) &&
+        (FluentTableStatsTracker().averageMs(task) ?? 0) >= _cachedCountMs;
     final Future<dynamic>? inFlight = _activeCollapses[key];
     if (inFlight != null) {
       _collapsedReads++;
@@ -476,13 +608,21 @@ class FluentEngine {
       // Still queued: it now runs for this caller too, so it gets the higher priority of both.
       final FluentTask? head = _collapseHeads[key];
       final int priority = task.policy.effectivePriority;
-      if (head != null && _callerZones.containsKey(head.id) && priority > _priorityOf(head)) _raisedPriority[head.id] = priority;
+      if (head != null && _callerZones.containsKey(head.id)) {
+        if (priority > _priorityOf(head)) {
+          final String filed = _readClass(head);
+          _raisedPriority[head.id] = priority;
+          _queues[head.dbName]?.reclassify(head, filed);
+        }
+        (_collapsedCallers[head.id] ??= []).add(Zone.current);
+      }
       final Object? shared = await inFlight;
       if (shared is! List) return shared;
       // Every caller gets its own list; rows of findMaps are copied too (models are shared by design, see above).
       return task.action == FluentDbAction.findMaps ? <Map<String, dynamic>>[for (final Object? row in shared) Map<String, dynamic>.of((row! as Map).cast<String, dynamic>())] : shared.toList();
     }
-    final Future<dynamic> execution = _executeTaskInPipeline(task, collapseKey: key);
+    // Queued at once like every call (call order); the cache is looked at when the task runs ([_cachedCount]).
+    final Future<dynamic> execution = _executeTaskInPipeline(task, collapseKey: key, countKey: cachable ? key : null);
     _activeCollapses[key] = execution;
     try {
       return await execution;
@@ -498,6 +638,7 @@ class FluentEngine {
   /// Publishes an event of [action] on [provider]'s table without items and without running a task (used after a
   /// table or database was emptied outside the queue).
   void broadcastSystemAction(FluentDbAction action, FluentProvider provider) {
+    _countCache.clear(); // the table changed outside the queue
     if (!_changeEventBus.isClosed) {
       _changeEventBus.add(_event(provider, action, const <dynamic>[]));
       FluentLog.debug('System event broadcasted', tag: 'FluentEngine:broadcast', context: {'action': action.name, 'table': provider.tableName});
@@ -506,9 +647,10 @@ class FluentEngine {
 
   /// Gives [task] an id and its scheduling weight, remembers the caller's zone (and the task as the head of
   /// [collapseKey]), queues it and completes with its result.
-  Future<dynamic> _executeTaskInPipeline(FluentTask task, {String? collapseKey}) {
+  Future<dynamic> _executeTaskInPipeline(FluentTask task, {String? collapseKey, String? countKey}) {
     final int id = _nextId;
     task = task.copyWith(id: id);
+    if (countKey != null) _countKeys[id] = countKey;
     _callerZones[id] = Zone.current;
     if (collapseKey != null) _collapseHeads[collapseKey] = task;
 
@@ -529,9 +671,14 @@ class FluentEngine {
   /// Appends [task] to the queue (arrival order is the order of the operations) and schedules.
   void _enqueue(FluentTask task) {
     task.enqueuedAt = _nowMs;
-    final List<FluentTask> queue = _queues.putIfAbsent(task.dbName, () => [])..add(task);
-    if (task.isWriteOp) _writeEpochs[task.dbName] = (_writeEpochs[task.dbName] ?? 0) + 1;
+    if (task.committedOnly) _watchCommittedRead(task, Stopwatch()..start());
+    final _FluentDbQueue queue = _queues.putIfAbsent(task.dbName, () => _FluentDbQueue(_readClass, _lookupShape))..add(task);
+    if (task.isWriteOp) {
+      _writeEpochs[task.dbName] = (_writeEpochs[task.dbName] ?? 0) + 1;
+      _countCache.clear();
+    }
     _observe('onEnqueue', () => FluentAnalyzer().onEnqueue(task, queue.length));
+    _checkPauseState(); // a running transaction may now wait for the pause: its pauseQueue caller stops waiting
     _processNext();
   }
 
@@ -555,37 +702,41 @@ class FluentEngine {
     }
 
     final List<FluentTask> toStart = [];
-    for (final MapEntry<String, List<FluentTask>> entry in _queues.entries) {
+    for (final MapEntry<String, _FluentDbQueue> entry in _queues.entries) {
       final String db = entry.key;
-      final List<FluentTask> tasks = entry.value;
+      final _FluentDbQueue tasks = entry.value;
       if (tasks.isEmpty || _pausedDbs.contains(db) || (_activeWritesPerDb[db] ?? 0) > 0) continue;
-      final Set<FluentTask> taken = Set.identity();
 
       int activeReads = _activeReadsPerDb[db] ?? 0;
 
-      if (tasks.first.isWriteOp) {
+      if (tasks.headIsWrite) {
         if (activeReads > 0) continue; // the write waits for the running reads
-        final List<FluentTask> parts = _adjacentSaves(tasks);
-        tasks.removeRange(0, parts.length);
-        toStart.add(parts.length == 1 ? parts.first : _mergedSave(parts));
+        final List<FluentTask> parts = _adjacentSaves(tasks.leadingWrites);
+        if (parts.length > 1) {
+          tasks.removeLeadingWrites(parts.length);
+          toStart.add(_mergedSave(parts));
+          continue;
+        }
+        final List<FluentTask> group = _writeGroup(tasks.leadingWrites);
+        tasks.removeLeadingWrites(group.length);
+        toStart.add(group.length == 1 ? group.single : _groupedWrites(group));
         continue;
       }
 
       // One read per connection: several only with a read pool (one connection runs its statements in turn).
-      // Checked before the queue is scanned: many waiting reads with full slots cost nothing per finished task.
+      // Checked before the queue is looked at: many waiting reads with full slots cost nothing per finished task.
       final int maxReads = math.max(1, readConnectionCount(db));
-      if (activeReads >= maxReads) continue;
-      final int barrier = tasks.indexWhere((t) => t.isWriteOp);
-      final List<FluentTask> reads = tasks.sublist(0, barrier < 0 ? tasks.length : barrier);
-      final Map<String, List<FluentTask>> lookups = _lookupGroups(reads);
-      for (final FluentTask read in _best(reads, maxReads - activeReads, lookups)) {
-        final List<FluentTask> group = read.action == FluentDbAction.findById ? [read, for (final FluentTask t in lookups[_lookupShape(read)]!) if (!identical(t, read)) t] : [read];
+      // The best reads before the next write, by _readOrder; a lookup takes its whole group (one IN query). The queue
+      // is indexed (_FluentDbQueue): no pass scans every waiting read.
+      while (activeReads < maxReads) {
+        final FluentTask? read = tasks.bestHeadRead(_readOrder);
+        if (read == null) break;
+        final List<FluentTask> group = read.action == FluentDbAction.findById ? [read, for (final FluentTask t in tasks.lookupGroupOf(read)) if (!identical(t, read)) t] : [read];
+        group.forEach(tasks.remove);
         if (group.length > 1) _batchedLookups += group.length;
-        taken.addAll(group);
         toStart.add(group.length == 1 ? read : read.copyWith(mergedTasks: group));
         activeReads++;
       }
-      tasks.removeWhere(taken.contains);
     }
 
     if (toStart.isEmpty) return;
@@ -607,8 +758,17 @@ class FluentEngine {
   /// Whether [_processNext] was called while [_starting]: it runs again right after.
   bool _scheduleAgain = false;
 
+  /// How often the scheduler compared two waiting reads ([_readOrder]): tests check that picking the next reads does
+  /// not grow with the number of waiting reads.
+  @visibleForTesting
+  int debugReadComparisons = 0;
+
+  /// The (priority, weight) class of a queued read: reads of one class keep their arrival order under [_readOrder].
+  String _readClass(FluentTask read) => '${_priorityOf(read)}|${read.executionWeight}';
+
   /// Order of reads that may run now: aged priority, then aged weight, then arrival.
   int _readOrder(FluentTask a, FluentTask b) {
+    debugReadComparisons++;
     final int priority = _agedPriority(b).compareTo(_agedPriority(a));
     if (priority != 0) return priority;
     final int weight = _agedWeight(a).compareTo(_agedWeight(b));
@@ -631,16 +791,17 @@ class FluentEngine {
   /// row an earlier call of the batch writes too (same key, or same `conflictOn` value) ends the batch: one call
   /// writes a repeated key once, which would drop an earlier call's patch and give both callers one outcome. So does a
   /// save of a model instance an earlier call saves too (a double tap on a new model without a key yet): one call
-  /// would insert it twice, the second save must update the row the first one inserted.
-  List<FluentTask> _adjacentSaves(List<FluentTask> tasks) {
+  /// would insert it twice, the second save must update the row the first one inserted. One call writes its updates
+  /// before its inserts; for a merged batch the row writer never moves an insert of an earlier call behind an update
+  /// of a later one (`_writeRows(calls:)`). Saves of a table with relations are never merged (each call saves a graph).
+  List<FluentTask> _adjacentSaves(Iterable<FluentTask> tasks) {
     final FluentTask head = tasks.first;
     if (head.action != FluentDbAction.save) return [head];
     final List<FluentTask> parts = [head];
     Set<String>? written; // match values of the rows of [parts], built when a second save is in sight
     final Set<Object?> saved = Set.identity(); // the model instances of [parts]
     List<String>? match;
-    for (int i = 1; i < tasks.length; i++) {
-      final FluentTask next = tasks[i];
+    for (final FluentTask next in tasks.skip(1)) {
       // Everything that changes how a save writes must be equal: one merged call runs with the head's settings.
       if (next.action != FluentDbAction.save ||
           next.table != head.table ||
@@ -650,8 +811,13 @@ class FluentEngine {
           !listEquals(next.helper?.conflictOn, head.helper?.conflictOn)) {
         break;
       }
-      match ??= head.helper?.conflictOn ?? FluentDbInternals.lookupByTable(head.table, head.dbName)?.keyColumnNames.toList();
-      if (match == null) break;
+      if (match == null) {
+        final FluentProvider? provider = FluentDbInternals.lookupByTable(head.table, head.dbName);
+        // A table with relations saves a graph per call (references, rows, children, links): merged, the writes of
+        // the calls would interleave in another order than one by one, so these saves are never merged (G7).
+        if (provider == null || provider.relationLinks.isNotEmpty) break;
+        match = head.helper?.conflictOn ?? provider.keyColumnNames.toList();
+      }
       written ??= _matchKeys(head, match);
       final Set<String>? own = _matchKeys(next, match);
       if (own == null || written == null || own.any(written.contains)) break;
@@ -689,6 +855,144 @@ class FluentEngine {
     return keys;
   }
 
+  /// Writes that may share one transaction with their neighbours ([_writeGroup]): each runs through the provider's
+  /// write path, which joins an open transaction with its own SAVEPOINT. Raw SQL, table / database wipes, relation
+  /// and sync writes (closures that may do anything) and user transactions always run alone.
+  static const Set<FluentDbAction> _groupableWrites = {
+    FluentDbAction.save,
+    FluentDbAction.update,
+    FluentDbAction.updateFields,
+    FluentDbAction.delete,
+    FluentDbAction.hardDelete,
+    FluentDbAction.restore,
+  };
+
+  /// The most calls one write group runs (it holds the database while it runs).
+  static const int _maxWriteGroup = 64;
+
+  /// Group tasks started by [_processNext] (run by [_executeWriteGroup]).
+  final Set<FluentTask> _writeGroupTasks = Set.identity();
+
+  /// The caller zone of every call of a running write group, by task id.
+  final Map<int, Zone> _groupCallers = {};
+
+  /// The write at the head of [leading] and the groupable writes right behind it (any table of the database), at most
+  /// [_maxWriteGroup]. A run of saves that merge into one call ([_adjacentSaves]) ends the group: it runs as a merged
+  /// save next. Order is kept: the group runs its calls in call order.
+  List<FluentTask> _writeGroup(Iterable<FluentTask> leading) {
+    final List<FluentTask> group = [];
+    for (final FluentTask t in leading) {
+      if (!_groupableWrites.contains(t.action) || t.isBatched) return group.isEmpty ? [t] : group;
+      if (group.length >= _maxWriteGroup) break;
+      if (group.isNotEmpty && t.action == FluentDbAction.save && _adjacentSaves(leading.skip(group.length)).length > 1) break;
+      group.add(t);
+    }
+    return group;
+  }
+
+  /// One task that runs [parts] in one transaction ([_executeWriteGroup]).
+  FluentTask _groupedWrites(List<FluentTask> parts) {
+    _groupedWriteCalls += parts.length;
+    final FluentTask task = parts.first.copyWith(mergedTasks: parts);
+    _writeGroupTasks.add(task);
+    return task;
+  }
+
+  /// Calls run in write groups (see [_executeWriteGroup]).
+  int _groupedWriteCalls = 0;
+
+  /// Runs adjacent writes in one transaction: each call in its caller's zone and its own SAVEPOINT (the provider's
+  /// write path joins the open transaction), so it succeeds or fails alone, in call order. The callers are completed
+  /// and the events published after the commit only. When the transaction itself fails (BEGIN, COMMIT, or an error
+  /// that ended it), nothing of it stays: the calls run again one by one, each in its own transaction.
+  Future<void> _executeWriteGroup(List<FluentTask> parts) async {
+    final String dbName = parts.first.dbName;
+    final Database? database = _databases[dbName];
+    final List<Zone> callers = [for (final FluentTask part in parts) _groupCallers.remove(part.id) ?? Zone.current];
+    if (database == null || !database.isOpen) return _runCallsAlone(parts, callers);
+    final int n = parts.length;
+    final List<Object?> results = List.filled(n, null);
+    final List<(Object, StackTrace)?> errors = List.filled(n, null);
+    final List<FluentProvider?> providers = List.filled(n, null);
+    final List<List<FluentTouchedTable>> touched = [for (int i = 0; i < n; i++) <FluentTouchedTable>[]];
+    final List<int> elapsed = List.filled(n, 0);
+    FluentTransactionScope? scope;
+    try {
+      await database.transaction((txn) {
+        final FluentTransactionScope open = scope = FluentTransactionScope(dbName, txn);
+        return open.run(() async {
+          for (int i = 0; i < n; i++) {
+            final FluentTask part = parts[i];
+            final Stopwatch sw = Stopwatch()..start();
+            final _RunningTask mark = _RunningTask(dbName, callers[i][_runningTaskKey] as _RunningTask?);
+            try {
+              final FluentProvider provider = providers[i] = FluentDbInternals.providerForTable(part.table, dbName: dbName);
+              results[i] = await _taskZone(callers[i], mark, null).run(() => open.run(() => collectingTouched(touched[i], () => provider.internalExecute(part))));
+            } catch (e, s) {
+              errors[i] = (e, s); // its SAVEPOINT was rolled back: the other calls go on
+            } finally {
+              mark.running = false;
+              elapsed[i] = sw.elapsedMilliseconds;
+            }
+          }
+        });
+      });
+    } catch (e) {
+      scope?.rolledBack(); // keys its inserts gave the models are taken back
+      _splitBatches++;
+      FluentLog.debug('Write group failed; running its calls one by one', tag: 'FluentEngine:batching', context: {'db': dbName, 'calls': n, 'error': e.runtimeType.toString()});
+      return _runCallsAlone(parts, callers);
+    }
+    scope?.committed();
+    // Calls made by the writes themselves (other tables of the database) publish their events now too.
+    for (final (FluentTask task, FluentProvider provider, Object? written) in scope?.pendingEvents ?? const <(FluentTask, FluentProvider, Object?)>[]) {
+      publishChange(task, provider, written);
+    }
+    for (final (FluentTask task, FluentProvider provider, List<FluentTouchedTable> t) in scope?.pendingTouched ?? const <(FluentTask, FluentProvider, List<FluentTouchedTable>)>[]) {
+      publishTouched(task, provider, t);
+    }
+    for (int i = 0; i < n; i++) {
+      final FluentTask part = parts[i];
+      final (Object, StackTrace)? error = errors[i];
+      if (error != null) {
+        _failTaskOrBatch(part, error.$1, error.$2);
+        continue;
+      }
+      final FluentProvider provider = providers[i]!;
+      try {
+        _observe('onFinish', () => FluentAnalyzer().onFinish(part, provider, elapsed[i], results[i]));
+        if (part.isStreamOp) publishChange(part, provider, results[i]);
+        publishTouched(part, provider, touched[i]);
+        _observe('record', () => FluentTableStatsTracker().record(part, elapsed[i], rows: _rowsOf(results[i])));
+      } catch (e, s) {
+        FluentLog.report(e, stackTrace: s, tag: 'FluentEngine:group');
+      }
+      _pendingRequests.remove(part.id)?.complete(results[i]);
+    }
+  }
+
+  /// Runs [parts] one by one, each in its own transaction (a write group whose transaction failed).
+  Future<void> _runCallsAlone(List<FluentTask> parts, List<Zone> callers) async {
+    for (int i = 0; i < parts.length; i++) {
+      final FluentTask part = parts[i];
+      final Stopwatch sw = Stopwatch()..start();
+      final _RunningTask mark = _RunningTask(part.dbName, callers[i][_runningTaskKey] as _RunningTask?);
+      try {
+        final FluentProvider provider = FluentDbInternals.providerForTable(part.table, dbName: part.dbName);
+        final List<FluentTouchedTable> touched = [];
+        final Object? result = await _taskZone(callers[i], mark, null).run(() => collectingTouched(touched, () => provider.internalExecute(part)));
+        if (part.isStreamOp) publishChange(part, provider, result);
+        publishTouched(part, provider, touched);
+        _observe('record', () => FluentTableStatsTracker().record(part, sw.elapsedMilliseconds, rows: _rowsOf(result)));
+        _pendingRequests.remove(part.id)?.complete(result);
+      } catch (e, s) {
+        _failTaskOrBatch(part, e, s);
+      } finally {
+        mark.running = false;
+      }
+    }
+  }
+
   /// One task saving the items of all [parts] (the results are split back per part).
   FluentTask _mergedSave(List<FluentTask> parts) {
     _mergedSaves += parts.length;
@@ -703,31 +1007,35 @@ class FluentEngine {
   /// What `findById` calls must share to be answered by one `IN (...)` query: table, relations and visibility.
   static String _lookupShape(FluentTask t) => '${t.table}|${t.maxDepth}|${t.ignoreLazy}|${t.helper?.where}|${t.helper?.whereArgs}';
 
-  /// The queued `findById` calls of [reads] by [_lookupShape] (one pass).
-  static Map<String, List<FluentTask>> _lookupGroups(List<FluentTask> reads) {
-    final Map<String, List<FluentTask>> groups = {};
-    for (final FluentTask t in reads) {
-      if (t.action == FluentDbAction.findById) (groups[_lookupShape(t)] ??= []).add(t);
-    }
-    return groups;
-  }
-
-  /// The next [slots] reads to start, in [_readOrder]; a lookup stands for its whole group, so a group is picked once.
-  /// Picks without sorting the whole queue (slots are few, the queue may hold thousands of calls).
-  List<FluentTask> _best(List<FluentTask> reads, int slots, Map<String, List<FluentTask>> lookups) {
-    final List<FluentTask> picked = [];
-    final Set<FluentTask> out = Set.identity();
-    while (picked.length < slots) {
-      FluentTask? best;
-      for (final FluentTask t in reads) {
-        if (out.contains(t)) continue;
-        if (best == null || _readOrder(t, best) < 0) best = t;
-      }
-      if (best == null) break;
-      picked.add(best);
-      out.addAll(best.action == FluentDbAction.findById ? lookups[_lookupShape(best)]! : [best]);
-    }
-    return picked;
+  /// Refuses the queued [FluentTask.committedOnly] [task] with [FluentErrorCode.databaseBusy] when it still waits after
+  /// `FluentConfig.committedReadTimeout` while a write (a transaction) runs on its database: the transaction watchdog
+  /// never lets it in, and that transaction may be waiting for it (a sync started outside it and awaited inside). A
+  /// queue held by something else (a pause, reads) is waited for again.
+  void _watchCommittedRead(FluentTask task, Stopwatch waited) {
+    final Duration? bound = _config.committedReadTimeout;
+    if (bound == null) return;
+    Timer(bound, () {
+      final _FluentDbQueue? queue = _queues[task.dbName];
+      if (queue == null || !queue.any((t) => identical(t, task))) return; // started, or the engine was reset
+      if ((_activeWritesPerDb[task.dbName] ?? 0) == 0) return _watchCommittedRead(task, waited);
+      queue.remove(task);
+      _callerZones.remove(task.id);
+      _raisedPriority.remove(task.id);
+      _collapsedCallers.remove(task.id);
+      final String seconds = (waited.elapsedMilliseconds / 1000).toStringAsFixed(1);
+      _failTaskOrBatch(
+        task,
+        FluentEngineException(
+          'A sync read of "${task.table}" waited $seconds s for a transaction on "${task.dbName}" and was not run (it never '
+          'reads uncommitted data). If that transaction awaits the sync, it can never end.',
+          code: FluentErrorCode.databaseBusy,
+          hint: 'Keep transactions short, or call syncWithServer / watchRemote inside the transaction (it then sees its changes) '
+              'or after it. Nothing was lost: with `retries` the sync runs again later. A long import may raise '
+              'FluentConfig.committedReadTimeout.',
+        ),
+      );
+      _checkIdle();
+    });
   }
 
   /// Starts the watchdog of a user transaction (see `FluentConfig.transactionWatchdog`); `null` when it is off.
@@ -736,18 +1044,22 @@ class FluentEngine {
     final Duration? after = _config.transactionWatchdog;
     if (after == null) return null;
     bool warned = false;
-    return Timer.periodic(after, (timer) {
-      final List<FluentTask>? queue = _queues[scope.dbName];
+    final Stopwatch running = Stopwatch()..start();
+    // Checked four times per period: reads are let in once the transaction has been idle for a whole period.
+    final Duration every = after < const Duration(milliseconds: 4) ? const Duration(milliseconds: 1) : after ~/ 4;
+    // Most transactions end long before [after]: one timer until then, the periodic checks only for those still open.
+    return _DelayedPeriodicTimer(after, every, (timer) {
+      if (running.elapsed < after) return;
+      final _FluentDbQueue? queue = _queues[scope.dbName];
       if (queue == null || queue.isEmpty) return;
-      final int barrier = queue.indexWhere((t) => t.isWriteOp);
-      final List<FluentTask> reads = queue.sublist(0, barrier < 0 ? queue.length : barrier);
-      final int writes = queue.where((t) => t.isWriteOp).length;
+      final List<FluentTask> reads = [for (final FluentTask t in queue.headReads) if (!t.committedOnly) t];
+      final int writes = queue.writeCount;
       if (!warned) {
         warned = true;
         FluentLog.issue(
           FluentIssueKind.transactionWatchdog,
-          'A transaction on "${scope.dbName}" has run for ${after.inMilliseconds * timer.tick} ms while ${queue.length} call(s) wait for it'
-          '${reads.isEmpty ? '' : '; ${reads.length} waiting read(s) now run inside the transaction and see its uncommitted changes'}'
+          'A transaction on "${scope.dbName}" has run for ${running.elapsedMilliseconds} ms while ${queue.length} call(s) wait for it'
+          '${reads.isEmpty ? '' : '; once it waits ${after.inMilliseconds} ms without a database call, the waiting read(s) run inside it and see its uncommitted changes'}'
           '${writes == 0 ? '' : '; $writes write(s) keep waiting for its end'}.',
           database: scope.dbName,
           tag: 'FluentEngine:transaction',
@@ -759,11 +1071,17 @@ class FluentEngine {
         );
       }
       if (scope.closed) return; // the body ended: nothing may start on this transaction any more
+      // A transaction that is still working is slow, not stuck: its uncommitted changes stay its own (G7). Only one
+      // that waits for something outside it (a call queued behind it) gets the waiting reads.
+      if (scope.idleFor < after) return;
+      // Reads that must see committed data only are never let in: they wait for the commit (see _refuseCommittedRead).
       for (final FluentTask read in reads) {
         queue.remove(read);
+        _countKeys.remove(read.id); // runs inside the transaction: never answered from or kept in the count cache
         _adoptedReads++;
         final Zone caller = _callerZones.remove(read.id) ?? Zone.current;
         _raisedPriority.remove(read.id);
+        _collapsedCallers.remove(read.id);
         // Counted as a running read, so whenIdle / settle / shutdown wait for it too.
         _activeReadsPerDb[read.dbName] = (_activeReadsPerDb[read.dbName] ?? 0) + 1;
         final int generation = _generation;
@@ -825,10 +1143,13 @@ class FluentEngine {
     }
     final int now = _nowMs;
     Zone? caller;
+    final bool group = _writeGroupTasks.contains(task);
     for (final FluentTask part in task.isBatched ? task.mergedTasks! : [task]) {
       final Zone? zone = _callerZones.remove(part.id);
       caller ??= zone;
+      if (group) _groupCallers[part.id] = zone ?? Zone.current;
       _raisedPriority.remove(part.id);
+      _collapsedCallers.remove(part.id);
       final int waited = now - part.enqueuedAt;
       _startedTasks++;
       _totalWaitMs += waited;
@@ -1024,6 +1345,8 @@ class FluentEngine {
   Future<dynamic> _executeInMain(FluentTask task) async {
     final String tableName = task.table;
 
+    if (_writeGroupTasks.remove(task)) return _executeWriteGroup(task.mergedTasks!);
+
     // A user transaction: its body runs here while the task holds the database's write slot.
     if (task.action == FluentDbAction.transaction) {
       try {
@@ -1059,8 +1382,19 @@ class FluentEngine {
 
     final List<FluentTouchedTable> touched = [];
     final dynamic result;
+    final String? countKey = task.isBatched ? null : _countKeys.remove(task.id);
     try {
-      result = await collectingTouched(touched, () => provider.internalExecute(task));
+      if (countKey != null) {
+        final ({Object? value, bool cached}) counted = await _cachedCount(countKey, task, () => collectingTouched(touched, () => provider.internalExecute(task)));
+        if (counted.cached) {
+          // Served without SQL: not a run of the query (its cost model keeps the real cost).
+          _pendingRequests.remove(task.id)?.complete(counted.value);
+          return counted.value;
+        }
+        result = counted.value;
+      } else {
+        result = await collectingTouched(touched, () => provider.internalExecute(task));
+      }
     } catch (e, s) {
       if (task.isBatched) return _runSeparately(task, provider, e);
       // Logged once with its hint by the provider call (FluentProvider.internalExecute).
@@ -1221,7 +1555,7 @@ class FluentEngine {
 
     if (db != null && db.isOpen) {
       try {
-        await _clearTables(db);
+        await _clearTables(db, task.dbName);
       } on DatabaseException catch (e, s) {
         throw _clearError(task.dbName, e, s);
       }
@@ -1230,10 +1564,10 @@ class FluentEngine {
     return false;
   }
 
-  Future<void> _clearTables(Database db) => db.transaction(_emptyTables);
+  Future<void> _clearTables(Database db, String dbName) => db.transaction((txn) => _emptyTables(txn, dbName));
 
   /// Empties every user table and the sync bookkeeping through [txn] (see [_clearDatabase]).
-  Future<void> _emptyTables(DatabaseExecutor txn) async {
+  Future<void> _emptyTables(DatabaseExecutor txn, String dbName) async {
       {
         // `_` is a wildcard in LIKE: escape it, or user tables like "myfluent_items" would be skipped.
         final List<Map<String, dynamic>> tables = await txn.rawQuery(
@@ -1244,18 +1578,37 @@ class FluentEngine {
         // for the next pass (a failed statement leaves the transaction usable).
         List<String> left = [for (final Map<String, dynamic> t in tables) t['name']! as String];
         Object? lastError;
+        // The first error of each table that failed once: a restricting foreign key is the expected reason to wait for
+        // another pass; any other error (I/O, lock) is reported when a later pass emptied the table anyway.
+        final Map<String, DatabaseException> firstErrors = {};
+        final Set<String> retried = {};
         while (left.isNotEmpty) {
           final List<String> failed = [];
           for (final String table in left) {
             try {
               await txn.delete(table.quotedIdentifier);
+              if (firstErrors.containsKey(table)) retried.add(table);
             } on DatabaseException catch (e) {
               failed.add(table);
               lastError = e;
+              if (!e.toString().contains('constraint failed')) firstErrors.putIfAbsent(table, () => e);
             }
           }
           if (failed.length == left.length) throw lastError!; // no progress: a real error
           left = failed;
+        }
+        for (final String table in retried) {
+          FluentLog.issue(
+            FluentIssueKind.clearRetried,
+            'FluentDb.clear could not delete the rows of "$table" at first and emptied it on a retry: ${FluentLog.redact('${firstErrors[table]}')}',
+            hint: 'The result is complete, but SQLite failed once (a failing or full disk, another connection holding the lock). '
+                'If it repeats, check the storage and other connections to "$dbName".',
+            database: dbName,
+            table: table,
+            subject: 'clear',
+            tag: 'FluentDb:clear',
+            error: firstErrors[table],
+          );
         }
         // An emptied synced table is pulled in full again, and watchRemote fetches again.
         for (final String bookkeeping in const ['__fluent_sync_state', '__fluent_fetch_state', '__fluent_tombstones']) {
@@ -1272,7 +1625,7 @@ class FluentEngine {
   @internal
   Future<void> clearInTransaction(FluentTransactionScope scope, Iterable<FluentProvider> providers) async {
     try {
-      await scope.savepoint(() => _emptyTables(scope.txn));
+      await scope.savepoint(() => _emptyTables(scope.txn, scope.dbName));
     } on DatabaseException catch (e, s) {
       throw _clearError(scope.dbName, e, s);
     }
@@ -1291,9 +1644,15 @@ class FluentEngine {
     final String message = 'Database "$dbName" could not be cleared: ${FluentLog.redact(e.toString())}';
     const String hint = 'A foreign key that restricts the delete, or a trigger on one of the tables, refused it. Remove the '
         'referencing rows first, change the rule to ON DELETE CASCADE, or delete those rows yourself.';
-    return constraint
-        ? FluentConstraintException(message, code: foreignKey ? FluentErrorCode.foreignKeyViolation : FluentErrorCode.checkViolation, hint: hint, cause: e, stackTrace: stackTrace)
-        : FluentQueryException(message, hint: hint, cause: e, stackTrace: stackTrace);
+    const String ioHint = 'SQLite could not finish the delete (a full or failing disk, another connection holding the lock, a read-only file). '
+        'Nothing was cleared: call FluentDb.clear again once the cause is gone.';
+    // Logged here: the caller receives the error, and no provider call logs it on this path.
+    return FluentLog.raise(
+      constraint
+          ? FluentConstraintException(message, code: foreignKey ? FluentErrorCode.foreignKeyViolation : FluentErrorCode.checkViolation, hint: hint, cause: e, stackTrace: stackTrace)
+          : FluentQueryException(message, hint: RegExp(r'disk I/O|disk is full|database is locked|readonly database|SQLITE_(IOERR|FULL|BUSY|READONLY)').hasMatch(text) ? ioHint : hint, cause: e, stackTrace: stackTrace),
+      tag: 'FluentDb:clear',
+    );
   }
 
   /// The scheduling weight of [task] (lower runs earlier among the reads that may run): the static cost of its action
@@ -1354,11 +1713,13 @@ class FluentEngine {
   /// Fails the queued (not started) calls of [dbs] (every database when `null`) with [message]; returns how many.
   int _cancelQueued(Set<String>? dbs, String message) {
     int cancelled = 0;
-    for (final MapEntry<String, List<FluentTask>> entry in _queues.entries) {
+    for (final MapEntry<String, _FluentDbQueue> entry in _queues.entries) {
       if (dbs != null && !dbs.contains(entry.key)) continue;
       for (final FluentTask task in entry.value) {
+        _countKeys.remove(task.id);
         _callerZones.remove(task.id);
         _raisedPriority.remove(task.id);
+        _collapsedCallers.remove(task.id);
         final Completer<dynamic>? completer = _pendingRequests.remove(task.id);
         if (completer != null && !completer.isCompleted) {
           completer.completeError(_cancelled(message));
@@ -1420,8 +1781,11 @@ class FluentEngine {
     _cancelQueued(null, 'The database engine was closed before this call ran.');
     _queues.clear();
     _writeEpochs.clear();
+    _countCache.clear();
+    _countKeys.clear();
     _callerZones.clear();
     _raisedPriority.clear();
+    _collapsedCallers.clear();
     _collapseHeads.clear();
 
     FluentLog.debug('Cleanup sequence completed', tag: 'FluentEngine:lifecycle');
@@ -1461,4 +1825,40 @@ class _RunningTask {
     }
     return false;
   }
+}
+
+/// A periodic timer whose first tick comes after [delay] (then every [period]): one one-shot timer for the short-lived
+/// case, the periodic one only when it is still needed.
+class _DelayedPeriodicTimer implements Timer {
+  _DelayedPeriodicTimer(Duration delay, Duration period, void Function(Timer timer) tick) {
+    _first = Timer(delay, () {
+      if (_cancelled) return;
+      _ticks++;
+      tick(this);
+      if (!_cancelled) {
+        _periodic = Timer.periodic(period, (_) {
+          _ticks++;
+          tick(this);
+        });
+      }
+    });
+  }
+
+  late final Timer _first;
+  Timer? _periodic;
+  bool _cancelled = false;
+  int _ticks = 0;
+
+  @override
+  void cancel() {
+    _cancelled = true;
+    _first.cancel();
+    _periodic?.cancel();
+  }
+
+  @override
+  bool get isActive => !_cancelled && (_first.isActive || (_periodic?.isActive ?? false));
+
+  @override
+  int get tick => _ticks;
 }

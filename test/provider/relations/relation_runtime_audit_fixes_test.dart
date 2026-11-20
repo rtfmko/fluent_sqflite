@@ -410,9 +410,9 @@ void main() {
       expect(await labels.count(), 2000, reason: 'the labels stay');
     });
 
-    test('FluentFilter.ids with more keys than one statement takes is a FluentArgumentException with a hint', () async {
+    test('FluentFilter.ids with more keys than one statement binds is accepted (no chunking by the caller)', () async {
       final List<int> many = [for (int i = 1; i <= 5000; i++) i];
-      await expectLater(rows.count(where: FluentFilter.ids(many)), throwsA(isA<FluentArgumentException>().having((e) => e.hint, 'hint', contains('findByIds'))));
+      expect(await rows.count(where: FluentFilter.ids(many)), 0);
       expect(await rows.count(where: FluentFilter.ids([1, 2, 3])), 0);
     });
   });

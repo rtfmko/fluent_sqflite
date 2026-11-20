@@ -140,12 +140,9 @@ void main() {
       );
     });
 
-    test('too many ids in one filter is refused with the chunk size', () async {
+    test('a filter with more ids than one statement binds works (the keys go through a temporary table)', () async {
       final List<int> ids = List<int>.generate(5000, (int i) => i);
-      await expectLater(
-        a.find(where: FluentFilter.ids(ids)),
-        throwsA(isA<FluentArgumentException>().having((FluentArgumentException e) => e.hint, 'hint', contains('findByIds'))),
-      );
+      expect(await a.find(where: FluentFilter.ids(ids)), isA<List<Object?>>());
     });
   });
 }

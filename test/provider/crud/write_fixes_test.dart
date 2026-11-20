@@ -503,12 +503,16 @@ void main() {
       expect((await articles.db.rawQuery('SELECT COUNT(*) AS n FROM "$link"')).single['n'], 1000);
     });
 
-    test('replacing keeps listed children, removes the others, and an empty list removes all', () async {
+    test('replacing keeps listed children, removes the others; an empty list removes all only with relationSync: replace', () async {
       final Comment a = Comment(text: 'a'), b = Comment(text: 'b');
       await articles.save(Article(id: 1, title: 't', comments: [a, b]));
       await articles.save(Article(id: 1, title: 't', comments: [b, Comment(text: 'c')]));
       expect((await comments.findAll(orderBy: 'text')).map((c) => c.text), ['b', 'c']);
+      // G3: an empty list on a model the app built is not "remove all" (reported with the fix).
       await articles.save(Article(id: 1, title: 't', comments: []));
+      expect(await comments.count(), 2);
+      expect(db.issues.where((i) => i.kind == FluentIssueKind.relationListKept), isNotEmpty);
+      await articles.save(Article(id: 1, title: 't', comments: []), relationSync: FluentRelationSyncMode.replace);
       expect(await comments.count(), 0);
     });
 
@@ -673,7 +677,7 @@ void main() {
       expect((await tickets.trash.find()).single.title, 'old');
     });
 
-    test('a pull updates the trashed row in place and keeps it in the trash', () async {
+    test('a pull of a row whose trash was pushed brings it back, matched by conflictOn (no second row) (G10 / G24, sync round)', () async {
       await tickets.syncWithServer(strategy: FluentSyncStrategy.pull, onPull: (_) async => FluentPullResult(items: [STicket(serverId: 's1', title: 'one')]));
       await tickets.deleteWhere(FluentFilter.eq('server_id', 's1'));
       final List<String> deleted = [];
@@ -688,8 +692,8 @@ void main() {
 
       await tickets.syncWithServer(strategy: FluentSyncStrategy.pull, onPull: (_) async => FluentPullResult(items: [STicket(serverId: 's1', title: 'one (edited)')]));
       expect(await tickets.withTrash.count(), 1, reason: 'no second row with the same server key');
-      expect(await tickets.count(), 0, reason: 'still in the trash');
-      expect((await tickets.trash.find()).single.title, 'one (edited)');
+      expect(await tickets.count(), 1, reason: 'the server row is newer than the pushed deletion: back from the trash');
+      expect((await tickets.findAll()).single.title, 'one (edited)');
       expect(await tickets.pendingChanges(), 0);
     });
 
@@ -700,17 +704,17 @@ void main() {
       final STicket fromServer = STicket(serverId: 's1', title: 'server')..deletedAt = stamp;
       await tickets.applyPull(const FluentPullResult<STicket>(), remote: [fromServer], serverWins: true);
       expect(fromServer.deletedAt, stamp);
-      expect(await tickets.count(), 0, reason: 'still in the trash');
+      expect(await tickets.count(), 1, reason: 'the server wins: the row is back from the trash');
     });
 
-    test('a server write keeps a local delete that was not pushed pending', () async {
+    test('a server write with serverWins replaces a local delete that was not pushed (G24 keepServer, sync round)', () async {
       await tickets.syncWithServer(strategy: FluentSyncStrategy.pull, onPull: (_) async => FluentPullResult(items: [STicket(serverId: 's1', title: 'one')]));
       await tickets.deleteWhere(FluentFilter.eq('server_id', 's1'));
       expect(await tickets.pendingChanges(), 1);
       await tickets.applyPull(const FluentPullResult<STicket>(), remote: [STicket(serverId: 's1', title: 'server')], serverWins: true);
-      expect(await tickets.withTrash.count(), 1);
-      expect((await tickets.trash.find()).single.title, 'server');
-      expect(await tickets.pendingChanges(), 1, reason: 'the local delete still has to be pushed');
+      expect(await tickets.withTrash.count(), 1, reason: 'no second row');
+      expect((await tickets.findAll()).single.title, 'server');
+      expect(await tickets.pendingChanges(), 0, reason: 'the server won over the local delete: nothing to push');
     });
   });
 }

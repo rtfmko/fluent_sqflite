@@ -296,6 +296,7 @@ class FluentTableStatsTracker {
             table: c.table,
             title: 'Add an index on ${c.table}(${columns.join(', ')})',
             details: '${c.action} with ${c.shape} takes ~${c.averageMs.round()} ms on average (${c.samples} runs); no index starts with ${columns.join(', ')}.',
+            fix: 'Add a FluentIndex on these columns to the indexes of the model (equality columns first, then range or order); it is created on the next start.',
             code: FluentAnalyzer.indexExample(model, columns),
           ),
         );
@@ -307,6 +308,7 @@ class FluentTableStatsTracker {
             table: c.table,
             title: 'Load fewer relation levels of "${c.table}"',
             details: '${c.action} loads relations several levels deep (${c.shape}) and takes ~${c.averageMs.round()} ms on average.',
+            fix: 'Load fewer levels (maxDepth: 1 or FluentLoad.none) and mark big relations lazy, loading them only when needed.',
             code: 'await FluentDb.find<$model>(maxDepth: 1); // or relations: FluentLoad.none, or mark big relations lazy: FluentRelation.many(..., lazy: true)',
           ),
         );
@@ -318,6 +320,7 @@ class FluentTableStatsTracker {
             table: c.table,
             title: 'Read "${c.table}" in pages',
             details: 'Reading all matching rows at once takes ~${c.averageMs.round()} ms (${c.samples} runs).',
+            fix: 'Read a page at a time with findPage (orderBy + limit) or pass a limit.',
             code: "FluentPage<$model> page = await FluentDb.findPage<$model>(orderBy: 'id', limit: 50, after: previous?.next);",
           ),
         );
@@ -333,6 +336,7 @@ class FluentTableStatsTracker {
             table: c.table,
             title: 'Save "${c.table}" rows with saveAll instead of one by one',
             details: '${c.samples} single saves were measured (~${c.averageMs.toStringAsFixed(1)} ms per row); saveAll writes many rows in one transaction.',
+            fix: 'Collect the rows and save them with one saveAll call, or wrap the loop in FluentDb.transaction.',
             code: 'await FluentDb.saveAll<$model>(items);\n// or: await FluentDb.transaction(() async { for (final i in items) await FluentDb.save<$model>(i); });',
           ),
         );

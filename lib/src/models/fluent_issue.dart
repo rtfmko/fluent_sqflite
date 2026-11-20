@@ -224,6 +224,11 @@ enum FluentIssueKind {
   /// A relation field held a value of the wrong type; the relation was skipped for that model.
   relationValue(FluentIssueType.warning),
 
+  /// A model the app built (not read from the database, e.g. rebuilt with `copyWith` from a read without the relation)
+  /// was saved with an empty relation list while rows / links are stored for it; they were kept. Clear on purpose with
+  /// `relationSync: FluentRelationSyncMode.replace`, or with detach / delete.
+  relationListKept(FluentIssueType.warning),
+
   /// `conflictOn` columns are not unique: one save may update several rows.
   conflictOn(FluentIssueType.warning),
 
@@ -249,7 +254,8 @@ enum FluentIssueKind {
   storedFormatAdopted(FluentIssueType.autoFix),
 
   /// A saved value lost part of itself in its stored form (the microseconds of a `DateTime` in the timestamp format,
-  /// which keeps milliseconds); the rest was saved.
+  /// which keeps milliseconds; the instant of a local `DateTime` stored as ISO text in the hour repeated when the clocks
+  /// go back, which reads back one hour earlier); the rest was saved.
   precisionLost(FluentIssueType.warning),
 
   /// A column of a full-text index was skipped, or the table cannot have one.
@@ -281,6 +287,10 @@ enum FluentIssueKind {
 
   /// A connection could not be closed (harmless).
   closeFailed(FluentIssueType.warning, repeats: true),
+
+  /// `FluentDb.clear` could not delete a table at first (an error other than a restricting foreign key) and emptied it
+  /// in a later pass; the result is complete, but the error was real.
+  clearRetried(FluentIssueType.warning, repeats: true),
 
   // ---- errors -------------------------------------------------------------------------------------------------------
 

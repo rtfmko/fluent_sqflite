@@ -1,0 +1,10 @@
+FluentCursor(id ASC after 5 / {id: 5}) => eyJvIjoiaWQiLCJkIjpmYWxzZSwidiI6NSwiayI6eyJpZCI6NX19
+FluentCursor(name DESC after Zoë 🙂 / {id: 12}) => eyJvIjoibmFtZSIsImQiOnRydWUsInYiOiJab8OrIPCfmYIiLCJrIjp7ImlkIjoxMn19
+FluentCursor(score ASC after 1.5 / {id: 1}) => eyJvIjoic2NvcmUiLCJkIjpmYWxzZSwidiI6MS41LCJrIjp7ImlkIjoxfX0=
+FluentCursor(score ASC after Infinity / {id: 2}) => eyJvIjoic2NvcmUiLCJkIjpmYWxzZSwidiI6eyIkZCI6ImluZiJ9LCJrIjp7ImlkIjoyfX0=
+FluentCursor(score DESC after -Infinity / {id: 3}) => eyJvIjoic2NvcmUiLCJkIjp0cnVlLCJ2Ijp7IiRkIjoiLWluZiJ9LCJrIjp7ImlkIjozfX0=
+FluentCursor(score DESC after NaN / {id: 4}) => eyJvIjoic2NvcmUiLCJkIjp0cnVlLCJ2Ijp7IiRkIjoibmFuIn0sImsiOnsiaWQiOjR9fQ==
+FluentCursor(at ASC after 1714979289010 / {id: 7}) => eyJvIjoiYXQiLCJkIjpmYWxzZSwidiI6MTcxNDk3OTI4OTAxMCwiayI6eyJpZCI6N319
+FluentCursor(blob ASC after [0, 1, 255] / {id: 1}) => eyJvIjoiYmxvYiIsImQiOmZhbHNlLCJ2Ijp7IiRiIjoiQUFILyJ9LCJrIjp7ImlkIjoxfX0=
+FluentCursor(flag ASC after null / {a: x, b: 2}) => eyJvIjoiZmxhZyIsImQiOmZhbHNlLCJ2IjpudWxsLCJrIjp7ImEiOiJ4IiwiYiI6Mn19
+FluentCursor(big ASC after 9007199254740993 / {id: 9223372036854775807}) => eyJvIjoiYmlnIiwiZCI6ZmFsc2UsInYiOjkwMDcxOTkyNTQ3NDA5OTMsImsiOnsiaWQiOjkyMjMzNzIwMzY4NTQ3NzU4MDd9fQ==

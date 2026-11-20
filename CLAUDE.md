@@ -31,7 +31,13 @@ fvm dart analyze
   the queue is in call order; per database a write is a barrier (starts after all earlier tasks, runs alone, nothing
   later overtakes it); only reads between two writes are reordered (priority, aged weight). Merging (adjacent saves,
   `findById` → `IN`) must never change the order of operations; merged batches fall back to call-by-call on error.
-  Queues are per database; read collapsing is keyed by fingerprint + write epoch. No timeouts: never abandon a
+  Adjacent writes that do not merge run as a write group (`_writeGroup`, `_executeWriteGroup`): one transaction, each
+  call in its own SAVEPOINT via the provider's write path, callers completed after the commit, run alone when the
+  transaction fails; only `_groupableWrites` join. The queue is `_FluentDbQueue` (`fluent_engine_queue.dart`):
+  segments, reads indexed by (priority, weight) class — the scheduler never scans every waiting read.
+  Queues are per database; read collapsing is keyed by fingerprint + write epoch. Expensive counts are cached by the
+  same key (`_countCache`, emptied by every queued write, checked against `PRAGMA data_version` when the task runs:
+  never decide anything for a call before it is queued — call order). No timeouts: never abandon a
   started operation. Code inside a task runs in a zone marked `_runningTaskKey` (`pauseQueue` / `shutdown` refuse to
   run from it; `FluentDb.close` / `restart` / `deleteDatabases` are ignored there with `ignoredCall`). Observer, stats
   and tuner hooks are wrapped (`_observe`): they can never stop a task from starting or completing.
@@ -147,7 +153,10 @@ fvm dart analyze
 - `orderBy` from callers is checked when the task runs (`_checkedOrderBy` in `_queryTask`): columns only, never raw SQL. Prefer one `ALTER TABLE` over a
   rebuild (`_removeInPlace`); a rebuild recreates views, triggers (also of other tables) and the app's own indexes.
 - Filter values stay Dart values (`FluentFilterArgs` keeps the column of each argument); they are converted per column
-  only when SQL is built: every `whereArgs` sent to sqflite goes through `_sqlArgs` (`_args`). Deferred conditions put
+  only when SQL is built: every `whereArgs` sent to sqflite goes through `_sqlArgs` (`_args`). Long user lists
+  (`FluentFilter.ids` / `inList` / `notInList` over `FluentFilterInternals.maxListArguments`) are deferred conditions
+  that become a temporary table of the task (`parts/fluent_value_lists.dart`): code that resolves a filter itself
+  calls `_flushValueLists` before its statement (SQL built before the task: `_resolveDetached`). Deferred conditions put
   every value into `fingerprint` (read collapsing). Lists of keys sent to SQL are chunked below `_maxParamsPerChunk`.
 - Changes to the app's models that only hold after a commit (e.g. `deletedAt` after a save) go through
   `FluentTransactionScope.whenCommitted`; a rolled-back savepoint drops its pending events and those changes.
@@ -167,7 +176,9 @@ fvm dart analyze
   wraps in `Future.sync`; `FluentDb.trash` / `withTrash` resolve the provider per call).
 - Nested `FluentDb.transaction` calls run in a SAVEPOINT (`FluentTransactionScope.savepoint`); reads a transaction
   adopts run in their caller's zone and are awaited before the commit.
-- Nested writes: `FluentTransactionScope.inTransaction` joins with a SAVEPOINT; a scope is `closed` after its body, and
+- Nested writes: `FluentTransactionScope.inTransaction` joins with a SAVEPOINT (sent lazily: `scope.txn` is a
+  `_FluentLazyTxn` that prepends pending SAVEPOINT / RELEASE statements to the next statement or batch; a rollback is
+  always its own `execute`, never batched); a scope is `closed` after its body, and
   every task starts in a zone cleaned of the caller's task / read / transaction scope. `init` / `close` / `restart` /
   `deleteDatabases` are serialized. The `autoRelations` hint is published by `keepOneToOneSides` (after the stored
   one-to-one sides are read), not by the graph build.
@@ -214,7 +225,7 @@ delete … sqlite3.dll".
 
 Layout: tests live by component, like `lib/src`: `test/engine`, `test/db`, `test/log`, `test/analyzer`, `test/tuner`,
 `test/stats`, `test/models`, `test/interfaces`, `test/utils`, `test/provider/{crud,mapping,relations,schema,sync}`;
-`test/regressions` holds cross-cutting bug reproductions, `test/docs` the documentation checks, `test/helpers` shared
+`test/regressions` holds cross-cutting bug reproductions, `test/stress` the scaled stress runs (`FLUENT_STRESS`), `test/docs` the documentation checks, `test/helpers` shared
 models. Name a file after what it tests (`<area>_test.dart`); a file from an audit round keeps a suffix
 (`_audit_fixes`, `_audit_probes`, `_round3`). Performance tests assert statement counts or complexity (N+1 guards),
 never wall-clock times.

@@ -63,6 +63,26 @@ void main() {
     expect(many, few, reason: 'statements:\n${counter.statements.join('\n')}');
   });
 
+  test('saving 5 or 40 article graphs again reads the stored children and links with the same number of queries', () async {
+    await seed(40);
+    final List<Article> loaded = await articles.findAll(orderBy: 'id');
+    Future<int> saveReads(List<Article> some) async {
+      counter.reset();
+      await articles.saveAll([
+        for (final Article a in some) Article(id: a.id, title: '${a.title}!', author: a.author, editor: a.editor, comments: [...a.comments!.take(1), Comment(text: 'more')], tags: a.tags),
+      ]);
+      return counter.reads;
+    }
+
+    // The first save moves dropped comments into the trash: from then on saves also look there (one more read).
+    await saveReads(loaded.take(5).toList());
+    final int few = await saveReads(loaded.skip(5).take(5).toList());
+    final int many = await saveReads(loaded.skip(10).toList());
+    expect(many, few, reason: 'the stored children / links are read per chunk of owners, not per owner:\n${counter.statements.join('\n')}');
+    final List<Article> after = await articles.findAll(orderBy: 'id');
+    expect(after.map((a) => a.comments!.map((c) => c.text).toList()), [for (final Article a in loaded) [a.comments!.first.text, 'more']], reason: 'the dropped comments are gone, the new ones saved');
+  });
+
   test('update(withRelations: true) returns the number of updated owner rows', () async {
     await seed(2);
     final List<Article> all = await articles.findAll();

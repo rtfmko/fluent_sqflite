@@ -119,13 +119,23 @@ void main() {
       expect(FluentFilter.inList('a', []).whereArgs, isEmpty);
     });
 
-    test('a big list keeps every argument in order (chunking is the caller\'s job)', () {
+    test('a list up to 900 values binds its arguments in order', () {
+      final values = List<Object>.generate(900, (i) => i);
+      final f = FluentFilter.inList('a', values);
+      expect('?'.allMatches(f.whereClause), hasLength(900));
+      expect(f.whereArgs.length, 900);
+      expect(f.whereArgs.first, 0);
+      expect(f.whereArgs.last, 899);
+    });
+
+    test('a longer list is left to the provider (a temporary table, never more than 900 arguments)', () {
       final values = List<Object>.generate(1500, (i) => i);
       final f = FluentFilter.inList('a', values);
-      expect('?'.allMatches(f.whereClause), hasLength(1500));
-      expect(f.whereArgs.length, 1500);
-      expect(f.whereArgs.first, 0);
-      expect(f.whereArgs.last, 1499);
+      expect(f.whereArgs, isEmpty);
+      final FluentListCondition list = f.deferred.single as FluentListCondition;
+      expect(FluentFilterArgs.rawOf(list.values), values);
+      expect(list.negated, isFalse);
+      expect((FluentFilter.notInList('a', values).deferred.single as FluentListCondition).negated, isTrue);
     });
   });
 

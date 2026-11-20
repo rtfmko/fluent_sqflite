@@ -4,6 +4,153 @@ Bugs found and fixed, and work finished, during the 2.0 rework, kept as history.
 planned work in `TODO.md`. When a known bug is fixed (with a test),
 move it here.
 
+## Stress round (2026-11-19, in 2.0.0-dev.3)
+
+New stress tests (`test/stress`, `FLUENT_STRESS` scale) found two limits; both fixed with regression tests first.
+- `FluentFilter.ids` with more than 900 keys threw `FluentArgumentException` in every call (`deleteWhere`,
+  `updateWhere`, `count`, `find`, `watch`, trash calls, `related`), and long `inList` / `notInList` bound one argument
+  per value (old SQLite refuses more than 999). Long lists now go into a temporary table of the task's connection
+  (`parts/fluent_value_lists.dart`): any number, any key type, composite keys, read pool, transactions. Test:
+  `test/provider/crud/big_inputs_test.dart` (no statement binds more than 999 arguments).
+- A burst of reads that cannot be merged took quadratic time: every finished read scanned, grouped, copied and filtered
+  the whole waiting segment. The queue is indexed by (priority, weight) class (`fluent_engine_queue.dart`), same
+  order. Test: `test/engine/engine_queue_complexity_test.dart` (comparisons stay linear).
+- N+1 in graph saves: the stored children / links of every owner were read with one query per owner, and the links
+  inserted with one batch per owner. Now per chunk of owners and one batch. Test: `query_count_test.dart` (saving 5 or
+  40 graphs reads the same number of times).
+- Optimization: savepoints of calls inside a transaction travel with the next statement (`_FluentLazyTxn`). Found on
+  the way: the rollback must never be part of a batch (a failing batch then left a failed call's writes in the
+  transaction; chaos seed 80017), and a failed batch must not lose the `SAVEPOINT` of a nested transaction that is
+  still open (its later writes stayed after its rollback; chaos seed 140939). Test: `test/engine/lazy_savepoints_test.dart`,
+  `chaos_test.dart`.
+- Keyset paging scanned the index from the start on every page (the `OR` of the cursor condition kept SQLite from
+  seeking): quadratic on big tables (stress x200). The cursor now adds `c >= v` (and `k1 >= v1` for composite keys).
+  Test: `test/provider/crud/page_seek_test.dart` (the query plan seeks).
+- Optimization: a cache of expensive counts until the next write (guarded by `PRAGMA data_version` against other
+  connections; checked when the task runs, so call order is kept). Test: `test/engine/count_cache_test.dart`.
+- Debug builds: `FluentAnalyzer` pruned its burst counters on every call once they held 2000 keys. Now at most once
+  per second.
+- Optimization: saves skip the trash lookup while the table's trash is empty; batch writes build their statements
+  once per row shape; row mapping copies a row once. Test: `test/provider/crud/row_flags_test.dart`.
+- Optimization: reads of tables without rows that expire skip the expiry condition (a `count()` was a full scan).
+  Test: `test/provider/crud/row_flags_test.dart`.
+- Optimization: adjacent writes that cannot be merged run in one transaction (each call in a SAVEPOINT, completed after
+  the commit, run again one by one when the transaction fails). Test: `test/engine/engine_write_groups_test.dart`.
+
+## Guarantees round (2026-11-18, in 2.0.0-dev.3)
+
+The 31 guarantees of `doc/guarantees.md` were tested with random sequences, injected failures, crash copies, chaos runs
+and upgrade fixtures (plan and record: `TEST_PLAN.md`). The bugs found, by area, with the tests that cover them
+(`test/engine/engine_guarantees_test.dart`, `engine_fuzz_test.dart`, `test/regressions/chaos_test.dart`,
+`test/provider/{crud,relations,sync,schema,mapping}/*_guarantees_test.dart`, `test/db/*_guarantees_test.dart`,
+`test/log/hints_guarantees_test.dart`).
+
+### Engine and transactions
+- Unawaited calls inside one transaction ran out of call order; each transaction now has a call chain. Test:
+  `engine_guarantees_test.dart` (G7: unawaited writes inside a transaction apply in call order), `engine_fuzz_test.dart`.
+- Two databases that call into each other (A to B while B to A) hung; the call that closes the wait cycle now fails with
+  `FluentErrorCode.deadlock` (`FluentEngineException`) and the other side completes. Test: `engine_guarantees_test.dart`
+  (G12: wait cycles between databases), `chaos_test.dart` (A to B and B to A at once).
+- A cross-database read queued behind a pending write on the other database (which the watchdog cannot adopt) was no
+  wait edge, so A-transaction → read on B while a B-transaction called A hung; such a read is now an edge while that
+  write is queued, and the cycle-closing call fails with `deadlock`. Test: `engine_guarantees_test.dart` (G12 read gap,
+  read first, watchdog off, no false positive, three databases), `chaos_test.dart` (cross reads, both directions).
+- `pauseQueue()` waited for a running transaction on B that waited for its own call on the paused database A: pause,
+  resume and the queued calls hung until `pauseWatchdog`. The drain no longer waits for transactions held by the
+  pause. Test: `engine_guarantees_test.dart` (G12 pause), found by `chaos_test.dart` seeds 80052 / 80199.
+- The same hang when B's call on A was a read answered by an identical read already queued on A (collapsed onto it):
+  the queued read's caller was outside any transaction, so the pause did not see that B waits for it. The engine now
+  remembers the callers collapsed onto a queued read. Test: `engine_guarantees_test.dart` (G12: read collapsed onto a
+  read the pause holds), found by `chaos_test.dart` seeds 98265 / 98534 (20 000-seed run).
+- A test clock move (`FluentClock.testNow`, `db.clock.advance`) ran the due trash purge / optimize in the zone of the
+  caller: moved inside a nested transaction, the purge joined that transaction with a savepoint of its own and the
+  savepoints were released out of order (`no such savepoint`). Timers now check in the zone they were created in,
+  like their real timer. Test: `fluent_clock_test.dart` (a clock move runs due timers in their own zone), found by
+  `crud_fuzz_test.dart` seed 57345.
+- `trashPurgeInterval` / `optimizeInterval` below 1 s ran the job back to back: the library was never idle (a busy
+  loop). They are raised to `FluentConfig.minMaintenanceInterval` (1 s) with a `configFallback` warning. Test:
+  `misuse_guarantees_test.dart` (G27: purge and optimize every millisecond), found by G27 seeds 100402 / 102755.
+- A local `DateTime` in the hour repeated when the clocks go back, stored as ISO text, read back one hour earlier
+  without a word; it is reported as `precisionLost` now (KNOWN_BUGS limit). Test: `values_guarantees_test.dart`
+  (G6 random values, wall-clock reference), found by G6 seed 81598.
+- Under load a transaction ran longer than `transactionWatchdog` while still working, and the watchdog let reads
+  called after it run inside it: they saw half of its writes, or a write that was then rolled back. Reads are let in
+  only once the transaction has made no database call for a whole watchdog period (it waits for something outside
+  it). Test: `engine_guarantees_test.dart` (G7: a slow transaction that keeps working), found by `engine_fuzz_test.dart`
+  seed 55228 and `chaos_test.dart` seeds 95039 / 100030 (8 parallel slices).
+- Test references fixed (no library change): G22 `startsWith` is case-insensitive for ASCII like `LIKE` (seed 80100);
+  the sync fuzz reference marks a key the server deleted as known to the server (seed 36436).
+- `cleanOrphans`, `schemaReport` and `purgeArchivedColumns` skipped a `dbKey` that is not open silently; they fail
+  with `databaseNotOpen` like every other call. Test: `fluent_db_statics_test.dart`, `schema_round3_test.dart`.
+- SQL errors of `BEGIN` / `COMMIT` / `RELEASE` / `cleanOrphans` / `purgeArchivedColumns` are typed
+  (`FluentQueryException`), and a failed nested `RELEASE` rolls the savepoint back. Test: `failures_guarantees_test.dart`
+  (fault matrix), `crud_guarantees_test.dart` (every `FaultKind` at a write and at the commit).
+- `save(new)` then `delete(new)` without awaiting left the row; merged saves inserted rows out of call order
+  (`saveAll([id 6, new])` gave the new row a lower key than a serial run). Test: `engine_guarantees_test.dart` (G7: a new
+  model saved and then deleted; merged saves give new models the same keys as a serial run).
+- `updateAll` now returns the number of distinct rows updated. Test: `crud_guarantees_test.dart` (G29: updateAll with the same key twice).
+- An exception thrown by app code inside a write (e.g. `buildJson`) is a `FluentArgumentException`
+  with the original as `cause`. Test: `misuse_guarantees_test.dart` (G28: buildJson throws).
+
+### Relations
+- A child added to a list was removed by another loaded view over the same column (`FluentLoad.all`). Test:
+  `relations_guarantees_test.dart` (G3: a child added to one list is not removed by another loaded list),
+  `relations_fuzz_test.dart`.
+- G3 limit: a model rebuilt from a read (`copyWith`) lost `unloadedRelations`, so its empty / default lists removed
+  every stored child. Reads now keep load info by list instance; an empty list on a model the app built removes
+  nothing (`relationListKept`) unless `relationSync: replace`. Tests: `relations_guarantees_test.dart` (G3: a model
+  rebuilt with copyWith ..., an empty list on a model the app built ...), `relations_fuzz_test.dart` (rebuildOwner,
+  builtOwner).
+
+### Sync
+- Three lost deletions: delete, save, delete before a push; a push whose answer was lost (a "sent" marker,
+  `synced_version` -1, is committed before `onPush`); a local change kept over a server row, then deleted. Test:
+  `sync_guarantees_test.dart` (G10 group), `sync_fuzz_test.dart`.
+- `keepServer` did not restore a trashed unpushed row; a server row sent again after a pushed delete did not come back
+  from the trash; `merge` touched trashed rows; a page answered after a cancel was stored. Test:
+  `sync_guarantees_test.dart` (G24 group and the mode / policy matrix), `sync_fuzz_test.dart`.
+- Sync result errors are `FluentSyncException` (original as `cause`); the `failed` event of `watchRemote` carries one
+  too. Test: `sync_guarantees_test.dart` (G13: a failed sync reports a typed error), `test/docs/doc_examples_test.dart`.
+- Lost update (chaos seed 81828 of the night run): the transaction watchdog let a waiting `pendingSyncBatch` read into
+  a long transaction on the same database; the push sent that transaction's change, the transaction rolled back, the
+  row's version no longer matched (nothing marked) and its committed state counted as synced: the server kept the
+  rolled-back value, the device's row was never sent again (same for a rolled-back deletion; a merge could be built
+  from a rolled-back local row). Root fix: internal `FluentTask.committedOnly` reads (`pendingSyncBatch`,
+  `unpushedCounterparts`, `lastPull`, watchRemote's fetch time) are never adopted by the watchdog; they wait for the
+  commit and are always an edge of the cross-database wait graph (cycles stay `deadlock`); after the new
+  `FluentConfig.committedReadTimeout` (30 s) while a write runs they are refused with the new transient
+  `databaseBusy` (a transaction awaiting a sync started outside it never hangs; `retries` sync later). Test:
+  `sync_guarantees_test.dart` (group "G10 sync never sends or merges a rolled-back change": waiting and refused modes,
+  the G12 same-database test, success with retries), `chaos_test.dart`.
+
+### Schema
+- `oldName` onto a name a live column holds: the old holder is archived ("replaced by ...") and the rename
+  runs. A swap (`a` from `b`, `b` from `a`) exchanges the values once. Test: `schema_guarantees_test.dart` (G4: two columns
+  that swap names; oldName onto a name an existing column holds), `schema_fuzz_test.dart`.
+- A `foreign_key_check` failure after the schema `COMMIT` no longer fails the start. Test:
+  `schema_guarantees_test.dart` (G4 / G19 quarantined parent), `failures_guarantees_test.dart` (a failure at every
+  statement of a migration).
+- Children of rows moved to a quarantine table: they stay in place and are reported as `danglingReferences` (naming the
+  quarantine table, with a fix). Test: `schema_guarantees_test.dart` (G4 / G19: the children of a quarantined parent).
+
+### Values and input
+- Non-numeric text, or an integer beyond int64, into an `INTEGER` / `REAL` column is refused
+  (`unsupportedValue`; numeric text still converts); value-kind and converter columns are judged by their own type. A
+  `String` with a lone UTF-16 surrogate is refused (it would have been changed to U+FFFD). Test: `input_guarantees_test.dart` (G22).
+- `missingColumns` overriding a `buildJson` field (a converter) warned. Test: `values_guarantees_test.dart` (G25 / G26).
+- `fromCacheJson` received `expiry_date` / `sync_version` / `synced_version`; `findMaps()` without columns returned them.
+  Test: `input_guarantees_test.dart` (G29: findMaps without columns), `relations_guarantees_test.dart` (G29).
+- `FluentCursor` encode / decode tags bytes and non-finite doubles. Test: `values_guarantees_test.dart` (G17: the
+  cursor text matches the golden), `input_guarantees_test.dart` (G22: cursors).
+
+### Settings, models, logging
+- Negative or huge `trashRetention` / `archiveRetention`, negative `historyLimit` / `busyTimeout` and an out-of-range
+  `readConnections` fall back with `configFallback`. Test: `misuse_guarantees_test.dart` (G27).
+- Duplicate column names did not warn (`schemaFallback`); an empty table name is refused. Test: `misuse_guarantees_test.dart`
+  (G28 catalogue).
+- Issues without a fix; title / details / fix delivered through `onIssue` / `report()` not redacted; `FluentDb.clear`
+  failures without an I/O hint. Test: `hints_guarantees_test.dart` (G26), `failures_guarantees_test.dart` (G15, G1 clear).
+
 ## Audit 2 (2026-11-17, fixed in 2.0.0-dev.2)
 
 Eight areas audited in parallel, every finding checked against the code; all fixed with a regression test and edge

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io' show Platform;
 import 'dart:math' as math;
@@ -15,6 +16,7 @@ import '../internal.dart';
 
 part '../core/fluent_analyzer/fluent_analyzer.dart';
 part '../core/fluent_engine/fluent_engine.dart';
+part '../core/fluent_engine/fluent_engine_queue.dart';
 part '../core/fluent_engine/fluent_transaction_scope.dart';
 part '../core/fluent_log/fluent_log.dart';
 part '../core/fluent_table_stats_tracker/fluent_table_stats_tracker.dart';

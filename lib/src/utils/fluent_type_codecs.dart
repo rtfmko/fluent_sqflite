@@ -37,7 +37,7 @@ abstract final class FluentTypeCodecs {
       (v) => v is DateTime,
       (v, c) => c.dateTimeFormat == FluentDateTimeFormat.timestamp ? (v as DateTime).millisecondsSinceEpoch : fluentIsoText(v as DateTime),
       (s) => _dateTime(s, utc: false),
-      lost: _lostMicroseconds,
+      lost: (v, c) => _lostMicroseconds(v, c) ?? _lostLocalHour(v, c),
     ),
     _FluentCodec('duration', (v) => v is Duration, (v, _) => (v as Duration).inMicroseconds, (s) => s is int ? Duration(microseconds: s) : s),
     _FluentCodec('bigint', (v) => v is BigInt, (v, _) => v.toString(), (s) => s is BigInt ? s : (BigInt.tryParse(s.toString()) ?? s)),
@@ -98,6 +98,17 @@ abstract final class FluentTypeCodecs {
   /// The timestamp format keeps milliseconds: the microseconds of [value] are dropped.
   static String? _lostMicroseconds(Object value, FluentTableConfig config) =>
       config.dateTimeFormat == FluentDateTimeFormat.timestamp && (value as DateTime).microsecond != 0 ? 'microseconds' : null;
+
+  /// ISO text of a local time has no offset: in the hour repeated when the clocks go back (end of daylight saving
+  /// time) one text names two instants, and it reads back as the first one. [_ambiguousHour] when [value] is the second.
+  static String? _lostLocalHour(Object value, FluentTableConfig config) {
+    if (config.dateTimeFormat == FluentDateTimeFormat.timestamp) return null;
+    final DateTime d = value as DateTime;
+    return DateTime(d.year, d.month, d.day, d.hour, d.minute, d.second, d.millisecond, d.microsecond) == d ? null : ambiguousHour;
+  }
+
+  /// What [encode] reports as `lost` for a local time in the repeated hour of a clock change (see [_lostLocalHour]).
+  static const String ambiguousHour = 'hour (local time in the hour repeated when the clocks go back)';
 
   /// Whether [text] is ISO-8601 text with a three-digit fraction (`...:00.123Z`): the form earlier versions wrote.
   /// Mixed with the six-digit form of [fluentIsoText] in one column, it sorts and compares wrongly within one millisecond.

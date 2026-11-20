@@ -26,6 +26,22 @@ class FluentRelationSaveContext {
   final Map<FluentStorable, Map<String, dynamic>> json = Map.identity();
 }
 
+/// What a save of one owner's list may remove (see `_listScope`).
+enum _ListScope {
+  /// The list is the full state (loaded, or built by the app with items): stored rows missing from it are removed.
+  full,
+
+  /// Add and update only: the list was not loaded, or was read for another owner or relation.
+  merge,
+
+  /// Nothing to write: a list the read did not load, still empty (what `fromCacheJson` defaulted it to).
+  skip,
+
+  /// An empty list the app built (no read behind the model or the list): stored rows are kept and reported
+  /// (`relationListKept`), unless the save says `relationSync: FluentRelationSyncMode.replace`.
+  guard,
+}
+
 /// Saving models together with their relations, in an order that always satisfies the
 /// foreign keys: referenced models → the models themselves → owned children → many-to-many links.
 extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
@@ -38,8 +54,10 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
   ///   deleted unless `keepMissing`. `null` leaves the stored children unchanged.
   /// * `manyToMany`: related models are saved, then the links are replaced (or merged with `keepMissing`).
   /// * Only what a list could show is removed: nothing for a relation with a `limit` or one the model was read
-  ///   without (`unloadedRelations`), only rows matching its `where` and visible to it. Related models read in the
-  ///   trash and still there are not written (no restore through a save of the parent).
+  ///   without (`unloadedRelations`, or the list's own load info for a model rebuilt from a read, see [_listScope]),
+  ///   only rows matching its `where` and visible to it. An empty list on a model the app built removes nothing
+  ///   unless `relationSync: replace`. Related models read in the trash and still there are not written (no restore
+  ///   through a save of the parent).
   ///
   /// [strategy] and [conflictOn] apply to [items] only (the caller's models); related models are always saved with
   /// `upsert`, so new children / references are never skipped by `updateOnly` / `patch` / `insertOnly` of the root.
@@ -241,22 +259,31 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
   /// Only children the list could have shown are removed: a relation with a `limit` shows part of them (nothing is
   /// removed), its `where` limits the removal to the rows it matches, and rows in the trash or expired are never
   /// taken for missing. A relation the model was read without (`unloadedRelations`: `FluentLoad.none`, lazy, depth
-  /// cut-off, failed load) removes nothing; its children (when the app put some in) are saved. Children read in the
-  /// trash (`includeDeleted`) that are still there are not written, so the save does not restore them.
+  /// cut-off, failed load) removes nothing; its children (when the app put some in) are saved. The same holds for a
+  /// model rebuilt from a read (the list's load info, see [_listScope]); an empty list on a model the app built
+  /// removes nothing unless `relationSync: replace` (reported). Children read in the trash (`includeDeleted`) that
+  /// are still there are not written, so the save does not restore them.
   Future<void> _saveOwnedChildren(Transaction txn, FluentRelationLink link, List<T> items, List<int> todo, List<Object?> ids, FluentTask task, FluentRelationSaveContext ctx) async {
     final FluentProvider target = link.target;
     final List<FluentStorable> allChildren = [];
     final Map<int, List<FluentStorable>> childrenOf = {};
-    final Set<int> mergeOnly = {}; // owners whose list was not loaded: nothing is removed
+    final Set<int> mergeOnly = {}; // owners whose list was not loaded (or not read for them): nothing is removed
+    final Set<int> guarded = {}; // owners with an empty list the app built: nothing is removed unless `replace`
 
     for (final int i in todo) {
       final List<FluentStorable>? children = _selectList(link, items[i], ctx);
       if (children == null) continue; // not loaded / not provided: leave stored children alone
       final Object? ownerId = ids[i];
       if (ownerId == null) continue;
-      if (_unloaded(link, items[i])) {
-        if (children.isEmpty) continue; // the default value of a list that was never read
-        mergeOnly.add(i);
+      switch (_listScope(link, items[i], children, ownerId, ctx)) {
+        case _ListScope.skip:
+          continue;
+        case _ListScope.merge:
+          mergeOnly.add(i);
+        case _ListScope.guard:
+          guarded.add(i);
+        case _ListScope.full:
+          break;
       }
       final Map<String, Object?> reference = link.referenceValues(ownerId);
       for (final FluentStorable child in children) {
@@ -275,12 +302,37 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
     // Only rows the list could show: live (trashed children are gone already), not expired, matching its `where`.
     FluentFilter shown = target._visibility(deletedOnly: false, includeDeleted: false);
     if (link.relation.where != null) shown = shown.and(target._resolveRelated(link.relation.where!));
+    await target._flushValueLists(txn);
+    // Rows this save inserted (also through another list over the same reference, e.g. a full list next to a view
+    // of it loaded with FluentLoad.all) were in no list the model was read with: never taken for missing.
+    final Set<String> insertedNow = {
+      for (final MapEntry<FluentStorable, FluentRowOutcome> e in ctx.outcomes.entries)
+        if (e.value == FluentRowOutcome.inserted && ctx.savedIds[e.key] != null && target._stores(e.key, list: false)) _tupleKey(target._normalizeKey(ctx.savedIds[e.key])),
+    };
+    // The stored children of every owner, read with one query per chunk of owners (not one per owner).
+    final Map<int, Map<String, Object?>> references = {
+      for (final int i in childrenOf.keys) if (!mergeOnly.contains(i)) i: link.referenceValues(ids[i]), // ids are stored keys
+    };
+    final Map<int, List<Object>>? storedOf = await _keysByOwner(
+      txn,
+      table: target.tableName,
+      keyColumns: target.keyColumnNames.toList(),
+      references: references,
+      where: shown.whereClause,
+      whereArgs: target._args(shown),
+      keyOf: (columns, values) => target._valuesKey(columns, values),
+      idOf: target.idFromRow,
+    );
     for (final MapEntry<int, List<FluentStorable>> entry in childrenOf.entries) {
       if (mergeOnly.contains(entry.key)) continue;
-      final Set<String> keep = {for (final FluentStorable c in entry.value) if (idOf[c] != null) _tupleKey(target._normalizeKey(idOf[c]))};
-      final FluentFilter owned = _equalsAll(link.referenceValues(ids[entry.key]), stored: true).and(shown); // ids are stored keys
-      final List<Object> stale = [for (final Object id in await target._keysWhere(txn, owned)) if (!keep.contains(_tupleKey(target._normalizeKey(id)))) id];
+      final Set<String> keep = {...insertedNow, for (final FluentStorable c in entry.value) if (idOf[c] != null) _tupleKey(target._normalizeKey(idOf[c]))};
+      final List<Object> existing = storedOf?[entry.key] ?? await target._keysWhere(txn, _equalsAll(references[entry.key]!, stored: true).and(shown));
+      final List<Object> stale = [for (final Object id in existing) if (!keep.contains(_tupleKey(target._normalizeKey(id)))) id];
       if (stale.isEmpty) continue;
+      if (guarded.contains(entry.key)) {
+        _reportKeptList(link, items[entry.key], stale.length);
+        continue;
+      }
       final int removed = await target._removeOwnedKeys(txn, stale);
       if (removed > 0) {
         FluentLog.debug('Removed children missing from the list', tag: '$tableName:relations', context: {'relation': link.name, 'removed': removed});
@@ -288,9 +340,45 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
     }
   }
 
-  /// Whether [link] was not loaded when [item] was read: its list holds what `fromCacheJson` defaulted it to, not
-  /// the stored children.
-  bool _unloaded(FluentRelationLink link, FluentStorable item) => item.unloadedRelations.contains(link.name);
+  /// What a save of [list] (the list of [link] in [item], owner key [ownerId]) may remove.
+  ///
+  /// The list's own load info comes first ([_listLoads], set by the read; it stays with the list when the model is
+  /// rebuilt, e.g. by `copyWith`): a list read for this relation and owner is the full state when it was loaded, an
+  /// unloaded one only adds (empty: nothing to do); a list read for another relation or owner only adds. Without it,
+  /// a model that was read decides by `unloadedRelations`. A model the app built (no read behind it or its list)
+  /// replaces with a list that has items; an empty one is [_ListScope.guard] (unless `relationSync: replace`).
+  _ListScope _listScope(FluentRelationLink link, FluentStorable item, List<FluentStorable> list, Object ownerId, FluentRelationSaveContext ctx) {
+    final Object? value = _selectRelation(link, item, ctx);
+    final _ListLoad? load = value is List ? _listLoads[value] : null;
+    if (load != null) {
+      if (!identical(load.link, link) || load.owner != _tupleKey(_normalizeKey(ownerId))) return _ListScope.merge;
+      if (load.loaded) return _ListScope.full;
+      return list.isEmpty ? _ListScope.skip : _ListScope.merge;
+    }
+    if (_readModels[item] ?? false) {
+      if (!item.unloadedRelations.contains(link.name)) return _ListScope.full;
+      return list.isEmpty ? _ListScope.skip : _ListScope.merge;
+    }
+    if (list.isNotEmpty || ctx.keepMissingOverride == false) return _ListScope.full;
+    return _ListScope.guard;
+  }
+
+  /// Reports that the empty list of [link] in [item] (a model the app built) left [kept] stored rows / links alone.
+  void _reportKeptList(FluentRelationLink link, FluentStorable item, int kept) {
+    final String what = link.isManyToMany ? 'link(s)' : 'child row(s)';
+    FluentLog.issue(
+      FluentIssueKind.relationListKept,
+      'Saved a ${item.runtimeType} with an empty "${link.name}" list that was not read from the database; its $kept stored $what of "$tableName.${link.name}" were kept.',
+      table: tableName,
+      database: dbName,
+      subject: link.name,
+      tag: '$tableName:relations',
+      hint: 'An empty list on a model the app built (or rebuilt from a read without "${link.name}") never removes anything. '
+          'To clear the relation on purpose, save with relationSync: FluentRelationSyncMode.replace, or remove the rows with '
+          '${link.isManyToMany ? 'detach' : 'detach / delete'}; to leave the relation untouched, set the field to null.',
+      code: 'await provider.save(model, relationSync: FluentRelationSyncMode.replace);',
+    );
+  }
 
   /// Whether a loaded list of [link] shows only some of the related rows (a `limit`): rows missing from it are not
   /// removed, the rest of the list was simply not shown.
@@ -356,14 +444,21 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
     final FluentProvider target = link.target;
     final List<FluentStorable> allTargets = [];
     final Map<int, List<FluentStorable>> targetsOf = {};
-    final Set<int> mergeOnly = {}; // owners whose list was not loaded: no link is removed
+    final Set<int> mergeOnly = {}; // owners whose list was not loaded (or not read for them): no link is removed
+    final Set<int> guarded = {}; // owners with an empty list the app built: no link is removed unless `replace`
 
     for (final int i in todo) {
       final List<FluentStorable>? related = _selectList(link, items[i], ctx);
       if (related == null || ids[i] == null) continue;
-      if (_unloaded(link, items[i])) {
-        if (related.isEmpty) continue; // the default value of a list that was never read
-        mergeOnly.add(i);
+      switch (_listScope(link, items[i], related, ids[i]!, ctx)) {
+        case _ListScope.skip:
+          continue;
+        case _ListScope.merge:
+          mergeOnly.add(i);
+        case _ListScope.guard:
+          guarded.add(i);
+        case _ListScope.full:
+          break;
       }
       targetsOf[i] = related;
       allTargets.addAll(related);
@@ -373,22 +468,40 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
     final Map<FluentStorable, Object?> idOf = await _saveRelated(txn, link, allTargets, task, ctx);
     final bool replace = !_keepMissing(link, ctx) && !_showsPart(link);
     FluentFilter? shown;
+    final List<String> targetKeys = target.keyColumnNames.toList();
+
+    // The stored links of every owner, read with one query per chunk of owners (not one per owner); null when an owner
+    // is saved twice in this call (then each one reads and writes in turn, as the later one must see the earlier).
+    final Map<int, List<Object>>? storedLinks = !replace
+        ? null
+        : await _keysByOwner(
+            txn,
+            table: link.linkTable!,
+            keyColumns: link.linkTargetColumns,
+            references: {for (final int i in targetsOf.keys) if (!mergeOnly.contains(i)) i: link.linkOwnerValues(ids[i])},
+            keyOf: (columns, values) => values.map((v) => '$v').join('\u0001'),
+            idOf: (row) => _rowTuple(row, link.linkTargetColumns, targetKeys),
+          );
+    final bool oneBatch = !replace || storedLinks != null;
+    final List<(Object, List<Object>)> inserts = [];
 
     for (final MapEntry<int, List<FluentStorable>> entry in targetsOf.entries) {
       final Object ownerId = ids[entry.key]!;
       final List<Object> linked = [for (final FluentStorable t in entry.value) idOf[t]].whereType<Object>().toSet().toList();
       if (replace && !mergeOnly.contains(entry.key)) {
         // Stored links are read and compared in Dart, stale ones deleted in chunks (no `NOT IN` over every kept key).
-        final List<String> targetKeys = target.keyColumnNames.toList();
         final FluentFilter ofOwner = _equalsAll(link.linkOwnerValues(ownerId), stored: true);
         final Set<String> keep = {for (final Object id in linked) _tupleKey(target._normalizeKey(id))};
-        List<Object> stale = [
-          for (final Map<String, Object?> r in await txn.query(link.linkTable!.quotedIdentifier, columns: link.linkTargetColumns.quotedAll, where: ofOwner.whereClause, whereArgs: ofOwner.whereArgs))
-            if (_rowTuple(r, link.linkTargetColumns, targetKeys) case final Object id when !keep.contains(_tupleKey(target._normalizeKey(id)))) id,
-        ];
+        final List<Object> existing = storedLinks?[entry.key] ??
+            [
+              for (final Map<String, Object?> r in await txn.query(link.linkTable!.quotedIdentifier, columns: link.linkTargetColumns.quotedAll, where: ofOwner.whereClause, whereArgs: ofOwner.whereArgs))
+                ?_rowTuple(r, link.linkTargetColumns, targetKeys),
+            ];
+        List<Object> stale = [for (final Object id in existing) if (!keep.contains(_tupleKey(target._normalizeKey(id)))) id];
         if (stale.isNotEmpty) {
           // Only links to targets the list could show (visible to the relation, matching its `where`).
           final FluentFilter visibleTargets = shown ??= link.relation.where == null ? target._relationVisibility(link) : target._relationVisibility(link).and(target._resolveRelated(link.relation.where!));
+          await target._flushValueLists(txn);
           final Set<String> visible = {};
           final int perChunk = target.keysPerChunk(math.max(1, _maxParamsPerChunk - visibleTargets.whereArgs.length));
           for (int i = 0; i < stale.length; i += perChunk) {
@@ -399,6 +512,10 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
           }
           stale = [for (final Object id in stale) if (visible.contains(_tupleKey(target._normalizeKey(id)))) id];
         }
+        if (stale.isNotEmpty && guarded.contains(entry.key)) {
+          _reportKeptList(link, items[entry.key], stale.length);
+          stale = const [];
+        }
         final int step = math.max(1, (_maxParamsPerChunk - link.linkOwnerColumns.length) ~/ link.linkTargetColumns.length);
         int removed = 0;
         for (int i = 0; i < stale.length; i += step) {
@@ -407,8 +524,64 @@ extension _FluentRelationWriter<T extends FluentStorable> on FluentProvider<T> {
         }
         if (removed > 0) FluentEngine.touch(target, FluentDbAction.update);
       }
-      await _insertLinks(txn, link, ownerId, linked);
+      if (oneBatch) {
+        inserts.add((ownerId, linked));
+      } else {
+        await _insertLinks(txn, link, ownerId, linked);
+      }
     }
+    // Every owner's links in one batch (they never conflict across owners).
+    if (inserts.isNotEmpty) {
+      final Batch batch = txn.batch();
+      for (final (Object ownerId, List<Object> targetIds) in inserts) {
+        for (final Object targetId in targetIds) {
+          batch.insert(link.linkTable!.quotedIdentifier, {...link.linkOwnerValues(ownerId), ...link.linkTargetValues(targetId)}.quotedKeys, conflictAlgorithm: ConflictAlgorithm.ignore);
+        }
+      }
+      await batch.commit(noResult: true);
+    }
+  }
+
+  /// For each owner of [references] (owner index → the stored values of the columns of [table] that point at it), the
+  /// keys ([keyColumns], read by [idOf]) of the rows of [table] pointing at it and matching [where]: one query per chunk
+  /// of owners instead of one per owner. [keyOf] makes the lookup key of reference values (rows and owners alike).
+  /// `null` when two owners have the same values (an owner saved twice: the caller reads each one in turn).
+  Future<Map<int, List<Object>>?> _keysByOwner(
+    DatabaseExecutor txn, {
+    required String table,
+    required List<String> keyColumns,
+    required Map<int, Map<String, Object?>> references,
+    String where = '',
+    List<Object?>? whereArgs,
+    required String Function(List<String> columns, List<Object?> values) keyOf,
+    required Object? Function(Map<String, Object?> row) idOf,
+  }) async {
+    if (references.isEmpty) return const {};
+    final List<String> columns = references.values.first.keys.toList();
+    final Map<String, int> ownerOf = {};
+    for (final MapEntry<int, Map<String, Object?>> e in references.entries) {
+      final List<Object?> values = [for (final String c in columns) e.value[c]];
+      if (values.contains(null) || ownerOf.putIfAbsent(keyOf(columns, values), () => e.key) != e.key) return null;
+    }
+    final Map<int, List<Object>> found = {for (final int i in references.keys) i: <Object>[]};
+    final List<MapEntry<int, Map<String, Object?>>> owners = references.entries.toList();
+    final int extra = whereArgs?.length ?? 0;
+    final int step = math.max(1, (_maxParamsPerChunk - extra) ~/ columns.length);
+    final List<String> selected = {...keyColumns, ...columns}.toList();
+    for (int from = 0; from < owners.length; from += step) {
+      final List<MapEntry<int, Map<String, Object?>>> chunk = owners.sublist(from, math.min(from + step, owners.length));
+      final String match = columns.length == 1
+          ? '${columns.single.quotedIdentifier} IN (${List.filled(chunk.length, '?').join(', ')})'
+          : chunk.map((_) => '(${columns.map((c) => '${c.quotedIdentifier} = ?').join(' AND ')})').join(' OR ');
+      final List<Object?> args = [for (final MapEntry<int, Map<String, Object?>> e in chunk) for (final String c in columns) e.value[c], ...?whereArgs];
+      final List<Map<String, Object?>> rows = await txn.query(table.quotedIdentifier, columns: selected.quotedAll, where: where.isEmpty ? match : '($match) AND ($where)', whereArgs: args);
+      for (final Map<String, Object?> row in rows) {
+        final int? owner = ownerOf[keyOf(columns, [for (final String c in columns) row[c]])];
+        final Object? id = idOf(row);
+        if (owner != null && id != null) found[owner]!.add(id);
+      }
+    }
+    return found;
   }
 
   Future<void> _insertLinks(DatabaseExecutor executor, FluentRelationLink link, Object ownerId, List<Object> targetIds) async {

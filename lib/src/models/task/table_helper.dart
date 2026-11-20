@@ -7,6 +7,12 @@ part of '../../core/fluent_sqlite_internal.dart';
 /// The options of one [FluentTask]: condition, order, paging, projection, raw SQL and write settings. The action
 /// (`FluentDbAction`) says what to do, the helper with what.
 class TableHelper {
+  /// Whether the text of a SQLite error says the file is damaged or not a database (`SQLITE_NOTADB` / `SQLITE_CORRUPT`).
+  static bool isCorrupt(Object? error) {
+    if (error == null) return false;
+    return RegExp(r'file is not a database|database disk image is malformed|SQLITE_NOTADB|SQLITE_CORRUPT|\(code (26|11)', caseSensitive: false).hasMatch('$error');
+  }
+
   /// The most rows a read returns (`LIMIT`).
   final int? limit;
 

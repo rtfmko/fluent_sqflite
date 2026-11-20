@@ -76,8 +76,9 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
     final String? deleted = _softDeleteColumn;
     final String synced = c.synced.quotedIdentifier;
     final String version = c.version.quotedIdentifier;
-    // Known to the server, and not a deletion that was already pushed (trash purge).
-    FluentFilter known = where.and(FluentFilter('$synced > 0'));
+    // Known to the server (-1: a new row over a key whose deletion was never sent, see _dropTombstonesOfWritten), and
+    // not a deletion that was already pushed (trash purge).
+    FluentFilter known = where.and(FluentFilter('$synced <> 0'));
     if (deleted != null) known = known.and(FluentFilter('${deleted.quotedIdentifier} IS NULL OR $version > $synced'));
     final List<Map<String, Object?>> rows = await ex.query(tableName.quotedIdentifier, columns: _serverKey.quotedAll, where: known.whereClause, whereArgs: _sqlArgs(known.whereArgs));
     if (rows.isEmpty) return;
@@ -112,10 +113,15 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
   Future<void> _dropTombstonesOfWritten(DatabaseExecutor ex, List<Object> ids) async {
     if (ids.isEmpty || await _countTombstones(ex) == 0) return;
     final List<Object> keys = [];
+    final List<Object> rowIds = []; // stored keys, aligned with keys
+    final List<String> columns = {..._serverKey, ...keyColumnNames}.toList();
     await _forKeyChunks(ids, (filter) async {
-      for (final Map<String, Object?> r in await ex.query(tableName.quotedIdentifier, columns: _serverKey.quotedAll, where: filter.whereClause, whereArgs: _sqlArgs(filter.whereArgs))) {
+      for (final Map<String, Object?> r in await ex.query(tableName.quotedIdentifier, columns: columns.quotedAll, where: filter.whereClause, whereArgs: _sqlArgs(filter.whereArgs))) {
         final Object? key = _serverKeyOf(r);
-        if (key != null) keys.add(key);
+        if (key != null) {
+          keys.add(key);
+          rowIds.add(idFromRow(r)!);
+        }
       }
       return 0;
     }, stored: true);
@@ -124,7 +130,16 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
     for (final Object key in keys) {
       batch.delete(_tombstoneTable, where: 'tbl = ? AND key = ?', whereArgs: [tableName, _encodeKey(key)]);
     }
-    await batch.commit(noResult: true);
+    final List<Object?> dropped = await batch.commit();
+    // The server still has these keys (their deletion was never sent): a new row written over one counts as known
+    // (`synced_version` -1, still pending), so deleting it again before a push writes the tombstone again.
+    final List<Object> known = [for (int i = 0; i < rowIds.length; i++) if ((dropped[i] as int? ?? 0) > 0) rowIds[i]];
+    if (known.isEmpty) return;
+    final String synced = _syncColumns!.synced.quotedIdentifier;
+    await _forKeyChunks(known, (filter) {
+      final FluentFilter where = filter.and(FluentFilter('$synced = 0'));
+      return ex.rawUpdate('UPDATE ${tableName.quotedIdentifier} SET $synced = -1 WHERE ${where.whereClause}', _sqlArgs(where.whereArgs));
+    }, stored: true);
   }
 
   /// Number of tombstones (deletions not pushed yet) of this table.
@@ -214,12 +229,17 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
 
   /// Local changes not pushed yet (matching [where], except the rows with a key in [skip]), at most [limit] of them,
   /// in key order.
+  ///
+  /// Committed data only: the transaction watchdog never lets this read into a transaction it was not called in (a
+  /// batch with changes that roll back later would leave the server with them, and the committed rows marked synced).
   @internal
   Future<FluentSyncBatch<T>> pendingSyncBatch({FluentFilter? where, int? limit, List<Object> skip = const []}) => _run<FluentSyncBatch<T>>(
     FluentDbAction.relationRead,
+    committedOnly: true,
     data: () async {
       final ({String version, String synced}) c = _syncColumns!;
       final FluentFilter pending = _resolveRelated(_scoped(where, _unsynced));
+      await _flushValueLists();
       // Skipped keys are dropped here, not in SQL (one NOT IN of every refused key passes the variable limit): at
       // most skip.length of the first limit + skip.length rows are skipped, so a full batch remains.
       final Set<String> skipped = {for (final Object id in skip) _keyText(_storedId(id)!)}; // keyed like the stored rows
@@ -257,6 +277,25 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
       );
     },
   );
+
+  /// Before [batch] is sent: its rows the server did not know (`synced_version` 0) count as known from now on
+  /// (`synced_version` -1, still pending), since the server may store them even when its answer is lost, fails or is
+  /// cancelled: a later permanent delete then leaves a tombstone (a deletion of a key the server lacks is harmless).
+  @internal
+  Future<void> markSent(FluentSyncBatch<T> batch) {
+    final List<Object> ids = [for (final (Object id, int _) in batch.versions) id];
+    if (ids.isEmpty) return Future<void>.value();
+    return _run<void>(
+      FluentDbAction.relationWrite,
+      data: () => _write('Sync', (txn) async {
+        final String synced = _syncColumns!.synced.quotedIdentifier;
+        await _forKeyChunks(ids, (keys) {
+          final FluentFilter where = keys.and(FluentFilter('$synced = 0'));
+          return txn.rawUpdate('UPDATE ${tableName.quotedIdentifier} SET $synced = -1 WHERE ${where.whereClause}', _sqlArgs(where.whereArgs));
+        });
+      }),
+    );
+  }
 
   /// After a successful push: marks the sent versions synced (rows changed meanwhile, and the [rejected] keys, stay
   /// pending) and drops the sent tombstones. Rows deleted for good while the push ran get a tombstone with the server
@@ -330,6 +369,7 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
     FluentDbAction.relationRead,
     data: () async {
       final FluentFilter pending = _resolveRelated(_scoped(where, _unsynced));
+      await _flushValueLists();
       final int rows = Sqflite.firstIntValue(await executor.rawQuery('SELECT COUNT(*) FROM ${tableName.quotedIdentifier} WHERE ${pending.whereClause}', _sqlArgs(pending.whereArgs))) ?? 0;
       await _ensureSyncTablesForRead();
       final int tombstones = Sqflite.firstIntValue(await executor.rawQuery('SELECT COUNT(*) FROM $_tombstoneTable WHERE tbl = ?', [tableName])) ?? 0;
@@ -341,6 +381,7 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
   @internal
   Future<DateTime?> lastPull() => _run<DateTime?>(
     FluentDbAction.relationRead,
+    committedOnly: true,
     data: () async {
       await _ensureSyncTablesForRead();
       final List<Map<String, Object?>> rows = await executor.query(_syncStateTable, where: 'tbl = ?', whereArgs: [tableName]);
@@ -354,11 +395,16 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
   @internal
   Future<Map<int, ({T model, Object id, int version})>> unpushedCounterparts(List<T> items) => _run<Map<int, ({T model, Object id, int version})>>(
     FluentDbAction.relationRead,
+    committedOnly: true, // a merge of a local row that rolls back later would be written as a local change
     data: () async {
       final List<String> match = _serverKey;
       final String versionColumn = _syncColumns!.version;
       final List<Map<String, dynamic>> rows = [for (final T item in items) _prepareSqlJson(item)];
-      final Map<String, Object?> found = await _existingByMatch(executor, match, [for (final Map<String, dynamic> r in rows) if (match.every((c) => r[c] != null)) r], scope: _unsynced);
+      // Rows in the trash whose deletion is not pushed yet are not merged: like a permanent delete, the local deletion
+      // wins over a server row (applyPull skips them as busy), unless the server wins.
+      final String? deleted = _softDeleteColumn;
+      final FluentFilter scope = deleted == null ? _unsynced : _unsynced.and(FluentFilter.isNull(deleted.quotedIdentifier));
+      final Map<String, Object?> found = await _existingByMatch(executor, match, [for (final Map<String, dynamic> r in rows) if (match.every((c) => r[c] != null)) r], scope: scope);
       if (found.isEmpty) return <int, ({T model, Object id, int version})>{};
       // The local rows in a few queries (not one per item).
       final List<Object> ids = found.values.whereType<Object>().toList();
@@ -410,6 +456,7 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
     FluentRemoteDeleteBehavior remoteDeletes = FluentRemoteDeleteBehavior.auto,
     FluentRelationSyncMode? relationSync,
     DateTime? rememberAs,
+    List<Object> serverHas = const [],
   }) => _run<FluentPullStats>(
     FluentDbAction.relationWrite,
     data: () => _write('Pull', (txn) async {
@@ -418,6 +465,20 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
       // Rows that got a local change since the conflicts were checked: the local change wins.
       final List<Map<String, dynamic>> rows = [for (final T item in remote) _prepareSqlJson(item)];
       final Set<int> busy = serverWins ? const <int>{} : await _busyRows(txn, match, rows);
+      // The server has the rows whose local change wins ([serverHas]: Dart keys; busy rows: by match): known from now
+      // on, so deleting one later tells the server (it would keep its row otherwise, and never send it again).
+      final String syncedColumn = _syncColumns!.synced.quotedIdentifier;
+      final FluentFilter unknown = FluentFilter('$syncedColumn = 0');
+      Future<int> markKnown(FluentFilter keys) {
+        final FluentFilter where = keys.and(unknown);
+        return txn.rawUpdate('UPDATE ${tableName.quotedIdentifier} SET $syncedColumn = -1 WHERE ${where.whereClause}', _sqlArgs(where.whereArgs));
+      }
+
+      if (serverHas.isNotEmpty) await _forKeyChunks(serverHas, markKnown);
+      if (busy.isNotEmpty) {
+        final List<Object> busyIds = (await _existingByMatch(txn, match, [for (final int i in busy) rows[i]], scope: unknown)).values.whereType<Object>().toList();
+        if (busyIds.isNotEmpty) await _forKeyChunks(busyIds, markKnown, stored: true);
+      }
       // Rows deleted locally whose deletion is not pushed yet (a pull only; the answer to a push never inserts): the
       // local deletion is the newer change and wins, unless the server wins (then the tombstone is dropped).
       final Set<int> tombstoned = byKey ? const <int>{} : await _tombstonedRows(txn, rows);
@@ -431,6 +492,16 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
       }
       final List<T> incoming = [for (int i = 0; i < remote.length; i++) if (!busy.contains(i) && !trashed.contains(i) && !deletedLocally.contains(i)) remote[i]];
       if (byKey) await _storeServerKeys(txn, rows, busy, trashed);
+      // A server row stored over a row in the local trash (its deletion was pushed already, or the server wins over a
+      // deletion not pushed yet) brings it back, synced: the row writer alone would update it inside the trash.
+      if (!byKey && _softDeleteColumn != null && incoming.isNotEmpty) {
+        final List<Map<String, dynamic>> keyed = [
+          for (int i = 0; i < remote.length; i++)
+            if (!busy.contains(i) && !deletedLocally.contains(i) && match.every((c) => rows[i][c] != null)) rows[i],
+        ];
+        final Map<String, Object> inTrash = keyed.isEmpty ? const {} : await _trashedMatches(txn, match, keyed, live: conflictOn != null);
+        if (inTrash.isNotEmpty) await _forKeyChunks(inTrash.values.toList(), (keys) => _restoreWhere(txn, keys, synced: true), stored: true);
+      }
 
       Future<void> store(List<T> items, {required bool synced}) async {
         if (items.isEmpty) return;
@@ -472,6 +543,11 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
           final bool useSoft = soft && remoteDeletes != FluentRemoteDeleteBehavior.hard;
           final Object stamp = _softDeleteStamp();
           deleted = await _forKeyChunks(safe, (keys) => useSoft ? _softDeleteWhere(txn, keys, stamp, synced: true) : _hardDeleteWhere(txn, keys, synced: true), stored: true);
+          if (useSoft && serverWins) {
+            // Rows already in the trash whose deletion was not pushed yet: the server deleted them too, nothing to send.
+            final FluentFilter trashedUnsent = FluentFilter.isNotNull(_softDeleteColumn.quotedIdentifier).and(_unsynced);
+            await _forKeyChunks(safe, (keys) => _setRows(txn, const {}, keys.and(trashedUnsent), synced: true), stored: true);
+          }
         }
       }
 
@@ -527,8 +603,9 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
   @internal
   Future<int> clearLocally(FluentFilter where) => _run<int>(
     FluentDbAction.relationWrite,
-    data: () => _write('Clear cache', (txn) {
+    data: () => _write('Clear cache', (txn) async {
       final FluentFilter scope = _resolveRelated(_keepBusyRows(where));
+      await _flushValueLists(txn);
       return _hardDeleteWhere(txn, scope, synced: true);
     }),
   );
@@ -541,6 +618,7 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
     FluentDbAction.relationWrite,
     data: () => _write('Replace cache', (txn) async {
       final FluentFilter scope = _resolveRelated(_keepBusyRows(where));
+      await _flushValueLists(txn);
       await _hardDeleteWhere(txn, scope, synced: true);
       if (items.isEmpty) return;
       final List<String>? conflictOn = setEquals(_serverKey.toSet(), keyColumnNames.toSet()) ? null : _serverKey;
@@ -548,7 +626,18 @@ extension FluentSyncCore<T extends FluentStorable> on FluentProvider<T> {
       if (_syncColumns != null) {
         final List<Map<String, dynamic>> prepared = [for (final T item in items) _prepareSqlJson(item)];
         // Also rows deleted locally whose deletion is not pushed yet: they must not come back.
-        final Set<int> busy = {...await _busyRows(txn, _serverKey, prepared), ...await _tombstonedRows(txn, prepared)};
+        final Set<int> changed = await _busyRows(txn, _serverKey, prepared);
+        final Set<int> busy = {...changed, ...await _tombstonedRows(txn, prepared)};
+        if (changed.isNotEmpty) {
+          // The server has these rows: known from now on, so deleting one later tells the server.
+          final String synced = _syncColumns!.synced.quotedIdentifier;
+          final FluentFilter unknown = FluentFilter('$synced = 0');
+          final List<Object> ids = (await _existingByMatch(txn, _serverKey, [for (final int i in changed) prepared[i]], scope: unknown)).values.whereType<Object>().toList();
+          await _forKeyChunks(ids, (keys) {
+            final FluentFilter where = keys.and(unknown);
+            return txn.rawUpdate('UPDATE ${tableName.quotedIdentifier} SET $synced = -1 WHERE ${where.whereClause}', _sqlArgs(where.whereArgs));
+          }, stored: true);
+        }
         if (busy.isNotEmpty) {
           fresh = [for (int i = 0; i < items.length; i++) if (!busy.contains(i)) items[i]];
           FluentLog.debug('${busy.length} fetched row(s) of "$tableName" kept their local version (changes not sent yet)', tag: 'sync:$tableName');

@@ -24,6 +24,7 @@ class FluentTask {
     this.tag,
     this.executionWeight = 0,
     this.mergedTasks,
+    this.committedOnly = false,
   });
 
   /// Identifies the queued call (set by the engine).
@@ -65,6 +66,10 @@ class FluentTask {
   /// The calls merged into this one (adjacent saves, `findById` lookups); `null` for a single call.
   final List<FluentTask>? mergedTasks;
 
+  /// A read that must see committed data only (library bookkeeping, e.g. what a sync pushes): the transaction
+  /// watchdog never lets it into a running transaction it was not called in (that transaction may still roll back).
+  final bool committedOnly;
+
   /// Whether this task carries several merged calls.
   bool get isBatched => mergedTasks != null && mergedTasks!.isNotEmpty;
 
@@ -99,6 +104,7 @@ class FluentTask {
     tag: tag,
     executionWeight: executionWeight,
     mergedTasks: mergedTasks ?? this.mergedTasks,
+    committedOnly: committedOnly,
   );
 
   /// Whether the call changes data.

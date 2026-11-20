@@ -148,6 +148,8 @@ the model extensions (`item.save()`, …). Provider methods no longer take `dbNa
 | `FluentDatabaseNameException` | `FluentConfigException` | — | 2.0.0 | `FluentDatabaseNameException` | → `FluentConfigException`, `code == FluentErrorCode.invalidDatabaseName` |
 | `FluentDatabaseNotFoundException` | `FluentConfigException` | — | 2.0.0 | `FluentDatabaseNotFoundException` | → `FluentConfigException`, `code == FluentErrorCode.databaseNotFound` |
 | `FluentConfigurationException` | `FluentConfigException` | — | 2.0.0 | `FluentConfigurationException` | → `FluentConfigException`, `code == FluentErrorCode.invalidConfiguration` |
+| `providerNotFound` / `databaseNotFound` / `FluentArgumentException` for a `dbKey` that is not open | `FluentErrorCode.databaseNotOpen` | — | 2.0.0-dev.3 | `FluentErrorCode.providerNotFound`, `FluentErrorCode.databaseNotFound` | a call with an unopened `dbKey` (`find`, `save`, `clear`, `deleteDatabases`, `transaction(dbKey:)`, `providerOf`, `cleanOrphans`, `schemaReport`, `purgeArchivedColumns` — these three skipped it silently before) → `code == FluentErrorCode.databaseNotOpen` (`FluentConfigException`; `providerNotFound` stays for a model / table without a provider in an open database, `databaseNotFound` for a missing read-only file) |
+| `invalidConfiguration` for a damaged file at `init` | `FluentErrorCode.databaseCorrupt` | — | 2.0.0-dev.3 | `FluentErrorCode.invalidConfiguration` | `init` on a non-database / corrupt file → `code == FluentErrorCode.databaseCorrupt` (a later `DatabaseException` of that kind is a `FluentQueryException` with the same code) |
 | `MigrationFailedException` | `FluentSchemaException` | — | 2.0.0 | `MigrationFailedException` | → `FluentSchemaException`, `code == FluentErrorCode.migrationFailed` |
 | `InvalidSqlTypeException` | `FluentArgumentException` | — | 2.0.0 | `InvalidSqlTypeException` | → `FluentArgumentException`, `code == FluentErrorCode.unsupportedValue` |
 | `FluentSQFLiteException` | `FluentQueryException` | — | 2.0.0 | `FluentSQFLiteException` | `on FluentSQFLiteException` → `on FluentQueryException` |
@@ -214,6 +216,16 @@ the model extensions (`item.save()`, …). Provider methods no longer take `dbNa
 
 These compile unchanged but act differently; check the code that depends on them.
 
+* A `dbKey` with no open database fails with `databaseNotOpen`, and a damaged file fails `init` with `databaseCorrupt` (2.0.0-dev.3; see "Errors"): code that matched `providerNotFound`, `databaseNotFound` or `invalidConfiguration` for these must match the new codes.
+* `FluentDb.clear` publishes a `clearRetried` warning when a table's delete failed once for another reason than a restricting foreign key and a later pass emptied it (2.0.0-dev.3).
+* `FluentFilter.ids` with more than 900 keys (fewer for composite keys) works in every call instead of throwing a
+  `FluentArgumentException` (2.0.0-dev.3); long `inList` / `notInList` never bind more than 900 arguments (old SQLite
+  refuses more than 999). Code that chunked its key lists may pass them whole.
+* Adjacent writes that cannot be merged (deletes, updates, saves of other tables) run in one transaction, each call in
+  its own SAVEPOINT (2.0.0-dev.3): every call still succeeds or fails alone and its caller completes after the commit.
+* An empty relation list on a model the app built (not read, e.g. `Article(id: 1, comments: [])` or a `copyWith` whose
+  list has no read behind it) no longer removes the stored children / links; they are kept and reported
+  (`relationListKept`). Save with `relationSync: FluentRelationSyncMode.replace` to clear (2.0.0-dev.3).
 * Expired rows are hidden from **every** read unless `includeExpired: true`.
 * `syncWithServer` pushes in batches of 500 by default (`batchSize: null` sends everything at once), in key order.
 * `deletedKeys` (push and pull) are server keys (`FluentTableConfig.serverKey`, else the primary key).
@@ -313,8 +325,9 @@ These compile unchanged but act differently; check the code that depends on them
 * `FluentWithTrash.pluck` / `countDistinct` added. `clearTable` on a synced table reports `unsentChangesDiscarded`.
 * Provider calls (also on unregistered providers) and `FluentDb.trash` / `withTrash` report every error through the
   returned Future / Stream (was: some threw at the call).
-* `FluentFilter.deferred` / `relatedMarker` are no longer public. `FluentFilter.ids` takes at most 900 keys (fewer for
-  composite keys): use `findByIds` for longer lists. Fewer arguments than `?` throws `FluentArgumentException`.
+* `FluentFilter.deferred` / `relatedMarker` are no longer public. Fewer arguments than `?` throws
+  `FluentArgumentException`. `FluentFilter.ids` / `inList` / `notInList` take any number of values (2.0.0-dev.3;
+  dev.1 refused more than 900 keys in `ids`): beyond 900 they go through a temporary table of the connection.
 * `trash.find(relations:)` / `withTrash` load related rows with the relation's own visibility; `includeDeleted`
   relations show their trashed children. A failing limited relation read is reported (`relationLoadFailed`).
 * Two migration steps with the same label throw `FluentSchemaException` (`schemaConflict`) at start (was: the second
@@ -385,6 +398,30 @@ These compile unchanged but act differently; check the code that depends on them
 * `deletedAt` of a model changes after the commit for `delete` and `restore` (like `save`), not right after the call.
 * A save no longer removes relation children / links it cannot judge: relations with `limit`, trashed or expired rows,
   and relations the model was read without (`unloadedRelations`) keep their rows.
-* A zero or negative `trashPurgeInterval`, `optimizeInterval`, `pauseWatchdog` or `transactionWatchdog` falls back to the
+* A zero or negative `trashPurgeInterval`, `optimizeInterval`, `pauseWatchdog`, `transactionWatchdog` or `committedReadTimeout` falls back to the
   default (`configFallback`); `null` still switches the timer off.
 * `fluent_sqflite_test` resets logging after every test: call `setupLogging` in `setUp` or in the test, not `setUpAll`.
+* Sync reads (`syncWithServer`, `watchRemote`) are no longer let into a running transaction by `transactionWatchdog`: they
+  wait for the commit, at most `FluentConfig.committedReadTimeout` (30 s, new), then fail with the new transient
+  `FluentErrorCode.databaseBusy` (2.0.0-dev.3). Pass `retries` to sync later, or call the sync inside or after the transaction.
+* Guarantees round (2.0.0-dev.3): unawaited calls inside one `FluentDb.transaction` run in call order. A call that would
+  close a wait cycle between databases fails with `FluentErrorCode.deadlock` (`FluentEngineException`) instead of
+  hanging: take the databases in one order, or call into the other database after the transaction. SQL errors of
+  `BEGIN` / `COMMIT` / `RELEASE` / `cleanOrphans` / `purgeArchivedColumns` are `FluentQueryException`s.
+* Sync errors in results are `FluentSyncException` (the original is its `cause`). The `failed` event of `watchRemote`
+  carries a `FluentSyncException`: code that matched `TimeoutException` (or another error of `fetch`) on `event.error`
+  must read `(event.error as FluentSyncException).cause`.
+* Non-numeric text, or an integer beyond int64, into an `INTEGER` / `REAL` column throws `FluentArgumentException`
+  (`unsupportedValue`; numeric text still converts); a `String` with a lone UTF-16 surrogate is refused.
+* `fromCacheJson` no longer receives `expiry_date`, `sync_version`, `synced_version` (`findMaps()` without `columns`
+  drops them too): read such values through the library, not from the row map.
+* An exception thrown by your code inside a write (e.g. `buildJson`) reaches the caller as `FluentArgumentException`
+  with the original as `cause` (catch `FluentException`, read `e.cause`).
+* Negative or huge `trashRetention` / `archiveRetention`, negative `historyLimit` / `busyTimeout` and an out-of-range
+  `readConnections` fall back to a safe value with `configFallback`; an empty table
+  name is refused; duplicate column names warn (`schemaFallback`).
+* `oldName` onto a name a live column holds is applied: the old column is archived ("replaced by ...") and the rename
+  runs.
+* Children of rows that a new `CHECK` / `UNIQUE` moved to a quarantine table stay in place and are reported as
+  `danglingReferences` until the parent row is moved back (`foreign_key_check` lists them meanwhile).
+* Title, details and fix of issues delivered through `onIssue` / `report()` are redacted unless `showSqlArguments`.

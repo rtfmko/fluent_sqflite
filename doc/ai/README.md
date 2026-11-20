@@ -29,6 +29,7 @@ The skills are copied into the project's `.agents/skills/` and picked up automat
 * [migrations.md](migrations.md) — every renamed or removed member, with search text and before → after.
 * [error-codes.md](error-codes.md) — every `FluentErrorCode`: meaning, cause, fix.
 * [issues.md](issues.md) — every `FluentIssueKind` (hints, automatic changes, warnings, background errors).
+* [Guarantees](../guarantees.md) — the 31 promises of the library (atomic, no data loss, no hang, ...), how they are tested, their limits.
 * [AGENTS.md snippet](agents-snippet.md) — rules to paste into a project's `AGENTS.md` / `CLAUDE.md`.
 
 ## Ten rules that prevent most mistakes

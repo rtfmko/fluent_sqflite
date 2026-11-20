@@ -1,0 +1,57 @@
+{
+ "v_1_author": {
+  "sql": "CREATE TABLE v_1_author (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  name TEXT,\n  born BLOB,\n  rating REAL,\n  active INTEGER,\n  _fs_metadata TEXT,\n  expiry_date INTEGER\n)",
+  "rows": [
+   {
+    "id": 1,
+    "name": "Ann",
+    "born": 327400200000,
+    "rating": 4.5,
+    "active": 1,
+    "_fs_metadata": "{\"born\":\"datetime\",\"active\":\"bool\"}",
+    "expiry_date": null
+   },
+   {
+    "id": 2,
+    "name": "Bob",
+    "born": null,
+    "rating": 3.25,
+    "active": 0,
+    "_fs_metadata": "{\"active\":\"bool\"}",
+    "expiry_date": null
+   }
+  ]
+ },
+ "v_1_book": {
+  "sql": "CREATE TABLE v_1_book (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  title TEXT,\n  pages INTEGER,\n  author_id INTEGER,\n  deleted_at TEXT,\n  _fs_metadata TEXT,\n  expiry_date INTEGER\n)",
+  "rows": [
+   {
+    "id": 1,
+    "title": "First",
+    "pages": 100,
+    "author_id": 1,
+    "deleted_at": null,
+    "_fs_metadata": null,
+    "expiry_date": null
+   },
+   {
+    "id": 2,
+    "title": "Second",
+    "pages": 250,
+    "author_id": 1,
+    "deleted_at": "2026-11-17T14:02:48.666005",
+    "_fs_metadata": null,
+    "expiry_date": null
+   },
+   {
+    "id": 3,
+    "title": "Third",
+    "pages": 7,
+    "author_id": 2,
+    "deleted_at": null,
+    "_fs_metadata": null,
+    "expiry_date": null
+   }
+  ]
+ }
+}

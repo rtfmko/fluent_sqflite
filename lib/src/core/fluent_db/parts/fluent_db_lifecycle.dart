@@ -136,6 +136,10 @@ extension _FluentDbLifecycle on FluentDb {
       return;
     }
 
+    for (final String name in uniqueGroupsMap.keys.toList()) {
+      uniqueGroupsMap[name] = _checkedGroup(uniqueGroupsMap[name]!);
+    }
+
     _refuseSharedProviders(uniqueGroupsMap.values, tag: 'FluentDb:init');
 
     final FluentConfig config = FluentDb._checkedConfig(requested);
@@ -238,11 +242,15 @@ extension _FluentDbLifecycle on FluentDb {
           // The full-text index the file was built with is used as it is (it cannot be created here).
           for (final FluentProvider dao in group.providerList) {
             await dao.adoptFullText(db, group.config.fullText);
+            await dao.detectRowFlags(db);
           }
         } else {
           FluentLog.debug('Syncing schema and maintenance for $currentDbName', tag: 'FluentDb:init');
           final bool danglingReferences = await _syncSchema(db, group, sortedProviders: sortedDaos);
           await _runInitialMaintenance(group, cleanOrphans: danglingReferences || !group.config.enableForeignKeys);
+          for (final FluentProvider dao in group.providerList) {
+            await dao.detectRowFlags(db);
+          }
           if (!group.inMemory) {
             if ((group.config.diagnostics ?? config.diagnostics).costModel) {
               stats[currentDbName] = await _loadStats(db, currentDbName);
@@ -254,8 +262,19 @@ extension _FluentDbLifecycle on FluentDb {
         const String keepHint =
             'The database file was left untouched. Fix the cause and start again; for throw-away caches '
             'FluentGroup(resetOnSchemaError: true) recreates the file automatically.';
-        final FluentException failure = e is FluentException
+        final bool corrupt = TableHelper.isCorrupt(e is FluentException ? '${e.message} ${e.cause ?? ''}' : e);
+        final FluentException failure = e is FluentException && (!corrupt || e.code == FluentErrorCode.databaseCorrupt)
             ? e
+            : corrupt
+            ? FluentConfigException(
+                'Database "$currentDbName" is damaged or not a database: ${FluentLog.redact('${e is FluentException ? e.cause ?? e : e}')}',
+                code: FluentErrorCode.databaseCorrupt,
+                hint:
+                    'Restore the file from a backup, or start with an empty database: FluentGroup(resetOnSchemaError: true) recreates it '
+                    '(all data in the file is lost then; the library never deletes the file on its own).',
+                cause: e is FluentException ? e.cause ?? e : e,
+                stackTrace: st,
+              )
             : FluentConfigException(
                 'Database "$currentDbName" could not be opened: ${FluentLog.redact('$e')}',
                 hint: 'Usually a corrupted or locked file, or a constraint the existing data violates. $keepHint',
@@ -379,6 +398,51 @@ extension _FluentDbLifecycle on FluentDb {
     if (purgeEvery != null) _trashPurgeTimer = FluentClockTimer(purgeEvery, _purgeSoftDeletedGlobal, tag: 'FluentDb:purge');
     final Duration? optimizeEvery = config.optimizeInterval;
     if (optimizeEvery != null) _optimizeTimer = FluentClockTimer(optimizeEvery, _optimizeAll, tag: 'FluentDb:optimize');
+  }
+
+  /// [group] with every setting that cannot work replaced by a safe value (a `configFallback` warning each): a negative
+  /// `archiveRetention` would purge every archived column at once, a negative `historyLimit` / `busyTimeout` /
+  /// `readConnections` has no meaning.
+  FluentGroup _checkedGroup(FluentGroup group) {
+    final String name = group.dbKey.dbName;
+    void fixed(String setting, String message, String hint) => FluentLog.issue(FluentIssueKind.configFallback, message, database: name, subject: setting, tag: 'FluentDb:config', hint: hint);
+
+    Duration? archive = group.archiveRetention;
+    int history = group.historyLimit;
+    FluentDbConfig cfg = group.config;
+    if (archive != null && archive.isNegative) {
+      archive = const Duration(days: 30);
+      fixed('archiveRetention', 'FluentGroup.archiveRetention of "$name" is negative; the default (${archive.inDays} days) is used instead of purging every archived column at once.', 'Use a positive Duration, or null to keep archived columns until purgeArchivedColumns.');
+    }
+    if (history < 1) {
+      history = 100;
+      fixed('historyLimit', 'FluentGroup.historyLimit of "$name" is ${group.historyLimit}; at least one history entry per table is kept, the default (100) is used.', 'Use a positive number, e.g. FluentGroup(historyLimit: 100).');
+    }
+    final Duration? busy = cfg.busyTimeout;
+    final int? readers = cfg.readConnections;
+    final bool badBusy = busy != null && busy.isNegative;
+    final bool badReaders = readers != null && (readers < 0 || readers > 4);
+    if (badBusy || badReaders) {
+      if (badBusy) fixed('busyTimeout', 'FluentDbConfig.busyTimeout of "$name" is negative; the default (5 s) is used.', 'Use a positive Duration, or null to leave the SQLite default.');
+      if (badReaders) fixed('readConnections', 'FluentDbConfig.readConnections of "$name" is $readers; the pool has 0 to 4 connections, so ${readers < 0 ? 0 : 4} is used.', 'Set FluentDbConfig(readConnections: n) with n from 0 to 4.');
+      cfg = FluentDbConfig(
+        enableForeignKeys: cfg.enableForeignKeys,
+        journalMode: cfg.journalMode,
+        synchronous: cfg.synchronous,
+        cacheSize: cfg.cacheSize,
+        tempStoreInMemory: cfg.tempStoreInMemory,
+        busyTimeout: badBusy ? const Duration(seconds: 5) : busy,
+        readConnections: badReaders ? (readers < 0 ? 0 : 4) : readers,
+        trashRetention: cfg.trashRetention,
+        indexReferences: cfg.indexReferences,
+        autoRelations: cfg.autoRelations,
+        fullText: cfg.fullText,
+        diagnostics: cfg.diagnostics,
+        batchKeys: cfg.batchKeys,
+      );
+    }
+    if (identical(cfg, group.config) && identical(archive, group.archiveRetention) && history == group.historyLimit) return group;
+    return group.copyWith(config: cfg, archiveRetention: archive, historyLimit: history);
   }
 
   /// Opens the read pool of [group] (`readConnections` of the group, else of `FluentConfig`): only for a database
@@ -644,7 +708,7 @@ extension _FluentDbLifecycle on FluentDb {
       throw FluentLog.raise(
         FluentConfigException(
           dbName == null ? 'No database is open, so none can be deleted.' : 'Database "$dbName" is not open, so it cannot be deleted.',
-          code: FluentErrorCode.databaseNotFound,
+          code: FluentErrorCode.databaseNotOpen,
           hint: 'Use the dbKey of a group passed to FluentDb.init([...]).',
         ),
         tag: 'FluentDb:delete',

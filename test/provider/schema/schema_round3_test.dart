@@ -118,10 +118,10 @@ void main() {
       expect(reports.single.database, db.name);
     });
 
-    test('a database that is not asked for is not touched, a missing key gives an empty list', () async {
+    test('a database that is not asked for is not touched, a missing key is refused with databaseNotOpen (G25: never skipped silently)', () async {
       final p = DynamicProvider('t', cols(() => [FluentDbColumn.text('name')]));
       await db.open([p]);
-      expect(await FluentDb.schemaReport(dbKey: FluentDbKey('nope_${db.name}')), isEmpty);
+      await expectLater(FluentDb.schemaReport(dbKey: FluentDbKey('nope_${db.name}')), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotOpen)));
     });
   });
 

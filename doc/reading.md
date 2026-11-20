@@ -46,8 +46,11 @@ Values are Dart values and are stored like their column on save when the query r
 timestamp / soft-delete / expiry columns. `contains` / `startsWith` / `endsWith` match `%`, `_` and `\` literally;
 `like` keeps its wildcards.
 
-`FluentFilter.ids([...])` takes up to 900 keys (900 divided by the key columns for composite keys); for longer lists
-use `findByIds`, which splits them.
+`FluentFilter.ids([...])`, `inList` and `notInList` take any number of values, in every call (find, count, aggregates,
+watch, findPage, updateWhere, deleteWhere, trash, related filters). Up to 900 values are bound as arguments; a longer
+list goes into a temporary table of the connection the call runs on, so no statement ever binds more than 900
+arguments (SQLite before 3.32, e.g. Android 11 and older, refuses more than 999) and the values never appear in the
+SQL text.
 
 ## Paging
 

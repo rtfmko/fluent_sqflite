@@ -327,8 +327,8 @@ void main() {
       await expectCode(Comment(text: 'c').findParents<Article>(via: 'nope'), FluentErrorCode.invalidRelation);
     });
 
-    test('an unknown database key fails with providerNotFound', () async {
-      await expectCode(Person(name: 'a').save(dbKey: FluentDbKey('nowhere')), FluentErrorCode.providerNotFound);
+    test('an unknown database key fails with databaseNotOpen', () async {
+      await expectCode(Person(name: 'a').save(dbKey: FluentDbKey('nowhere')), FluentErrorCode.databaseNotOpen);
     });
 
     test('before init: notInitialized or providerNotFound, still through the Future', () async {

@@ -73,7 +73,8 @@ With several databases, statics take `dbKey:` when a model lives in more than on
 | `readConnections` | `null` (2, or by cores with tuning) | read-only connections per database (WAL only) |
 | `isolateMapping` | `FluentIsolateMapping.smart` | `smart` / `always` / `never`: map big lists in a background isolate (`isolateFactory`) |
 | `sliceAfterRows`, `frameBudget` | 300, 4 ms | lists mapped on the UI isolate yield to frames |
-| `transactionWatchdog` | 2 s | after this, reads waiting for a transaction run inside it (with a warning) |
+| `transactionWatchdog` | 2 s | a transaction idle this long (no database call: it waits for something outside it) gets the reads waiting for it (with a warning) |
+| `committedReadTimeout` | 30 s | sync reads wait this long for a transaction, then fail with `databaseBusy` (transient) |
 | `pauseWatchdog` | 60 s | a forgotten `pauseQueue` is resumed |
 | `trashPurgeInterval`, `trashRetention` | 24 h, 7 days | the trash is emptied of rows older than the retention |
 | `optimizeInterval` | 6 h | `PRAGMA optimize` while idle |

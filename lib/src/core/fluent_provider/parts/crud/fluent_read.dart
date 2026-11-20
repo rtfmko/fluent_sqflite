@@ -173,7 +173,7 @@ extension FluentRead<T extends FluentStorable> on FluentProvider<T> {
     if (invalid != null) throw invalid;
     _hintUnordered(call, orderBy, limit, offset);
     final List<String>? selected = columns == null ? null : _checkColumns(columns, call);
-    return _run<List<Map<String, dynamic>>>(
+    final List<Map<String, dynamic>> rows = await _run<List<Map<String, dynamic>>>(
         FluentDbAction.findMaps,
         helper: _helperFor(
           _scoped(where, _visibility(includeExpired: includeExpired)),
@@ -186,6 +186,11 @@ extension FluentRead<T extends FluentStorable> on FluentProvider<T> {
         ),
         policy: policy,
       );
+    if (selected != null) return rows;
+    // All columns were asked for: the library's own bookkeeping (expiry, sync versions) is not part of the model's fields.
+    final ({String version, String synced})? sync = _syncColumns;
+    final Set<String> hidden = {_expiryColumn, ?sync?.version, ?sync?.synced};
+    return [for (final Map<String, dynamic> row in rows) row.keys.any(hidden.contains) ? {for (final MapEntry<String, dynamic> e in row.entries) if (!hidden.contains(e.key)) e.key: e.value} : row];
   }
 
   /// Models whose full-text indexed columns (`FluentIndex.fullText`) contain every word of [text], best matches first
@@ -217,7 +222,8 @@ extension FluentRead<T extends FluentStorable> on FluentProvider<T> {
       return find(where: matching, orderBy: orderBy, limit: limit, offset: offset, includeExpired: includeExpired, relations: relations, maxDepth: maxDepth, policy: policy);
     }
     // Ranked: join the hits of the FTS table (their columns are renamed, so the caller's columns stay unambiguous).
-    final FluentFilter scoped = _resolveRelated(_scoped(where, _visibility(includeExpired: includeExpired)));
+    final ({FluentFilter filter, void Function() release}) detached = _resolveDetached(_scoped(where, _visibility(includeExpired: includeExpired)));
+    final FluentFilter scoped = detached.filter;
     final String t = tableName.quotedIdentifier;
     final String fts = _ftsTable.quotedIdentifier;
     final bool ranked = module == 'fts5';
@@ -240,7 +246,7 @@ extension FluentRead<T extends FluentStorable> on FluentProvider<T> {
       policy: policy,
       relations: relations,
       maxDepth: maxDepth,
-    );
+    ).whenComplete(detached.release);
   }
 
   /// The values of [column] of the rows matching [where], as Dart values ([distinct]: each value once). A value that
@@ -429,7 +435,10 @@ extension FluentRead<T extends FluentStorable> on FluentProvider<T> {
           ..addAll([for (int j = 0; j < i; j++) cursor.key[cols[j]]])
           ..add(cursor.key[cols[i]]);
       }
-      return FluentFilter(parts.map((p) => '($p)').join(' OR '), args);
+      final FluentFilter lexicographic = FluentFilter(parts.map((p) => '($p)').join(' OR '), args);
+      if (cols.length == 1) return lexicographic;
+      // `k1 >= v1` lets SQLite seek in the key index instead of scanning it from the start on every page.
+      return FluentFilter('${cols.first.quotedIdentifier} $op= ? AND (${lexicographic.whereClause})', [cursor.key[cols.first], ...lexicographic.whereArgs]);
     }
 
     if (tieKeys.isEmpty) return tie(keys); // ordered by the (single) key itself
@@ -439,7 +448,9 @@ extension FluentRead<T extends FluentStorable> on FluentProvider<T> {
       final FluentFilter sameNull = FluentFilter('$c IS NULL AND (${rest.whereClause})', rest.whereArgs);
       return descending ? sameNull : FluentFilter('(${sameNull.whereClause}) OR $c IS NOT NULL', sameNull.whereArgs);
     }
-    final FluentFilter beyond = FluentFilter('$c $op ? OR ($c = ? AND (${rest.whereClause}))', [cursor.value, cursor.value, ...rest.whereArgs]);
+    // `c >= v` lets SQLite seek to the cursor in the index of [column]: the OR alone made it scan the index from the
+    // first row on every page (a page of a big table cost as much as all the pages before it).
+    final FluentFilter beyond = FluentFilter('$c $op= ? AND ($c $op ? OR ($c = ? AND (${rest.whereClause})))', [cursor.value, cursor.value, cursor.value, ...rest.whereArgs]);
     return descending ? FluentFilter('${beyond.whereClause} OR $c IS NULL', beyond.whereArgs) : beyond;
   }
 
@@ -466,6 +477,7 @@ extension FluentRead<T extends FluentStorable> on FluentProvider<T> {
         title: 'Give paged reads of "$tableName" an orderBy',
         details: '$call(${offset != null ? 'offset' : 'limit'}: ...) without orderBy: SQLite returns rows in no defined order, so pages can '
             'repeat or skip rows (after writes, VACUUM or an index change). For "next page" lists findPage is stable even while rows are added.',
+        fix: "Pass orderBy (e.g. orderBy: '$key') to $call, or page with findPage.",
         code: "await provider.$call(orderBy: '$key', limit: 20, offset: page * 20);\n"
             '// or, stable while rows change:\n'
             "final FluentPage<$modelType> page = await provider.findPage(orderBy: '$key', limit: 20, after: previous?.next);",
@@ -507,8 +519,14 @@ extension FluentRead<T extends FluentStorable> on FluentProvider<T> {
   /// ```dart
   /// await posts.execute('UPDATE "posts" SET "views" = "views" + 1 WHERE "id" = ?', arguments: [post.id]);
   /// ```
-  Future<int> execute(String sql, {List<Object?>? arguments, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async =>
-      _run<int>(FluentDbAction.execute, helper: TableHelper(sql: sql, whereArgs: _sqlArgs(arguments)), policy: policy, tag: tag);
+  Future<int> execute(String sql, {List<Object?>? arguments, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
+    // Raw SQL may write an expiry into any table of the database: every later read checks it again.
+    for (final FluentProvider p in FluentDbInternals.providersOf(dbName)) {
+      p.markRawWrite();
+    }
+    markRawWrite();
+    return _run<int>(FluentDbAction.execute, helper: TableHelper(sql: sql, whereArgs: _sqlArgs(arguments)), policy: policy, tag: tag);
+  }
 }
 
 /// Tells read-only SQL from SQL that writes, for [FluentRead.rawQuery] (the driver offers no read-only check). A token

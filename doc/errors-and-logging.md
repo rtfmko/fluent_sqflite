@@ -11,15 +11,31 @@ Every error is a `FluentException` with:
 
 | Class | Typical codes |
 |---|---|
-| `FluentConfigException` | `notInitialized`, `providerNotFound`, `ambiguousProvider`, `invalidDatabaseName`, `databaseNotFound` |
+| `FluentConfigException` | `notInitialized`, `providerNotFound`, `ambiguousProvider`, `invalidDatabaseName`, `databaseNotFound` (missing read-only file), `databaseNotOpen` (a `dbKey` that is not open), `databaseCorrupt` (a damaged file at `init`) |
 | `FluentSchemaException` | `schemaConflict`, `migrationFailed` |
 | `FluentArgumentException` | `invalidArgument`, `invalidKey`, `unsupportedValue` |
 | `FluentConstraintException` | `uniqueViolation`, `foreignKeyViolation`, `notNullViolation`, `checkViolation` |
-| `FluentQueryException` | `sqlError`, `noSuchTable`, `readOnly` |
+| `FluentQueryException` | `sqlError`, `noSuchTable`, `readOnly`, `databaseCorrupt` (a damaged file found after the start) |
 | `FluentRelationException` | `invalidRelation` |
 | `FluentSyncException` | `syncFailed`, `apiError` (`statusCode`), `syncNotSupported` |
 | `FluentCancelledException` | `engineClosed`, `syncCancelled` |
-| `FluentEngineException` | `engineError` |
+| `FluentEngineException` | `deadlock` (a call that would close a wait cycle between databases is refused), `databaseBusy` (a sync read waited longer than `committedReadTimeout` for a transaction; transient), `engineError` |
+
+### Database not open, damaged file
+
+A call that names a database (`dbKey:`) that is not open fails with `databaseNotOpen`; the hint lists the open ones. `providerNotFound` is only for a model or table without a provider in an open database.
+
+SQLite reporting the file as damaged ("file is not a database", `SQLITE_NOTADB` / `SQLITE_CORRUPT`) fails `init` with `databaseCorrupt`; the library never deletes the file. Restore a backup, or start empty on purpose:
+
+```dart
+try {
+  await FluentDb.init([FluentGroup(dbKey: AppDb.main, providerList: [...])]);
+} on FluentException catch (e) {
+  if (e.code == FluentErrorCode.databaseCorrupt) {
+    // restore a backup, or ask the user and start again with resetOnSchemaError: true (all data in the file is lost)
+  }
+}
+```
 
 ```dart
 try {
@@ -92,4 +108,4 @@ Output goes through `debugPrint`, with colors only where the console shows them 
 SQL arguments are hidden from `args [` to the end of an error text. The `error` of a `FluentLogRecord` / `FluentIssue`
 that is not a `FluentException` arrives as a `FluentRedactedError` (`type` and the redacted `message`) unless
 `FluentLog.showSqlArguments` is on; database paths are shown only then as well (`<path hidden>`; `FluentGroup.toString`
-never shows the directory).
+never shows the directory). The title, details and fix of issues delivered through `onIssue` / `report()` are redacted the same way.

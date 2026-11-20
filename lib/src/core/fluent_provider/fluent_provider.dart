@@ -33,6 +33,7 @@ part 'parts/fluent_crud_helper.dart';
 part 'parts/fluent_mapper.dart';
 part 'parts/fluent_row_mapping.dart';
 part 'parts/fluent_schema.dart';
+part 'parts/fluent_value_lists.dart';
 part 'parts/relations/fluent_relation_filter.dart';
 part 'parts/relations/fluent_legacy_names.dart';
 part 'parts/relations/fluent_relation_graph.dart';
@@ -99,7 +100,28 @@ abstract class FluentProvider<T extends FluentStorable> {
   }
 
   /// How long rows of this table stay in the trash: table → database → global setting.
-  Duration get _trashRetention => _tableConfig.trashRetention ?? FluentEngine().dbConfig(dbName)?.trashRetention ?? FluentEngine().config.trashRetention;
+  /// A negative value (it would purge the whole trash at once) is skipped with a `configFallback` warning.
+  Duration get _trashRetention {
+    final List<(String, Duration?)> levels = [
+      ('FluentTableConfig', _tableConfig.trashRetention),
+      ('FluentDbConfig', FluentEngine().dbConfig(dbName)?.trashRetention),
+      ('FluentConfig', FluentEngine().config.trashRetention),
+    ];
+    for (final (String level, Duration? value) in levels) {
+      if (value == null) continue;
+      if (!value.isNegative) return value;
+      FluentLog.issue(
+        FluentIssueKind.configFallback,
+        '$level.trashRetention of "$tableName" is negative; it would purge the whole trash at once, so the next level (default 7 days) is used.',
+        database: dbName,
+        table: tableName,
+        subject: 'trashRetention',
+        tag: '$tableName:config',
+        hint: 'Use a positive Duration; Duration.zero purges the trash at the next maintenance on purpose.',
+      );
+    }
+    return const Duration(days: 7);
+  }
 
   /// The default execution policy of this table's calls: what a call's `policy:` leaves unset is taken from here, then
   /// from `FluentConfig.defaultPolicy` (call → provider → global).
@@ -146,7 +168,14 @@ abstract class FluentProvider<T extends FluentStorable> {
     enumValues: modelSample.enumValues,
     linkNames: [for (final FluentRelationLink link in _links) link.name],
     factory: fromCacheJson,
+    hidden: _hiddenColumns,
   );
+
+  /// Columns of the library's own bookkeeping that `fromCacheJson` never receives: the expiry and the sync versions.
+  Set<String> get _hiddenColumns {
+    final ({String version, String synced})? sync = _syncColumns;
+    return {_expiryColumn, if (sync != null) ...[sync.version, sync.synced]};
+  }
 
   /// The plan with [isolateFactory], for a background isolate (call only when it is set).
   _FluentRowPlan<T> get _isolatePlan => _plan.withFactory(isolateFactory!);
@@ -170,6 +199,18 @@ abstract class FluentProvider<T extends FluentStorable> {
 
   /// The column of the row's expiry (`FluentStorable.expiryColumn`).
   late final String _expiryColumn = modelSample.expiryColumn;
+
+  /// Whether rows of the table may carry an expiry (`timeToLive`): reads hide expired rows only then. `true` until
+  /// the start looked ([FluentProviderInternals.detectExpiringRows], one probe of the partial expiry index); set again
+  /// by every write of a row with an expiry and by raw SQL ([execute]). Without it every read of a table that never
+  /// uses `timeToLive` paid `expiry IS NULL OR expiry > now`, which no index serves: a `count()` read every row.
+  bool _mayExpire = true;
+
+  /// Whether the trash of the table may hold rows (soft delete): a save looks for its keys in the trash only then. Same
+  /// life as [_mayExpire]: looked at by the start (one probe of the partial trash index), set again by every soft
+  /// delete ([_softDeleteWhere], cascades and sync included) and by raw SQL. Saves on a table with an empty trash
+  /// skip one query each.
+  bool _mayHaveTrash = true;
 
   /// The soft-delete column, or `null` when the model does not support soft delete.
   late final String? _softDeleteColumn = switch (modelSample) {
@@ -223,6 +264,10 @@ abstract class FluentProvider<T extends FluentStorable> {
   /// Dart value kinds of columns by name (see [FluentValueKind]).
   Map<String, FluentValueKind> _valueKinds = const {};
 
+  /// The numeric columns (INTEGER / REAL) by name, for the write check ([FluentSqlSanitizer.checkStored]); a converter
+  /// column is judged by its converter's `sqlType` (the column type follows it).
+  Map<String, FluentDbDataType> _numericColumns = const {};
+
   /// UNIQUE columns of a soft-deletable table: enforced by partial indexes over the rows that are not in the trash.
   List<String> _softUniqueColumns = const [];
 
@@ -234,6 +279,12 @@ abstract class FluentProvider<T extends FluentStorable> {
 
   /// Relations declared by this provider, resolved at init (see [buildFluentRelationGraph]).
   List<FluentRelationLink> _links = const [];
+
+  Set<String>? _keyNames;
+  Object? _keyNamesOf;
+  Set<String>? _linkNames;
+  List<FluentRelationLink>? _linkNamesOf;
+  int _linkNamesCount = -1;
 
   /// Owned-children relations of other providers whose reference column lives in this table.
   List<FluentRelationLink> _incomingLinks = const [];
@@ -380,6 +431,30 @@ abstract class FluentProvider<T extends FluentStorable> {
 
 /// Members the library itself uses (database binding, keys, task execution); not part of the public API.
 extension FluentProviderInternals<T extends FluentStorable> on FluentProvider<T> {
+  /// Looks whether any row has an expiry and whether the trash holds rows (after the schema sync of the start; see
+  /// [FluentProvider._mayExpire], [FluentProvider._mayHaveTrash]); both probes use partial indexes. A failed probe
+  /// keeps the check.
+  Future<void> detectRowFlags(DatabaseExecutor db) async {
+    Future<bool> any(String column) async {
+      if (!tableColumns.contains(column)) return false;
+      try {
+        return (await db.rawQuery('SELECT 1 FROM ${tableName.quotedIdentifier} WHERE ${column.quotedIdentifier} IS NOT NULL LIMIT 1')).isNotEmpty;
+      } catch (_) {
+        return true;
+      }
+    }
+
+    _mayExpire = await any(_expiryColumn);
+    final String? deleted = _softDeleteColumn;
+    _mayHaveTrash = deleted != null && await any(deleted);
+  }
+
+  /// Marks the table as possibly holding rows with an expiry or in the trash (raw SQL may have written them).
+  void markRawWrite() {
+    _mayExpire = true;
+    _mayHaveTrash = true;
+  }
+
   /// The model type of this provider.
   Type get modelType => _modelType;
 
@@ -454,7 +529,8 @@ extension FluentProviderInternals<T extends FluentStorable> on FluentProvider<T>
   /// ```dart
   /// final FluentFilter selected = keysFilter([1, 2, 3]); // users: FluentFilter.ids([1, 2, 3])
   /// ```
-  /// For very long lists, split them (SQLite limits the number of arguments of one statement).
+  /// Always bound arguments: internal callers split long lists ([keysPerChunk]); users pass [FluentFilter.ids], which
+  /// takes any number of keys.
   FluentFilter keysFilter(Iterable<Object?> ids) => _keysFilterOf(ids);
 
   /// [keysFilter]; with [stored] the key values are SQLite values (read from rows) used as they are.
@@ -463,7 +539,7 @@ extension FluentProviderInternals<T extends FluentStorable> on FluentProvider<T>
     if (!hasCompositeKey) {
       final String column = primaryKeyColumns.first.name;
       final List<Object> values = [for (final Object? id in ids) (_normalizeKey(id)[column]) ?? (throw _keyError(id, 'The key value is null.'))];
-      return stored ? _storedIn(column, values) : FluentFilter.inList(column.quotedIdentifier, values);
+      return stored ? _storedIn(column, values) : _dartIn(column, values);
     }
     // One flat `(a = ? AND b = ?) OR ...`: nesting `or` would deepen the parentheses with every key, and old SQLite
     // parsers overflow their stack on a few hundred levels.
@@ -490,7 +566,14 @@ extension FluentProviderInternals<T extends FluentStorable> on FluentProvider<T>
   }
 
   /// The names of all primary key columns.
-  Set<String> get keyColumnNames => {for (final FluentDbColumn c in primaryKeyColumns) c.name};
+  Set<String> get keyColumnNames {
+    // Asked for every row and filter: built once per key definition (the schema may be rebuilt, then it is again).
+    final Set<String>? cached = _keyNames;
+    if (cached != null && identical(_keyNamesOf, _cachedPrimaryKeys ?? _cachedPrimaryKey)) return cached;
+    final Set<String> names = Set.unmodifiable({for (final FluentDbColumn c in primaryKeyColumns) c.name});
+    _keyNamesOf = _cachedPrimaryKeys ?? _cachedPrimaryKey;
+    return _keyNames = names;
+  }
 
   /// How many keys fit into one statement of [chunkSize] SQL variables.
   int keysPerChunk(int chunkSize) => (chunkSize ~/ primaryKeyColumns.length).clamp(1, chunkSize);
@@ -530,13 +613,35 @@ extension FluentProviderInternals<T extends FluentStorable> on FluentProvider<T>
   /// caller receives it). Errors created inside wait for this point ([FluentLog.raise] defers), so a merged batch
   /// that fails and is re-run call by call logs only the calls that really fail.
   Future<dynamic> internalExecute(FluentTask task) async {
+    final _FluentValueLists lists = _FluentValueLists();
     try {
-      return await runZoned(() => _route((task.helper?.deferred?.isEmpty ?? true) ? task : _withDeferredResolved(task)), zoneValues: {FluentLog.deferKey: true});
+      return await runZoned(() {
+        final FluentTask resolved = (task.helper?.deferred?.isEmpty ?? true) ? task : _withDeferredResolved(task);
+        lists.adoptFrom(task.helper?.sql);
+        // Without long lists the task starts right away (no extra asynchronous step).
+        return lists.hasPending ? _flushValueLists().then((_) => _route(resolved)) : _route(resolved);
+      }, zoneValues: {FluentLog.deferKey: true, _FluentValueLists._key: lists});
     } catch (e, s) {
-      final Object error = e is DatabaseException ? _sqlError(e, s, task.action.name) : e;
+      final Object error = switch (e) {
+        DatabaseException() => _sqlError(e, s, task.action.name),
+        FluentException() => e,
+        // Code of the app (buildJson, a converter, fromCacheJson, a callback) threw: the caller gets a typed error.
+        _ => FluentArgumentException(
+          '$modelType',
+          '${task.action.name} on "$tableName" failed because code of the app threw ${e.runtimeType}: ${FluentLog.redact('$e')}',
+          hint: 'Check ${modelType.toString()}.buildJson / fromCacheJson and the converters of "$tableName": they must not throw. The original error is in cause.',
+          cause: e,
+          stackTrace: s,
+        ),
+      };
       if (!task.isBatched) FluentLog.report(error, stackTrace: s, tag: '$tableName:${task.action.name}');
       if (identical(error, e)) rethrow;
       Error.throwWithStackTrace(error, s);
+    } finally {
+      if (lists.hasTables) {
+        final DatabaseExecutor? db = FluentTransactionScope.of(dbName)?.txn ?? FluentReadScope.of(dbName) ?? _db;
+        if (db != null) await lists.drop(db);
+      }
     }
   }
 

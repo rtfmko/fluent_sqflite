@@ -118,7 +118,7 @@ void main() {
       await tasks.save(Task(title: 'second'));
       await tasks.syncWithServer(strategy: FluentSyncStrategy.push, onPush: (_) async => throw StateError('offline'));
       await pumpUntil(() => seen.last.state == FluentSyncState.failed);
-      expect(seen.last.lastError, isA<StateError>());
+      expect(seen.last.lastError, isA<FluentSyncException>().having((e) => e.cause, 'cause', isA<StateError>()), reason: 'G13: typed, the callback error kept as cause');
       expect(seen.last.pending, 1);
       await sub.cancel();
     });

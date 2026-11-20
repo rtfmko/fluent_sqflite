@@ -7,7 +7,7 @@ and no transaction: every table keeps a fingerprint of its model, steps, relatio
 | Change in the model | What happens |
 |---|---|
 | new field | column added (`NOT NULL` without default stays nullable until every row has a value) |
-| `oldName: 'x'` on a column | column renamed, data kept (a new column under the old name is added empty; two columns with the same `oldName`: the first gets the data, the second stays empty with a `schemaFallback`) |
+| `oldName: 'x'` on a column | column renamed, data kept (a new column under the old name is added empty; two columns with the same `oldName`: the first gets the data, the second stays empty with a `schemaFallback`); onto a name a live column holds: the old holder is archived ("replaced by ...") and the rename runs; two columns that swap names exchange their values once |
 | type / key / constraint / `CHECK` changed | table rebuilt with its data, triggers, views and your own indexes |
 | field removed | column **archived** as `__fluent_removed_<name>_r<rev>` (renamed in place when SQLite can, deleted after `archiveRetention`, default 30 days) |
 | new index | created |
@@ -20,6 +20,8 @@ and no transaction: every table keeps a fingerprint of its model, steps, relatio
 * **Rows a new constraint rejects** (a new `CHECK`, a new `UNIQUE`) are moved to the quarantine table
   `__fluent_rejected_<table>_r<rev>` with a warning that says how to fix and restore them. When *every* row would be
   rejected the schema itself is probably wrong: the change fails and the table stays as it was.
+  Children of a quarantined parent stay in place with their reference: it is reported as `danglingReferences` (naming
+  the quarantine table, with a fix) and is whole again once the parent row is moved back.
 * **Changes that keep the data but probably not as meant** are reported with code to copy: a column type that
   changes on a table with rows (`columnTypeChanged`: convert the values with a step), a removed and an added
   column of the same type (`possibleRename`: bring the values back with `restoreColumns`, and use `oldName` next

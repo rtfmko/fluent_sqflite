@@ -126,6 +126,16 @@ extension FluentSchema<T extends FluentStorable> on FluentProvider<T> {
     final T model = modelSample;
 
     for (final FluentDbColumn col in model.tableSchema) {
+      if (finalMap.containsKey(col.name)) {
+        FluentLog.issue(
+          FluentIssueKind.schemaFallback,
+          'Column "${col.name}" is declared twice in the tableSchema of "$tableName"; the last declaration is used.',
+          table: tableName,
+          subject: col.name,
+          tag: '$tableName:schema',
+          hint: 'Declare each column once in ${modelSample.runtimeType}.tableSchema.',
+        );
+      }
       finalMap[col.name] = col;
     }
 
@@ -184,6 +194,13 @@ extension FluentSchema<T extends FluentStorable> on FluentProvider<T> {
         if (c.valueKind != null && !_converters.containsKey(c.name)) c.name: c.valueKind!,
     };
 
+    // A value-kind column (a DateTime as ISO text, a BigInt) says by its kind what it stores: no numeric check.
+    _numericColumns = {
+      for (final FluentDbColumn c in declaredSchema)
+        if (_converters.containsKey(c.name) || c.valueKind == null)
+          if ((_converters[c.name]?.sqlType ?? c.type) case final FluentDbDataType t when t == FluentDbDataType.integer || t == FluentDbDataType.real) c.name: t,
+    };
+
     // A default is stored the way the row writer stores that value (converter, codec with this table's settings).
     final List<FluentDbColumn> finalizedSchema = [for (final FluentDbColumn c in declaredSchema) _withStoredDefault(c)];
 
@@ -210,7 +227,7 @@ extension FluentSchema<T extends FluentStorable> on FluentProvider<T> {
     } catch (e) {
       FluentLog.issue(
         FluentIssueKind.schemaFallback,
-        'The default value ${value.runtimeType} of "$tableName.${column.name}" cannot be stored: $e',
+        'The default value ${value.runtimeType} of "$tableName.${column.name}" cannot be stored: ${FluentLog.redact('$e')}',
         table: tableName,
         tag: '$tableName:schema',
         hint: 'Use a default the column stores as it is (String, int, double, bool), or the value its converter takes.',

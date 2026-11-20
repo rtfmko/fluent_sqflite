@@ -110,7 +110,8 @@ extension FluentAggregates<T extends FluentStorable> on FluentProvider<T> {
         if (!flags.containsKey(c) && _mayHoldDateTimes(c)) flags[c] = (utc: '__fluent_u${flags.length}', local: '__fluent_l${flags.length}');
       }
     }
-    final FluentFilter scoped = _resolveRelated(_scoped(where, _visibility(includeExpired: includeExpired)));
+    final ({FluentFilter filter, void Function() release}) detached = _resolveDetached(_scoped(where, _visibility(includeExpired: includeExpired)));
+    final FluentFilter scoped = detached.filter;
     final String group = groupBy.map((c) => c.quotedIdentifier).join(', ');
     String sql =
         'SELECT ${[
@@ -144,7 +145,7 @@ extension FluentAggregates<T extends FluentStorable> on FluentProvider<T> {
       FluentDbAction.aggregate,
       helper: TableHelper(sql: sql, whereArgs: args, shape: shape, orderBy: orderBy, limit: limit),
       policy: policy,
-    );
+    ).whenComplete(detached.release);
     final List<_MappingWarning> warnings = [];
     // The tag of a column from the flags of its group: only one kind present means that kind.
     Object? flagged(Map<String, dynamic> row, String column) {

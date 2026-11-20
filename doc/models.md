@@ -115,9 +115,11 @@ Built in: `FluentEnumConverter` (what `enumValues` uses: by name, or `byName: fa
 `FluentIsoDateTimeConverter`, `FluentEpochDateTimeConverter` (`utc: true` reads UTC times back), `FluentJsonConverter`. Write your own by extending
 `FluentConverter<D, S>` (`toSql`, `fromSql`, `sqlType`).
 
-Built-in types: a `RegExp` keeps its flags; a `double` NaN cannot be stored (the save fails with `unsupportedValue`;
+Built-in types: a `RegExp` keeps its flags; text that is no number, or an integer beyond int64, cannot go into an `INTEGER` / `REAL` column (`unsupportedValue`; numeric text converts), nor can a `String` with a lone UTF-16 surrogate; a `double` NaN cannot be stored (the save fails with `unsupportedValue`;
 infinity is fine); the timestamp format keeps `DateTime` in milliseconds (microseconds are cut and reported once
-per column as `precisionLost`: use iso8601 or a converter to keep them). A stored enum value the enum no longer has reads as `null` with a `mappingValue` warning whose
+per column as `precisionLost`: use iso8601 or a converter to keep them). A local `DateTime` stored as ISO text has no
+offset: in the hour repeated when the clocks go back it reads back one hour earlier (same wall-clock time; reported as
+`precisionLost`) — store UTC values or use the timestamp format when the instant matters. A stored enum value the enum no longer has reads as `null` with a `mappingValue` warning whose
 hint has the `UPDATE` that fixes the rows; in a NOT NULL column it is a `FluentSchemaException`.
 ISO-8601 text written by the library always has six fraction digits (`2026-01-02T03:04:05.000000Z`); three-digit values of
 an earlier version are padded once at start (`storedFormatAdopted`; a read-only database gets a `mappingValue` warning
@@ -190,8 +192,10 @@ Settings live on three levels; a narrower one wins:
 | table | the model's `FluentTableConfig get tableConfig` | how dates and enums are stored, `isolateMapping` |
 
 `FluentDb.init(groups)` without `config:` keeps the settings in use (the last `configure` / `init(config:)`), not the defaults;
-the same for `planMigrations`. `trashPurgeInterval`, `optimizeInterval`, `pauseWatchdog` and `transactionWatchdog`: `null`
-switches the timer off, zero or a negative value falls back to the default (`configFallback`).
+the same for `planMigrations`. `trashPurgeInterval`, `optimizeInterval`, `pauseWatchdog`, `transactionWatchdog` and `committedReadTimeout`: `null`
+switches the timer off, zero or a negative value falls back to the default (`configFallback`). `trashPurgeInterval` and
+`optimizeInterval` are at least 1 s (`FluentConfig.minMaintenanceInterval`); a shorter one is raised to it
+(`configFallback`) — tests move `db.clock` instead of waiting.
 
 `trashRetention`, `indexReferences` and `fullText` exist on all three levels; on the database and table levels `null`
 follows the wider one (the global values are never null),

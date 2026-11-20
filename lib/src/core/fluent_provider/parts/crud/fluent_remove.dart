@@ -64,7 +64,7 @@ extension _FluentRemoveRows<T extends FluentStorable> on FluentProvider<T> {
   /// `deletedAt` (see [_applyDeleteStamps]).
   Future<int> _removeItems(List<T> items, {required bool hard, Object? tag, ExecutionPolicy policy = const ExecutionPolicy()}) async {
     final List<Object> ids = [for (final T item in items) ?(item.primaryKeyValue as Object?)];
-    if (ids.isEmpty) return 0;
+    if (items.isEmpty) return 0; // keys are read again when the delete runs: a save called before it may give one (G7)
     final bool soft = !hard && _softDeleteColumn != null;
     return _run<int>(soft ? FluentDbAction.delete : FluentDbAction.hardDelete, data: items, helper: TableHelper(arguments: ids), policy: policy, tag: tag);
   }

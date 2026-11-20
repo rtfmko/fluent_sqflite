@@ -39,6 +39,9 @@ metadata:
   savepoint are taken back. `FluentDb.clear` inside a transaction runs in it. `clear`, `cleanOrphans`,
   `purgeArchivedColumns` inside another running task are skipped (`ignoredCall`); `purgeArchivedColumns` inside a
   transaction too: call it after.
+- Unawaited calls inside one transaction run in call order. A call that would close a wait cycle between databases fails
+  with `FluentErrorCode.deadlock` (`FluentEngineException`): take databases in one order or call into the other one
+  after the transaction.
 - Handle `FluentConstraintException` (`code == FluentErrorCode.uniqueViolation`, …) where a user can cause it.
 
 - `conflictOn` gives the model the key of the matched row. A nested `FluentDb.transaction` is a savepoint.

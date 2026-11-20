@@ -76,11 +76,12 @@ Hints are collected according to `FluentDiagnostics` (`FluentConfig.diagnostics`
 | `relationSoftDelete` | warning | — | once per run | A soft-deletable model owns children without soft delete (or the other way round). |
 | `foreignKeysOff` | warning | — | once per run | Foreign keys are off: owned children are not deleted with their owner by SQLite. |
 | `relationValue` | warning | — | once per run | A relation field held a value of the wrong type; the relation was skipped for that model. |
+| `relationListKept` | warning | — | once per run | A model the app built (not read, e.g. rebuilt with `copyWith` from a read without the relation) was saved with an empty relation list while children / links are stored for it; they were kept. Clear on purpose with `relationSync: FluentRelationSyncMode.replace`, or with detach / delete. |
 | `conflictOn` | warning | — | once per run | `conflictOn` columns are not unique: one save may update several rows. |
 | `deletedAtIgnored` | warning | — | once per run | A save carried `deletedAt`; the rows stay live (delete them to move them to the trash). |
 | `trashStays` | warning | — | once per run | Restored rows stay in the trash because their owner is deleted. |
 | `mappingValue` | warning | — | once per run | A stored value could not be read as the model expects; the field got a fallback. |
-| `precisionLost` | warning | — | once per run | A saved value lost part of itself in its stored form (the microseconds of a `DateTime` in the timestamp format, which keeps milliseconds); the rest was saved. |
+| `precisionLost` | warning | — | once per run | A saved value lost part of itself in its stored form (the microseconds of a `DateTime` in the timestamp format, which keeps milliseconds; the instant of a local `DateTime` stored as ISO text in the hour repeated when the clocks go back, which reads back one hour earlier); the rest was saved. |
 | `batchKeysMismatch` | hint | — | once per run | Merged `findById` lookups read the keys of the stored rows (`FluentBatchKeys.fromRows`), but a returned row matched none of the requested keys (another form of the same key, e.g. case-insensitive); those keys were looked up call by call. |
 | `legacyNameAdopted` | autoFix | — | every time | A table, link table or column a 1.x database stored under its 1.x name (derived from a type or relation name with the old rule) was renamed to the current name; its data is kept. |
 | `storedFormatAdopted` | autoFix | — | every time | Values an earlier version stored in an older form were rewritten once at start into the current form without changing their meaning (soft-delete stamps from ISO text to epoch milliseconds; ISO-8601 dates padded to six fraction digits). |
@@ -96,6 +97,7 @@ Hints are collected according to `FluentDiagnostics` (`FluentConfig.diagnostics`
 | `syncStoreFailed` | warning | — | every time | `watchRemote` could not store the answer of `fetch`. |
 | `shutdownTimeout` | warning | — | every time | The engine stopped before every queued call finished. |
 | `closeFailed` | warning | — | every time | A connection could not be closed (harmless). |
+| `clearRetried` | warning | — | every time | `FluentDb.clear` could not delete a table at first (an error other than a restricting foreign key) and emptied it in a later pass; the result is complete, but the error was real. |
 | `fileDeleteFailed` | error | — | every time | A database file could not be deleted (`deleteDatabases(reopen: false)`, `resetOnSchemaError`); `deleteDatabases(reopen: true)` throws instead, so signed-out data is never served. |
 | `maintenanceFailed` | error | — | every time | Start-up or periodic maintenance failed (expired rows, dangling references, trash). |
 | `relationLoadFailed` | error | — | every time | Loading a relation failed; it was left unloaded. |

@@ -1,3 +1,158 @@
+## 2.0.0-dev.3 (pre-release for testing)
+
+No renames or removals; every call of 2.0.0-dev.2 still compiles. An app on dev.2 may notice these behaviour changes
+(listed in `doc/ai/migrations.md`, "Behaviour changes"):
+
+* `FluentFilter.ids` / `inList` / `notInList` take any number of values (dev.2 refused more than 900 keys in `ids`);
+  adjacent deletes / updates share one transaction (each call in its own SAVEPOINT).
+* A `dbKey` that is not open fails with `databaseNotOpen`, a damaged file fails `init` with `databaseCorrupt` (see
+  "Error codes").
+* An empty relation list on a model the app built (no read behind it) no longer removes the stored children / links
+  (`relationListKept`).
+* Sync reads wait for a running transaction to commit instead of being let into it (`databaseBusy` after
+  `committedReadTimeout`).
+* Guarantees round: a wait cycle between databases fails with `deadlock`; the `failed` event of `watchRemote` carries a
+  `FluentSyncException`; non-numeric text for a numeric column is refused; `fromCacheJson` no longer receives
+  `expiry_date` / `sync_version` / `synced_version`; exceptions of app code inside a write arrive as
+  `FluentArgumentException`.
+
+### Error codes
+
+* New `FluentErrorCode.databaseNotOpen`: a call that names a database (`dbKey`) that is not open (`find` / `save` / `providerOf` with `dbKey:`, `clear`, `deleteDatabases`, `transaction(dbKey:)`, extensions with `dbKey:`; `cleanOrphans`, `schemaReport` and `purgeArchivedColumns`, which skipped it silently) fails with it instead of `providerNotFound`, `databaseNotFound` or a `FluentArgumentException`. `databaseNotFound` now means only a missing read-only file; `providerNotFound` a model / table without a provider.
+* New `FluentErrorCode.databaseCorrupt`: SQLite reporting a damaged / non-database file (`SQLITE_NOTADB`, `SQLITE_CORRUPT`) fails `init` (was `invalidConfiguration`) and later statements (`FluentQueryException`) with it; the hint says restore a backup or use `resetOnSchemaError: true`; the file is never deleted implicitly.
+* New issue kind `clearRetried` (warning): `FluentDb.clear` publishes it when a table's delete failed once (not a restricting foreign key) and a later pass emptied it, so an absorbed I/O error is no longer silent.
+* Migration table rows in `doc/ai/migrations.md` for both codes.
+* New `FluentErrorCode.databaseBusy` (`FluentEngineException`, transient): a sync read waited longer than the new
+  `FluentConfig.committedReadTimeout` (default 30 s) for a transaction on its database and was not run (see "Sync").
+
+### ⚡ Performance and limits (stress tests)
+
+* Long value lists work in every public call: `FluentFilter.ids` / `inList` / `notInList` with more than 900 values go
+  into a temporary table of the connection (read-only pool connections and transactions included), so no statement
+  binds more than 900 arguments on any SQLite version. `deleteWhere(FluentFilter.ids(10000 keys))` used to throw.
+* The scheduler no longer scans every waiting read for each read it starts: a burst of thousands of reads that cannot
+  be merged took quadratic time (8000 distinct reads: 9.8 s, now 1.8 s). The queue keeps reads by (priority, weight)
+  class; the order is unchanged.
+* Adjacent writes that cannot be merged into one statement (deletes, updates, saves of other tables of the database)
+  run in one transaction of up to 64 calls, each in its own SAVEPOINT: a loop of `deleteById` no longer commits once
+  per call. A failing call fails alone; when the transaction itself fails, the calls run again one by one.
+* Reads of a table whose rows have no expiry skip `expiry IS NULL OR expiry > now` (no index serves it: a `count()`
+  read every row). The table is checked at start (one probe of the partial expiry index); a save with `timeToLive`
+  and raw `execute` bring the check back.
+* Saving owned lists and many-to-many lists read the stored children / links once per owner (N+1): now once per
+  chunk of owners, and the links of all owners are inserted in one batch (2000 article graphs: 4000 reads and 2080
+  batches before, 20 reads and 90 batches now; 2.4 times faster).
+* Saves on a soft-delete table skip the trash lookup while the trash is empty (checked at start by the partial trash
+  index; every soft delete and raw `execute` bring it back): one statement less per save.
+* Batch writes build each `UPDATE` / `INSERT` once per row shape instead of once per row; rows become models with one
+  copy instead of up to three (bulk insert about 1.5 times faster).
+* Calls inside a transaction (`FluentDb.transaction`, write groups) send their `SAVEPOINT` with their first statement
+  and their `RELEASE` with the next statement of the transaction (the commit releases the last one): two round trips
+  to SQLite less per call. A failing call is still rolled back to its savepoint at once (a statement of its own).
+* `findPage` seeks to the cursor in the index of its `orderBy` column (`c >= v AND (...)`): the cursor condition alone
+  made SQLite scan the index from the first row on every page, so walking a big table was quadratic (1 000 000 rows:
+  25 ms per page at the end, now about 2 ms for every page).
+* Expensive counts (2 ms or more on average) read again before anything changed are answered from the engine's
+  cache: one `PRAGMA data_version` instead of a scan (a `count()` of 300 000 rows). Every queued write empties the
+  cache; a commit of another connection on the same file (another isolate or process) changes `data_version`, so a
+  count is never served stale; counts inside a transaction or with an expiry condition are never kept.
+* The transaction watchdog starts one timer per transaction (periodic checks only for the ones still open after
+  `transactionWatchdog`); key and relation name sets are built once per schema instead of once per row.
+* Debug builds: the usage-hint counters were pruned on every call once they held 2000 keys (reads of distinct keys:
+  ~40 µs per call); now at most once per second.
+* New stress tests (`test/stress`, scaled by `FLUENT_STRESS`): big tables of wide rows, deep relation graphs, 200
+  tables in 10 databases under concurrent callers.
+
+### 🐛 Fixed
+
+* `pauseQueue()` no longer waits for a transaction whose read on the paused database was answered by an identical
+  queued read (it hung until `pauseWatchdog`).
+* `trashPurgeInterval` and `optimizeInterval` are at least 1 s (`FluentConfig.minMaintenanceInterval`); a shorter one
+  is raised to it with a `configFallback` warning (it kept the library busy all the time).
+* A local `DateTime` saved as ISO text in the hour repeated when the clocks go back reads back one hour earlier (ISO
+  text without an offset names two instants there); this is now reported as `precisionLost`.
+* The transaction watchdog lets waiting reads into a transaction only when it has made no database call for
+  `transactionWatchdog` (it waits for something outside it). A slow transaction that keeps working no longer shows
+  its uncommitted changes to reads called after it.
+* `db.clock.advance` inside a transaction no longer runs the trash purge inside that transaction (`no such
+  savepoint` errors in tests).
+* G3 for rebuilt models: a read remembers, by list instance, what it put into each relation list, so a model rebuilt
+  from a read (`copyWith`, or a new instance given the same list) removes only what the read showed (nothing for a
+  list the read did not load). An **empty** list on a model the app built (no read behind it or its list, e.g. a
+  `const []` default) no longer removes the stored children / links: they are kept and reported (new issue kind
+  `relationListKept`, warning); clear on purpose with `relationSync: FluentRelationSyncMode.replace`, `detach` or
+  `delete`. Non-empty lists of built models still replace the owned set.
+
+### 🛡️ Guarantees round
+
+The 31 guarantees of the library are now tested (random sequences against a reference model, injected failures, crash
+copies, chaos runs, upgrade fixtures) and written down in [`doc/guarantees.md`](doc/guarantees.md). The tests found
+these bugs; all are fixed. Where an app must act, `doc/ai/migrations.md` ("Behaviour changes") says so.
+
+**Engine and transactions**
+
+* Unawaited calls inside one `FluentDb.transaction` run in call order (a call chain per transaction).
+* A call that would close a wait cycle between databases (a transaction on A waits for B while B's waits for A) fails
+  with the new `FluentErrorCode.deadlock` (`FluentEngineException`) instead of hanging; the other side completes.
+* SQL errors of `BEGIN`, `COMMIT`, `RELEASE`, `cleanOrphans` and `purgeArchivedColumns` are typed
+  (`FluentQueryException`); a failed nested `RELEASE` rolls the savepoint back.
+* `save(new)` then `delete(new)` called without awaiting deletes the row. Merged saves insert rows in call order
+  (`saveAll([id 6, new])` gives the new row 7). `updateAll` returns the number of distinct rows it updated.
+* Exceptions thrown by app code inside a write (e.g. `buildJson`) reach the caller as `FluentArgumentException` with the
+  original as `cause`.
+
+**Relations**
+
+* A child added to a list is no longer removed by another loaded view over the same column (`FluentLoad.all`).
+
+**Sync**
+
+* Three lost-deletion cases: delete, save, delete before a push; a push whose answer was lost; a local change kept
+  over a server row and then deleted. A push commits a "sent" marker (`synced_version` -1) before `onPush`.
+* `keepServer` restores a trashed unpushed row; a server row sent again after a pushed delete comes back from the
+  trash; `merge` skips trashed rows; a page answered after a cancel is not stored.
+* Sync result errors are `FluentSyncException` (the original is the `cause`). The `failed` event of `watchRemote`
+  carries a `FluentSyncException`: code that matched `TimeoutException` (or another fetch error) on `event.error` reads
+  `event.error.cause` now.
+* A sync never reads uncommitted data: the transaction watchdog no longer lets its bookkeeping reads (what to push,
+  local rows to merge, the last pull / fetch time) into a running transaction. Before, a push could send a change
+  that was rolled back afterwards, and the committed row then counted as synced (the server kept the rolled-back
+  value). Such a read waits for the commit, also past `transactionWatchdog` (a 5 s import with a background sync just
+  delays the sync); after `FluentConfig.committedReadTimeout` (30 s) it is refused with the transient
+  `FluentErrorCode.databaseBusy` (nothing is lost; `retries` run the sync later), so a transaction that awaits a sync
+  started outside it never hangs.
+
+**Schema**
+
+* `oldName` onto a name a live column holds is applied: the old holder is archived (`columnArchived`, "replaced
+  by ...") and the rename runs. A swap (`a` from `b`, `b` from `a`) exchanges the values once.
+* A `foreign_key_check` failure after the schema `COMMIT` no longer fails the start.
+* Rows a new `CHECK` / `UNIQUE` rejects: their children stay in place and are reported as `danglingReferences` (naming
+  the quarantine table) until the parent row is moved back.
+
+**Values and input**
+
+* Non-numeric text, or an integer beyond int64, into an `INTEGER` / `REAL` column is refused (`FluentArgumentException`,
+  `unsupportedValue`); numeric text still converts. Value-kind and converter columns are judged by their own type.
+  A `String` with a lone UTF-16 surrogate is refused.
+* `missingColumns` may override a `buildJson` field (a converter) without a warning.
+* `fromCacheJson` no longer receives `expiry_date`, `sync_version`, `synced_version`; `findMaps()` without `columns`
+  drops them too.
+
+**Settings, logging and hints**
+
+* Negative or huge `trashRetention` / `archiveRetention`, negative `historyLimit` / `busyTimeout` and an out-of-range
+  `readConnections` fall back with `configFallback`. Duplicate column names warn (`schemaFallback`); an empty table
+  name is refused.
+* Every issue has a fix. Title, details and fix of issues delivered through `onIssue` / `report()` are redacted unless
+  `showSqlArguments`. `FluentDb.clear` failures are logged with an I/O-specific hint.
+
+**Known limits** (`KNOWN_BUGS.md`): `-0.0` is stored as `0.0`; a soft-delete stamp is `max(now, last + 1)`; the FTS4
+path is untested.
+
+### Documentation
+
+* New guide page [`doc/guarantees.md`](doc/guarantees.md): the 31 guarantees, how each is tested, their limits.
 ## 2.0.0-dev.2 (pre-release for testing)
 
 No renames or removals; every call of 2.0.0-dev.1 still compiles. An app on dev.1 may notice these behaviour changes

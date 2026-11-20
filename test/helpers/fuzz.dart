@@ -3,6 +3,8 @@
 // Every random test is replayable: it runs fuzzSeeds() sequences; a failure prints the seed, the step and the
 // operations so far. Replay one: FLUENT_SEED=<seed> bash tool/mirror_test.sh <name> <file>.
 // Night-size run: FLUENT_FUZZ=2000 (default 25 per test in the normal suite).
+// A slice of a big run (another machine, a parallel shard): FLUENT_FUZZ_FROM=10000 FLUENT_FUZZ=10000 runs the
+// sequences 10000 .. 19999 of every random test (tool/fuzz_parallel.sh splits a run into such slices).
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
@@ -12,15 +14,25 @@ import 'package:flutter_test/flutter_test.dart';
 /// Sequences per random test: env `FLUENT_FUZZ`, else [normal].
 int fuzzRuns({int normal = 25}) => int.tryParse(Platform.environment['FLUENT_FUZZ'] ?? '') ?? normal;
 
+/// The first sequence of this run (env `FLUENT_FUZZ_FROM`, default 0): a run covers the sequences
+/// `FLUENT_FUZZ_FROM .. FLUENT_FUZZ_FROM + FLUENT_FUZZ - 1` of each random test.
+int fuzzFrom() => int.tryParse(Platform.environment['FLUENT_FUZZ_FROM'] ?? '') ?? 0;
+
 /// The seed to replay (env `FLUENT_SEED`), or `null`.
 int? fuzzSeed() => int.tryParse(Platform.environment['FLUENT_SEED'] ?? '');
 
-/// The seeds one random test runs: only `FLUENT_SEED` when set, else [fuzzRuns] seeds from [base] (give each test its
-/// own base so tests do not share sequences).
-List<int> fuzzSeeds({int base = 1000, int? count}) {
+/// The seeds one random test runs: only `FLUENT_SEED` when set (`FLUENT_REPEAT` times), else [fuzzRuns] seeds from [base] + [fuzzFrom] (give
+/// each test its own base so tests do not share sequences).
+///
+/// A test that runs only a part of the sequences ([share] 5: a fifth) scales the slice too: it runs
+/// `fuzzRuns() ~/ share` seeds (at least one) from `base + fuzzFrom() ~/ share`, so slices of a split run never overlap.
+List<int> fuzzSeeds({int base = 1000, int share = 1}) {
   final int? one = fuzzSeed();
-  if (one != null) return [one];
-  return [for (int i = 0; i < (count ?? fuzzRuns()); i++) base + i];
+  // A failure that needs load to show (timing): FLUENT_SEED=<seed> FLUENT_REPEAT=50 runs it 50 times.
+  if (one != null) return List.filled(max(1, int.tryParse(Platform.environment['FLUENT_REPEAT'] ?? '') ?? 1), one);
+  final int count = max(1, fuzzRuns() ~/ share);
+  final int first = base + fuzzFrom() ~/ share;
+  return [for (int i = 0; i < count; i++) first + i];
 }
 
 /// Random values from one seed.

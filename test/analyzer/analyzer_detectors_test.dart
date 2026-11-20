@@ -7,6 +7,7 @@ import 'package:fluent_sqflite/src/internal.dart';
 import 'package:fluent_sqflite_test/fluent_sqflite_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../helpers/guarantees.dart';
 import '../helpers/query_counter.dart';
 import '../helpers/schema_models.dart';
 
@@ -512,6 +513,63 @@ void main() {
       expect(FluentDb.report().issues.where((i) => i.kind == FluentIssueKind.missingIndex), isNotEmpty, reason: 'measured, collected');
       FluentAnalyzer.releaseMode = true;
       expect(FluentDb.report().issues.where((i) => i.kind == FluentIssueKind.missingIndex), isEmpty, reason: 'release without hintsInRelease');
+    });
+  });
+  group('G26: every hint says how to fix it', () {
+    test('every analyzer hint kind that can be reached carries a fix', () async {
+      final FluentAnalyzer a = FluentAnalyzer();
+      int now = 0;
+      FluentAnalyzer.clock = () => now;
+      for (int i = 0; i < FluentAnalyzer.pollingRuns + 1; i++) {
+        now += 1000;
+        a.onDispatch(task('"status" = ?'), 1);
+      }
+      a.onEnqueue(task(null, offset: 5000), 1);
+      a.onEnqueue(task(null, action: FluentDbAction.updateFields), FluentAnalyzer.floodQueue);
+      a.onStart(task('"b" = ?'), FluentAnalyzer.queueWaitMs);
+      for (int i = 0; i < FluentAnalyzer.saveLoopCalls; i++) {
+        a.onFinish(task(null, action: FluentDbAction.save, data: 1), users, 1, null);
+      }
+      for (int i = 0; i < FluentAnalyzer.lookupLoopCalls; i++) {
+        a.onFinish(task(null, action: FluentDbAction.findById), users, 1, null);
+      }
+      a.onFinish(task(null, action: FluentDbAction.save, data: List<int>.filled(3, 1)), users, FluentAnalyzer.slowWriteMs, null);
+      a.onFinish(task(null), users, 10, List<int>.filled(FluentAnalyzer.bigReadRows, 1));
+      final FluentTask leading = task('"bio" LIKE ?', args: ['%abc%']);
+      for (int i = 0; i < FluentTableStatsTracker.minSamples; i++) {
+        FluentTableStatsTracker().record(leading, 60);
+      }
+      a.onFinish(leading, users, 5, const []);
+      a.onSlowShape(task('"status" = ?', depth: 2), FluentAnalyzer.slowRelationsMs + 50, 3);
+      await a.explain(task('"age" = ?'), users, '~500 ms');
+      final Set<FluentIssueKind> kinds = {for (final FluentIssue i in FluentLog.shownHints) i.kind};
+      expect(
+        kinds,
+        containsAll(<FluentIssueKind>[
+          FluentIssueKind.polling,
+          FluentIssueKind.deepOffset,
+          FluentIssueKind.flood,
+          FluentIssueKind.queueWait,
+          FluentIssueKind.saveLoop,
+          FluentIssueKind.lookupLoop,
+          FluentIssueKind.slowWrite,
+          FluentIssueKind.bigRead,
+          FluentIssueKind.like,
+          FluentIssueKind.relations,
+          FluentIssueKind.missingIndex,
+        ]),
+      );
+      expectIssuesHaveFixes(FluentLog.shownHints);
+    });
+
+    test('the measured hints of the report carry a fix', () {
+      final FluentTask t = task('"status" = ?');
+      for (int i = 0; i < 3; i++) {
+        FluentTableStatsTracker().record(t, 150);
+      }
+      final List<FluentIssue> issues = FluentDb.report().issues;
+      expect(issues.where((i) => i.kind == FluentIssueKind.missingIndex), isNotEmpty);
+      expectIssuesHaveFixes(issues);
     });
   });
 }

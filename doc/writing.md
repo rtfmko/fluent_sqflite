@@ -107,8 +107,9 @@ Every call inside runs in one SQLite transaction (nested `transaction` calls joi
 rolled back and change events are not published. Each call inside is atomic on its own (a savepoint): when you catch
 its error, none of its rows stay. Timers or listeners created inside run outside the transaction once it ends. Keep transactions short: other calls of the database wait. Do not
 await a call created *outside* the transaction from inside it — it waits behind the transaction; after
-`FluentConfig.transactionWatchdog` (2 s) the library warns and lets waiting reads run inside it (they then see its
-uncommitted changes). With several databases pass `dbKey`.
+`FluentConfig.transactionWatchdog` (2 s) the library warns, and once the transaction has made no database call for
+that long (it waits for something outside it) lets waiting reads run inside it (they then see its uncommitted
+changes; a slow transaction that keeps working never shows them; sync reads never: they wait up to `committedReadTimeout`, see the sync guide). With several databases pass `dbKey`.
 
 A `FluentDb.transaction` inside another one runs in a savepoint: if it throws, only its own writes (and their events)
 are rolled back, and the error reaches the outer body, which may catch it and go on. Keys generated inside a transaction
@@ -117,6 +118,11 @@ database B: writes to B still join B's transaction. `FluentDb.clear` inside a tr
 keeps the rows, the `clear` event comes after the commit); `purgeArchivedColumns` inside one is skipped, call it after.
 
 Two saves of the same model instance in a row are never merged into one write (a double tap stores one row).
+
+Calls made inside one transaction without `await` still run in call order (`save(a)` then `delete(a)` deletes it). A
+call into another database that would close a wait cycle (A waits for B while a transaction on B waits for A) fails
+with `FluentErrorCode.deadlock` (`FluentEngineException`) instead of hanging: take the databases in one order, or make
+the cross-database call after the transaction; the error leaves the body, which rolls back, so run it again.
 
 ## Through `FluentDb` and models
 

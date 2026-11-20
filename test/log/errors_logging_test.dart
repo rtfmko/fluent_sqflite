@@ -117,7 +117,7 @@ void main() {
     await expectLater(lookup, throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.providerNotFound)));
     expect(await FluentDb.count<_Unregistered>().catchError((Object _) => -1), -1);
     await expectLater(FluentDb.watch<_Unregistered>(), emitsError(isA<FluentConfigException>()));
-    await expectLater(FluentDb.transaction(() async => 1, dbKey: FluentDbKey('nope')), throwsA(isA<FluentArgumentException>()));
+    await expectLater(FluentDb.transaction(() async => 1, dbKey: FluentDbKey('nope')), throwsA(isA<FluentConfigException>().having((e) => e.code, 'code', FluentErrorCode.databaseNotOpen)));
     expect(warnings(), hasLength(4));
     records.clear();
 

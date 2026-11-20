@@ -86,6 +86,7 @@ class FluentDb {
   /// The provider of model [T] (in database [dbKey] when [T] is stored in several databases).
   ///
   /// Throws a [FluentConfigException]: [FluentErrorCode.providerNotFound] when no open database stores [T],
+  /// [FluentErrorCode.databaseNotOpen] when [dbKey] names a database that is not open,
   /// [FluentErrorCode.ambiguousProvider] when several do and [dbKey] is missing.
   ///
   /// ```dart
@@ -103,11 +104,22 @@ class FluentDb {
   /// ```
   static P provider<P extends FluentProvider>({FluentDbKey? dbKey}) => _resolveProvider(providerType: P, dbName: dbKey?.dbName) as P;
 
+  /// The error of a call that names database [dbName], which is not open ([action] is the log tag).
+  static FluentConfigException _databaseNotOpen(String dbName, String tag, {String? what}) => FluentLog.raise(
+    FluentConfigException(
+      what ?? 'Database "$dbName" is not open.',
+      code: FluentErrorCode.databaseNotOpen,
+      hint: 'Check the dbKey (open: ${_instance._groupedRegistry.keys.isEmpty ? 'none' : _instance._groupedRegistry.keys.join(', ')}); call FluentDb.init([FluentGroup(dbKey: ..., ...)]) first, or FluentDb.restart() if the database was closed.',
+    ),
+    tag: tag,
+  );
+
   /// The provider of [modelType], [providerType] or [tableName]: only in database [dbName] when given, else in every
   /// open database.
   ///
   /// Every caller passes at least one criterion. Throws [FluentConfigException] ([FluentErrorCode.providerNotFound] /
-  /// [FluentErrorCode.ambiguousProvider] / [FluentErrorCode.notInitialized]) when there is not exactly one match.
+  /// [FluentErrorCode.databaseNotOpen] / [FluentErrorCode.ambiguousProvider] / [FluentErrorCode.notInitialized])
+  /// when there is not exactly one match.
   static FluentProvider _resolveProvider({Type? modelType, Type? providerType, String? tableName, String? dbName}) {
     final String target = modelType?.toString() ?? providerType?.toString() ?? tableName!;
 
@@ -135,7 +147,8 @@ class FluentDb {
     // Strict Search: Search only within the specified database group.
     if (dbName != null) {
       final _FluentProviderIndex? group = _instance._groupedRegistry[dbName];
-      final FluentProvider? found = group == null ? null : lookup(group);
+      if (group == null) throw _databaseNotOpen(dbName, 'FluentDb:resolve');
+      final FluentProvider? found = lookup(group);
       if (found != null) return found;
       throw FluentLog.raise(
         FluentConfigException(
@@ -704,6 +717,7 @@ class FluentDb {
   /// }
   /// ```
   static Future<List<FluentSchemaReport>> schemaReport({FluentDbKey? dbKey}) async {
+    if (dbKey != null && !_instance._groupedRegistry.containsKey(dbKey.dbName)) throw _databaseNotOpen(dbKey.dbName, 'FluentDb:schemaReport');
     final List<FluentSchemaReport> reports = [];
     for (final MapEntry<String, _FluentProviderIndex> entry in List.of(_instance._groupedRegistry.entries)) {
       if (dbKey != null && entry.key != dbKey.dbName) continue;
@@ -751,6 +765,7 @@ class FluentDb {
   /// await FluentDb.purgeArchivedColumns(olderThan: const Duration(days: 7));
   /// ```
   static Future<void> purgeArchivedColumns({required Duration olderThan, FluentDbKey? dbKey}) async {
+    if (dbKey != null && !_instance._groupedRegistry.containsKey(dbKey.dbName)) throw _databaseNotOpen(dbKey.dbName, 'FluentDb:purgeArchivedColumns');
     for (final FluentGroup group in [...?_lastConfig]) {
       if (dbKey != null && group.dbKey.dbName != dbKey.dbName) continue;
       if (group.readOnly) continue;
@@ -765,7 +780,11 @@ class FluentDb {
           action: FluentDbAction.transaction,
           dbName: group.dbKey.dbName,
           data: () async {
-            await _instance._purgeArchivedColumns(db, group, olderThan);
+            try {
+              await _instance._purgeArchivedColumns(db, group, olderThan);
+            } on DatabaseException catch (e, s) {
+              throw FluentLog.raise(FluentTransactionScope.sqlError(group.dbKey.dbName, e, s), tag: 'FluentDb:purgeArchivedColumns'); // typed, the original is the cause
+            }
             return null;
           },
         ),
@@ -866,21 +885,14 @@ class FluentDb {
   /// It is a write like any other: calls made before it finish first, calls made after it see the empty tables.
   /// Inside [transaction] it runs in that transaction (a rollback keeps the rows; watchers hear of it after the
   /// commit); inside another task of the database (a callback) it skips that database (an `ignoredCall` issue).
-  /// Throws [FluentConfigException] ([FluentErrorCode.databaseNotFound]) when [dbKey] is not open, or ([FluentErrorCode.notInitialized]) when no database is open; a table that cannot be emptied (a restricting foreign key, a trigger) fails with a [FluentConstraintException] / [FluentQueryException], and nothing is reported as cleared.
+  /// Throws [FluentConfigException] ([FluentErrorCode.databaseNotOpen]) when [dbKey] is not open, or ([FluentErrorCode.notInitialized]) when no database is open; a table that cannot be emptied (a restricting foreign key, a trigger) fails with a [FluentConstraintException] / [FluentQueryException], and nothing is reported as cleared.
   ///
   /// ```dart
   /// await FluentDb.clear(dbKey: AppDatabases.cache); // free the cache
   /// ```
   static Future<void> clear({FluentDbKey? dbKey}) async {
     if (dbKey != null && !_instance._groupedRegistry.containsKey(dbKey.dbName)) {
-      throw FluentLog.raise(
-        FluentConfigException(
-          'Database "${dbKey.dbName}" is not open, so it cannot be cleared.',
-          code: FluentErrorCode.databaseNotFound,
-          hint: 'Use the dbKey of a group passed to FluentDb.init([...]) (open: ${_instance._groupedRegistry.keys.join(', ')}).',
-        ),
-        tag: 'FluentDb:clear',
-      );
+      throw _databaseNotOpen(dbKey.dbName, 'FluentDb:clear', what: 'Database "${dbKey.dbName}" is not open, so it cannot be cleared.');
     }
     if (dbKey == null && _instance._groupedRegistry.isEmpty) {
       throw FluentLog.raise(
@@ -898,7 +910,7 @@ class FluentDb {
       final FluentTransactionScope? open = FluentTransactionScope.of(dbName);
       if (open != null) {
         try {
-          await FluentEngine().clearInTransaction(open, _instance._groupedRegistry[dbName]?.all ?? const <FluentProvider>[]);
+          await open.serialized(() => FluentEngine().clearInTransaction(open, _instance._groupedRegistry[dbName]?.all ?? const <FluentProvider>[]));
         } on FluentException catch (e) {
           throw FluentLog.raise(e, tag: 'FluentDb:clear');
         }
@@ -911,7 +923,7 @@ class FluentDb {
         throw FluentLog.raise(
           FluentConfigException(
             'Database "$dbName" is closed, so it was not cleared.',
-            code: FluentErrorCode.databaseNotFound,
+            code: FluentErrorCode.databaseNotOpen,
             hint: 'Open the database again (FluentDb.init or FluentDb.restart) before clearing it.',
           ),
           tag: 'FluentDb:clear',
@@ -929,7 +941,7 @@ class FluentDb {
   /// Watchers receive an empty result first; then the databases are closed and the files deleted. With [reopen]
   /// (default) the databases are opened again right away (deleted ones empty, with fresh tables), so the app can go
   /// on; otherwise the deleted databases stay closed (the others are reopened). Throws [FluentConfigException]
-  /// ([FluentErrorCode.databaseNotFound]) when [dbKey] (or, without it, any database) is not open.
+  /// ([FluentErrorCode.databaseNotOpen]) when [dbKey] (or, without it, any database) is not open.
   ///
   /// ```dart
   /// Future<void> signOut() => FluentDb.deleteDatabases(); // a clean database for the next user
@@ -1096,7 +1108,7 @@ class FluentDb {
   /// [transaction] on the database group [dbName].
   static Future<R> _transactionOn<R>(String dbName, Future<R> Function() action) async {
     final FluentTransactionScope? open = FluentTransactionScope.of(dbName);
-    if (open != null) return open.savepoint(action);
+    if (open != null) return open.serialized(() => open.savepoint(action)); // in call order with the other calls of the transaction
 
     final Database database = _instance._groupedRegistry[dbName]!.all.first.db;
     FluentTransactionScope? scope;
@@ -1114,6 +1126,9 @@ class FluentDb {
           }),
         ),
       );
+    } on DatabaseException catch (e, s) {
+      scope?.rolledBack();
+      throw FluentLog.raise(FluentTransactionScope.sqlError(dbName, e, s), tag: 'FluentDb.transaction'); // a failed COMMIT / BEGIN
     } catch (_) {
       scope?.rolledBack(); // keys its inserts gave the models are taken back: SQLite reuses the rowids
       rethrow;
@@ -1134,10 +1149,11 @@ class FluentDb {
     final String? name = dbKey?.dbName ?? (open.length == 1 ? open.single : null);
     if (name != null && open.contains(name)) return name;
 
+    if (dbKey != null) throw _databaseNotOpen(dbKey.dbName, 'FluentDb.transaction', what: 'Database "${dbKey.dbName}" is not open, so a transaction cannot run on it.');
     throw FluentLog.raise(
       FluentArgumentException(
         'dbKey',
-        dbKey == null ? 'several database groups are open (${open.join(', ')}), the transaction does not know which one to use' : 'database group "${dbKey.dbName}" is not open',
+        'several database groups are open (${open.join(', ')}), the transaction does not know which one to use',
         hint: 'Pass dbKey of the group whose models the transaction changes. A transaction covers one database file.',
       ),
       tag: 'FluentDb.transaction',
@@ -1160,6 +1176,7 @@ class FluentDb {
   /// Rarely needed: with foreign keys on (the default) SQLite never leaves any; the start-up maintenance cleans them
   /// when foreign keys are off or a check found some.
   static Future<void> cleanOrphans({FluentDbKey? dbKey}) async {
+    if (dbKey != null && !_instance._groupedRegistry.containsKey(dbKey.dbName)) throw _databaseNotOpen(dbKey.dbName, 'FluentDb:cleanOrphans');
     for (final MapEntry<String, _FluentProviderIndex> entry in List.of(_instance._groupedRegistry.entries)) {
       if (dbKey != null && entry.key != dbKey.dbName) continue;
       await _instance._cleanOrphans(entry.key, entry.value.all);
@@ -1241,6 +1258,27 @@ class FluentDb {
 
   /// [config] with every interval that cannot work replaced by its default (a `configFallback` warning each).
   static FluentConfig _checkedConfig(FluentConfig config) => config.withSafeIntervals((String name, Duration bad, Duration fallback) {
+    if (name == 'readConnections') {
+      FluentLog.issue(
+        FluentIssueKind.configFallback,
+        'FluentConfig.readConnections is ${bad.inMilliseconds}; the pool has 0 to 4 connections, so ${fallback.inMilliseconds} is used.',
+        subject: name,
+        tag: 'FluentDb:config',
+        hint: 'Set FluentConfig(readConnections: n) with n from 0 to 4, or null to let the library choose.',
+      );
+      return;
+    }
+    if (bad > Duration.zero) {
+      FluentLog.issue(
+        FluentIssueKind.configFallback,
+        'FluentConfig.$name is ${bad.inMicroseconds / 1000} ms; the job would run again as soon as it ends and the library would never be idle, so ${fallback.inSeconds} s is used.',
+        subject: name,
+        tag: 'FluentDb:config',
+        hint: 'Use an interval of at least ${FluentConfig.minMaintenanceInterval.inSeconds} s (the default suits apps), or null to switch it off. '
+            'Tests move the library clock instead of waiting: db.clock.advance(...) runs a due timer at once.',
+      );
+      return;
+    }
     FluentLog.issue(
       FluentIssueKind.configFallback,
       'FluentConfig.$name is ${bad.inMilliseconds} ms; a zero or negative interval would run its job without waiting, so the default (${fallback.inSeconds} s) is used.',
@@ -1356,7 +1394,7 @@ extension FluentDbInternals on FluentDb {
     if (scope != null) {
       final List<FluentTouchedTable> touched = [];
       final FluentProvider target = provider;
-      result = await FluentEngine.collectingTouched(touched, () => target.internalExecute(effectiveData));
+      result = await scope.serialized(() => scope.working(() => FluentEngine.collectingTouched(touched, () => target.internalExecute(effectiveData)))); // in call order (G7)
       if (effectiveData.isStreamOp) scope.pendingEvents.add((effectiveData, provider, result));
       if (touched.isNotEmpty) scope.pendingTouched.add((effectiveData, provider, touched));
     } else {

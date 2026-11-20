@@ -23,7 +23,9 @@ abstract final class FluentClock {
   static int get millis => _now().millisecondsSinceEpoch;
 
   /// Replaces the clock (tests); `null` restores [DateTime.now]. Every assignment counts as a move of the clock: the
-  /// timers of the library that follow it ([FluentClockTimer]) check at once whether they are due.
+  /// timers of the library that follow it ([FluentClockTimer]) check at once whether they are due — each in the zone
+  /// it was created in, like its real timer (never in the caller's zone: a test that moves the clock inside a
+  /// transaction must not run the trash purge inside that transaction).
   static set testNow(DateTime Function()? now) {
     _now = now ?? DateTime.now;
     _replaced = now != null;
@@ -56,9 +58,13 @@ final class FluentClockTimer {
       );
       return;
     }
-    FluentClock._moveListeners.add(_check);
+    FluentClock._moveListeners.add(_onMove);
     _arm();
   }
+
+  /// The zone the timer was created in: its real timer runs there, and so does a check after a clock move.
+  final Zone _zone = Zone.current;
+  void _onMove() => _zone.run(_check); // tear-offs of one instance are equal: remove finds it
 
   /// The time between two runs.
   final Duration interval;
@@ -82,7 +88,7 @@ final class FluentClockTimer {
     _cancelled = true;
     _timer?.cancel();
     _timer = null;
-    FluentClock._moveListeners.remove(_check);
+    FluentClock._moveListeners.remove(_onMove);
   }
 
   void _arm() {
@@ -125,9 +131,13 @@ final class FluentClockTimer {
 final class FluentClockAlarm {
   /// Arms the alarm for [due] (epoch milliseconds of library time).
   FluentClockAlarm(this.due, this.job, {this.tag = 'FluentClockAlarm'}) {
-    FluentClock._moveListeners.add(_check);
+    FluentClock._moveListeners.add(_onMove);
     _arm();
   }
+
+  /// The zone the alarm was created in: its real timer runs there, and so does a check after a clock move.
+  final Zone _zone = Zone.current;
+  void _onMove() => _zone.run(_check); // tear-offs of one instance are equal: remove finds it
 
   /// When [job] runs (epoch milliseconds of library time).
   final int due;
@@ -149,7 +159,7 @@ final class FluentClockAlarm {
     _done = true;
     _timer?.cancel();
     _timer = null;
-    FluentClock._moveListeners.remove(_check);
+    FluentClock._moveListeners.remove(_onMove);
   }
 
   void _arm() {

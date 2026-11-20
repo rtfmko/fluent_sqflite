@@ -18,6 +18,7 @@ class _FluentRowPlan<T extends FluentStorable> {
     required this.enumValues,
     required this.linkNames,
     required this.factory,
+    this.hidden = const {},
     Map<String, String>? seenTags,
   }) : _seenTags = seenTags ?? {};
 
@@ -31,6 +32,9 @@ class _FluentRowPlan<T extends FluentStorable> {
   final List<String> linkNames;
   final T Function(Map<String, dynamic> json) factory;
 
+  /// Columns the library keeps for itself (expiry, sync versions): the factory never receives them.
+  final Set<String> hidden;
+
   /// Column → the tag the last intact `_fs_metadata` gave it (that is where a `DateTime`'s UTC flag lives): a row
   /// whose metadata is damaged takes the tags of its columns from here before falling back to the column kinds.
   final Map<String, String> _seenTags;
@@ -43,6 +47,7 @@ class _FluentRowPlan<T extends FluentStorable> {
     enumValues: enumValues,
     linkNames: linkNames,
     factory: other,
+    hidden: hidden,
     seenTags: _seenTags,
   );
 
@@ -70,7 +75,8 @@ class _FluentRowPlan<T extends FluentStorable> {
   T build(Map<String, dynamic> row, List<_MappingWarning> warnings) {
     // The reader's bookkeeping of unloaded relations is applied after the factory: fromCacheJson never sees it.
     final Object? unloaded = row['_unloaded_relations'];
-    final Map<String, dynamic> json = decodeRow(unloaded == null ? row : (Map<String, dynamic>.of(row)..remove('_unloaded_relations')), warnings);
+    // One pass drops the internal, hidden and bookkeeping columns (no extra copy of every row).
+    final Map<String, dynamic> json = decodeRow(row, warnings, drop: hidden, dropUnloaded: unloaded != null);
     final T model;
     try {
       model = factory(json);
@@ -111,25 +117,54 @@ class _FluentRowPlan<T extends FluentStorable> {
 
   /// [row] with Dart values (type tags, enums, converters) and without internal columns (type metadata, archived
   /// columns). Used for models and for maps (`findMaps`, `pluck`, aggregates).
-  Map<String, dynamic> decodeRow(Map<String, dynamic> row, List<_MappingWarning> warnings) {
+  ///
+  /// [drop]: more columns to leave out (the library's own, for models); [dropUnloaded]: the reader's
+  /// `_unloaded_relations` bookkeeping too. The row is copied at most once (the input is never changed).
+  Map<String, dynamic> decodeRow(Map<String, dynamic> row, List<_MappingWarning> warnings, {Set<String> drop = const {}, bool dropUnloaded = false}) {
+    bool leaves(String key) => FluentProvider._isInternalColumn(key) || drop.contains(key) || (dropUnloaded && key == '_unloaded_relations');
+    final Object? metadata = row['_fs_metadata'];
+    if (metadata is! String || metadata.isEmpty) {
+      // The common row (no type tags of its own): one pass decodes by the column kinds and converters and leaves out
+      // the internal columns, building the result once.
+      final Map<String, dynamic> json = {};
+      for (final MapEntry<String, dynamic> e in row.entries) {
+        final String key = e.key;
+        if (leaves(key)) continue;
+        final Object? value = e.value;
+        if (value == null) {
+          json[key] = null;
+          continue;
+        }
+        final FluentConverter<Object?, Object?>? converter = converters[key];
+        if (converter != null) {
+          json[key] = _decodeConverted(key, converter, value, warnings);
+          continue;
+        }
+        final String? tag = kinds[key];
+        json[key] = tag == null ? value : _decodeTagged(key, tag, value, warnings);
+      }
+      return json;
+    }
     Map<String, dynamic> json = _restoreTypes(row, warnings);
+    bool owned = !identical(json, row);
 
     // Column converters (stored value → Dart value).
     if (converters.isNotEmpty) {
-      bool copied = false;
       for (final MapEntry<String, FluentConverter<Object?, Object?>> entry in converters.entries) {
         if (!json.containsKey(entry.key)) continue;
-        if (!copied) {
+        if (!owned) {
           json = Map<String, dynamic>.from(json);
-          copied = true;
+          owned = true;
         }
         json[entry.key] = _decodeConverted(entry.key, entry.value, json[entry.key], warnings);
       }
     }
 
-    // Internal columns never reach the caller: type metadata and archived (removed) columns.
-    if (json.keys.any(FluentProvider._isInternalColumn)) {
-      json = {for (final MapEntry<String, dynamic> e in json.entries) if (!FluentProvider._isInternalColumn(e.key)) e.key: e.value};
+    // Internal columns never reach the caller: type metadata, archived (removed) columns, [drop].
+    if (owned) {
+      json.removeWhere((key, _) => leaves(key));
+    } else if (json.keys.any(leaves)) {
+      json = {for (final MapEntry<String, dynamic> e in json.entries) if (!leaves(e.key)) e.key: e.value};
     }
     return json;
   }
@@ -213,35 +248,42 @@ class _FluentRowPlan<T extends FluentStorable> {
     for (final MapEntry<String, String> entry in hints.entries) {
       final Object? value = result[entry.key];
       if (value == null) continue;
-      final List<Enum>? values = entry.value == 'enum' ? enumValues[entry.key] : null;
-      final Object? restored;
-      try {
-        restored = FluentTypeCodecs.decode(entry.value, value, enumValues: values);
-      } catch (e, s) {
-        throw FluentSchemaException(
-          'The stored value of "$table.${entry.key}" cannot be read as ${entry.value}: ${FluentLog.redact('$e')}',
-          modelName: modelName,
-          columnName: entry.key,
-          hint: 'The value was damaged or written outside the library. Fix or delete it (e.g. `UPDATE "$table" SET "${entry.key}" = NULL WHERE ...`), '
-              'or save the row again with a valid value.',
-          cause: e,
-          stackTrace: s,
-        );
-      }
-      if (identical(restored, value)) {
-        if (entry.value == 'json' && value is String) {
-          warnings.add((
-            message: 'The stored JSON of "$table.${entry.key}" cannot be decoded; the model receives the raw text.',
-            hint: 'The value was damaged or written outside the library. Save the row again with a valid value.',
-          ));
-        }
-        continue;
-      }
-      if (value is String && (entry.value == 'datetime' || entry.value == 'datetime_utc')) _checkShortIso(entry.key, value, warnings);
+      final Object? restored = _decodeTagged(entry.key, entry.value, value, warnings);
+      if (identical(restored, value)) continue;
       if (identical(result, row)) result = Map<String, dynamic>.from(row);
       result[entry.key] = restored;
     }
     return result;
+  }
+
+  /// The stored [value] of [column] read with the codec of [tag] (enums by [enumValues]); a value the codec cannot
+  /// read fails typed, damaged JSON and old short ISO text are reported in [warnings].
+  Object? _decodeTagged(String column, String tag, Object value, List<_MappingWarning> warnings) {
+    final Object? restored;
+    try {
+      restored = FluentTypeCodecs.decode(tag, value, enumValues: tag == 'enum' ? enumValues[column] : null);
+    } catch (e, s) {
+      throw FluentSchemaException(
+        'The stored value of "$table.$column" cannot be read as $tag: ${FluentLog.redact('$e')}',
+        modelName: modelName,
+        columnName: column,
+        hint: 'The value was damaged or written outside the library. Fix or delete it (e.g. `UPDATE "$table" SET "$column" = NULL WHERE ...`), '
+            'or save the row again with a valid value.',
+        cause: e,
+        stackTrace: s,
+      );
+    }
+    if (identical(restored, value)) {
+      if (tag == 'json' && value is String) {
+        warnings.add((
+          message: 'The stored JSON of "$table.$column" cannot be decoded; the model receives the raw text.',
+          hint: 'The value was damaged or written outside the library. Save the row again with a valid value.',
+        ));
+      }
+      return value;
+    }
+    if (value is String && (tag == 'datetime' || tag == 'datetime_utc')) _checkShortIso(column, value, warnings);
+    return restored;
   }
 }
 
@@ -441,6 +483,7 @@ extension _FluentRowMapping<T extends FluentStorable> on FluentProvider<T> {
             ? 'isolateMapping is "always", but $runtimeType has no isolateFactory, so its lists are mapped on the UI isolate.'
             : 'Turning $rows rows into $model takes ~${millis.round()} ms on the UI isolate (sliced across frames). '
                 'With an isolateFactory the library maps such lists in a background isolate.',
+        fix: 'Give $runtimeType an isolateFactory (a static function of $model, no access to the provider).',
         code: 'class $runtimeType extends FluentProvider<$model> {\n'
             '  @override\n'
             '  $model Function(Map<String, dynamic> json)? get isolateFactory => $model.fromJson;\n'

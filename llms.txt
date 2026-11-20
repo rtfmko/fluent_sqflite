@@ -41,6 +41,7 @@
 - [Performance](doc/performance.md)
 - [Errors and logging](doc/errors-and-logging.md)
 - [Testing](doc/testing.md)
+- [Guarantees](doc/guarantees.md): what the library promises, how it is tested, its limits
 
 ## Optional
 

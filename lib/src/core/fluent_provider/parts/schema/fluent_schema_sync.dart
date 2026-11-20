@@ -216,6 +216,23 @@ String _definitionBody(String definition) {
   return end < 0 ? definition : definition.substring(end + 2);
 }
 
+/// The renames of one sync (see `_renames`).
+class _RenamePlan {
+  _RenamePlan(this.renames, this.displaced, this.cycles, this.swaps);
+
+  /// New name → live column it is renamed from, in running order.
+  final Map<String, String> renames;
+
+  /// Live columns whose name a rename takes: archived before the rename.
+  final Set<String> displaced;
+
+  /// Names that are exchanged, each list one cycle (run through a temporary name).
+  final List<List<String>> cycles;
+
+  /// The exchanges of this sync (new name → old name), recorded in the snapshot.
+  final Map<String, String> swaps;
+}
+
 class _DiskColumn {
   _DiskColumn(this.name, this.type, this.pk, {this.notNull = false, this.defaultValue});
 
@@ -477,6 +494,9 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
         'v$_schemaSyncVersion',
         ctx.removal.name,
         for (final MapEntry<String, String> c in desired.definitions.entries) '${c.key}=${c.value}',
+        // An oldName onto a column of the model itself (a swap) changes nothing in the definitions, but it is a change.
+        '#renames',
+        for (final FluentDbColumn c in desired.columns) if (c.oldName != null && c.oldName != c.name && desired.definitions.containsKey(c.oldName)) '${c.name}<${c.oldName}',
         '#key', ...desired.key,
         '#checks', ...desired.checks,
         '#rowid:${desired.withoutRowId}',
@@ -718,8 +738,14 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
     // Renames (oldName maps live columns only). A live column renamed away frees its name: a column of the model under
     // that name is a new (empty) column, and may itself be renamed from another live column (chains), so the renames
     // are collected until nothing changes. Their order is the order they must run in (a name is freed before it is taken).
-    final Map<String, String> renames = _renames(desired, live);
+    final _RenamePlan plan = _renames(desired, live, snapshot);
+    final Map<String, String> renames = plan.renames;
+    final Set<String> displaced = plan.displaced;
     final Set<String> renamedFrom = renames.values.toSet();
+    // Exchanges already applied stay recorded (while the model still declares them): both names are live columns afterwards.
+    snapshot.swaps
+      ..removeWhere((name, old) => !desired.columns.any((c) => c.name == name && c.oldName == old))
+      ..addAll(plan.swaps);
     // A live column that is neither renamed away nor still in the model under its name.
     bool isLive(String name) => live.containsKey(name) && !renamedFrom.contains(name);
     for (final FluentDbColumn c in desired.columns) {
@@ -737,10 +763,11 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
     }
 
     final List<FluentDbColumn> added = [for (final FluentDbColumn c in desired.columns) if (!isLive(c.name) && !renames.containsKey(c.name)) c];
-    final List<String> removed = [for (final String name in live.keys) if (!desired.definitions.containsKey(name) && !renamedFrom.contains(name)) name];
+    final List<String> removed = [for (final String name in live.keys) if ((!desired.definitions.containsKey(name) && !renamedFrom.contains(name)) || displaced.contains(name)) name];
     // A column a pending step drops stays in the table (under its own name) while the step runs, so its rawSql /
-    // onMigrate can still read it; the step drops it right after (see _applySteps).
-    final List<String> keptForSteps = [for (final String name in removed) if (stepDrops.contains(name)) name];
+    // onMigrate can still read it; the step drops it right after (see _applySteps). A column a rename takes the name
+    // of cannot stay: it is archived first.
+    final List<String> keptForSteps = [for (final String name in removed) if (stepDrops.contains(name) && !displaced.contains(name)) name];
     removed.removeWhere(keptForSteps.contains);
 
     // Changed definitions (pending NOT NULL columns stay "unchanged" while they still contain NULLs).
@@ -763,7 +790,7 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
 
     bool? hasRowsCache;
     Future<bool> hasRows() async => hasRowsCache ??= await _hasRows(txn);
-    await _reportDataRisks(desired, snapshot, ctx, renames: renames, added: added, removed: removed, changed: changed, stepDrops: stepDrops, hasRows: hasRows);
+    await _reportDataRisks(desired, snapshot, ctx, renames: renames, added: added, removed: [for (final String r in removed) if (!displaced.contains(r)) r], changed: changed, stepDrops: stepDrops, hasRows: hasRows);
 
     final bool keyChanged = !listEquals(snapshot.key, desired.key);
     final bool checksChanged = !listEquals(snapshot.checks, desired.checks);
@@ -785,7 +812,7 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
     if (!otherRebuild) {
       final _DiskTable onDisk = removed.isEmpty ? _DiskTable({}, [], withoutRowId: false) : await _diskTable(txn);
       for (final String name in [...removed]) {
-        if (await _removeInPlace(txn, name, live[name]!, onDisk, snapshot, ctx, changes, revision: nextRevision, drop: ctx.removal == FluentColumnRemoval.drop)) {
+        if (await _removeInPlace(txn, name, live[name]!, onDisk, snapshot, ctx, changes, revision: nextRevision, drop: ctx.removal == FluentColumnRemoval.drop, replacedFrom: displaced.contains(name) ? renames[name] : null)) {
           removed.remove(name);
           // A later column may still need the rebuild: it must carry this archive over.
           archivesOnDisk.addAll([for (final FluentArchivedColumn a in snapshot.archived) a.archivedAs]);
@@ -805,11 +832,29 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
     final bool rebuild = otherRebuild || removed.isNotEmpty || expired.isNotEmpty;
 
     if (!rebuild) {
+      final Set<String> inCycle = {for (final List<String> cycle in plan.cycles) ...cycle};
       for (final MapEntry<String, String> r in renames.entries) {
+        if (inCycle.contains(r.key)) continue;
         await txn.execute('ALTER TABLE ${tableName.quotedIdentifier} RENAME COLUMN ${r.value.quotedIdentifier} TO ${r.key.quotedIdentifier}');
         snapshot.columns.remove(r.value);
         snapshot.columns[r.key] = desired.definitions[r.key]!;
         changes.add(_change(FluentSchemaChangeKind.renameColumn, 'renamed column "${r.value}" to "${r.key}"', subject: r.key));
+      }
+      // Names that are exchanged go through a temporary name: the first one is parked, the others move into the freed
+      // names in turn, and the parked one ends in the last.
+      for (final List<String> cycle in plan.cycles) {
+        const String parked = '__fluent_swap_tmp';
+        final String first = cycle.first;
+        await txn.execute('ALTER TABLE ${tableName.quotedIdentifier} RENAME COLUMN ${first.quotedIdentifier} TO ${parked.quotedIdentifier}');
+        for (final String name in cycle) {
+          final String from = renames[name]! == first ? parked : renames[name]!;
+          await txn.execute('ALTER TABLE ${tableName.quotedIdentifier} RENAME COLUMN ${from.quotedIdentifier} TO ${name.quotedIdentifier}');
+        }
+        cycle.forEach(snapshot.columns.remove);
+        for (final String name in cycle) {
+          snapshot.columns[name] = desired.definitions[name]!;
+          changes.add(_change(FluentSchemaChangeKind.renameColumn, 'renamed column "${renames[name]}" to "$name" (names exchanged)', subject: name));
+        }
       }
       for (final FluentDbColumn c in added) {
         final bool pending = c.effectiveNotNull && !c.effectiveDefault;
@@ -870,7 +915,7 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
       copyFrom[archivedAs] = name;
       archives.add(FluentArchivedColumn(original: name, archivedAs: archivedAs, type: live[name]!.type, revision: nextRevision, removedAt: ctx.now));
       changes.add(_change(FluentSchemaChangeKind.archiveColumn, 'archived column "$name" as "$archivedAs"', subject: name));
-      _reportArchived(name, archivedAs);
+      _reportArchived(name, archivedAs, replacedFrom: displaced.contains(name) ? renames[name] : null);
     }
     for (final FluentArchivedColumn a in expired) {
       changes.add(_change(FluentSchemaChangeKind.purgeArchive, 'purged archived column "${a.archivedAs}" (older than ${ctx.archiveRetention!.inDays} days)', subject: a.archivedAs));
@@ -913,11 +958,16 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
 
   /// The renames of this sync (new name → live column it is renamed from), in the order they must run.
   ///
-  /// A column with `oldName` is renamed from that live column when its own name is not taken by a live column that
-  /// stays. A live column renamed away frees its name, so `full` (oldName `name`) plus a new `name` renames `name` to
-  /// `full` and adds `name` empty; chains (`b` from `a`, `c` from `b`) run `b → c` before `a → b`. A live column claimed by
-  /// two columns goes to the first one; the other starts empty (reported).
-  Map<String, String> _renames(_DesiredSchema desired, Map<String, _DiskColumn> live) {
+  /// A column with `oldName` is renamed from that live column when its own name is free. A live column renamed away
+  /// frees its name, so `full` (oldName `name`) plus a new `name` renames `name` to `full` and adds `name` empty;
+  /// chains (`b` from `a`, `c` from `b`) run `b → c` before `a → b`. A live column claimed by two columns goes to the
+  /// first one; the other starts empty (reported).
+  ///
+  /// Two cases need more: a live column holding the new name while `oldName` leaves the model (`x` with oldName `y`,
+  /// both exist, `y` is gone from the model) is *displaced* (archived like a removed column, then the rename runs);
+  /// columns that exchange their names (`a` from `b`, `b` from `a`) form a cycle that runs through a temporary name,
+  /// once (recorded in [FluentTableSnapshot.swaps]).
+  _RenamePlan _renames(_DesiredSchema desired, Map<String, _DiskColumn> live, FluentTableSnapshot snapshot) {
     final Map<String, String> renames = {};
     final Set<String> claimed = {};
     final Set<String> reported = {};
@@ -927,20 +977,10 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
       for (final FluentDbColumn c in desired.columns) {
         final String? old = c.oldName;
         if (old == null || old == c.name || renames.containsKey(c.name) || !live.containsKey(old)) continue;
-        // Its own name is a live column that stays: nothing to rename (the usual state after the rename ran once).
+        // Its own name is a live column that stays: decided below (the usual state after a rename has no live "old").
         if (live.containsKey(c.name) && !claimed.contains(c.name)) continue;
         if (claimed.contains(old)) {
-          if (reported.add(c.name)) {
-            FluentLog.issue(
-              FluentIssueKind.schemaFallback,
-              'Column "${c.name}" of "$tableName" declares oldName "$old", but "${renames.entries.firstWhere((e) => e.value == old).key}" is renamed from "$old" already; "${c.name}" starts empty.',
-              table: tableName,
-              database: dbName,
-              subject: c.name,
-              tag: '$tableName:schema',
-              hint: 'Only one column can take over "$old": remove oldName from the other one (copy the values with a migration step if both need them).',
-            );
-          }
+          if (reported.add(c.name)) _reportDoubleClaim(c.name, old, renames);
           continue;
         }
         renames[c.name] = old;
@@ -948,7 +988,61 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
         progress = true;
       }
     }
-    return renames;
+
+    // The name is held by a live column that stays: when "old" leaves the model, the holder is archived and "old" moves in.
+    final Set<String> displaced = {};
+    final Map<String, String> blocked = {};
+    for (final FluentDbColumn c in desired.columns) {
+      final String? old = c.oldName;
+      if (old == null || old == c.name || renames.containsKey(c.name) || !live.containsKey(old) || !live.containsKey(c.name) || claimed.contains(c.name)) continue;
+      if (claimed.contains(old)) {
+        if (reported.add(c.name)) _reportDoubleClaim(c.name, old, renames);
+      } else if (!desired.definitions.containsKey(old)) {
+        renames[c.name] = old;
+        claimed.add(old);
+        displaced.add(c.name);
+      } else {
+        blocked[c.name] = old;
+      }
+    }
+
+    // Both names stay in the model: only a cycle of such renames (an exchange) is a real one; a lone "x from y" next to
+    // a column y that stays is a rename that ran already (or never meant). Applied exchanges are in the snapshot.
+    final List<List<String>> cycles = [];
+    final Map<String, String> swaps = {};
+    final Set<String> inCycle = {};
+    for (final String start in blocked.keys) {
+      if (inCycle.contains(start)) continue;
+      final List<String> path = [start];
+      String? next = blocked[start];
+      while (next != null && next != start && !path.contains(next)) {
+        path.add(next);
+        next = blocked[next];
+      }
+      if (next != start) continue;
+      if (path.every((n) => snapshot.swaps[n] == blocked[n])) continue;
+      cycles.add(path);
+      inCycle.addAll(path);
+    }
+    for (final List<String> cycle in cycles) {
+      for (final String name in cycle) {
+        renames[name] = blocked[name]!;
+        swaps[name] = blocked[name]!;
+      }
+    }
+    return _RenamePlan(renames, displaced, cycles, swaps);
+  }
+
+  void _reportDoubleClaim(String name, String old, Map<String, String> renames) {
+    FluentLog.issue(
+      FluentIssueKind.schemaFallback,
+      'Column "$name" of "$tableName" declares oldName "$old", but "${renames.entries.firstWhere((e) => e.value == old).key}" is renamed from "$old" already; "$name" starts empty.',
+      table: tableName,
+      database: dbName,
+      subject: name,
+      tag: '$tableName:schema',
+      hint: 'Only one column can take over "$old": remove oldName from the other one (copy the values with a migration step if both need them).',
+    );
   }
 
   /// Warns about changes that keep the data but probably not as meant: a changed column type, a column that looks
@@ -1052,6 +1146,7 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
     List<FluentSchemaChange> changes, {
     required int revision,
     required bool drop,
+    String? replacedFrom,
   }) async {
     final String table = tableName.quotedIdentifier;
     if (drop) {
@@ -1080,7 +1175,7 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
     snapshot.columns.remove(name);
     snapshot.archived.add(FluentArchivedColumn(original: name, archivedAs: archivedAs, type: disk.type, revision: revision, removedAt: ctx.now));
     changes.add(_change(FluentSchemaChangeKind.archiveColumn, 'archived column "$name" as "$archivedAs"', subject: name));
-    _reportArchived(name, archivedAs);
+    _reportArchived(name, archivedAs, replacedFrom: replacedFrom);
     return true;
   }
 
@@ -1096,10 +1191,12 @@ extension FluentSchemaSync<T extends FluentStorable> on FluentProvider<T> {
     }
   }
 
-  void _reportArchived(String name, String archivedAs) {
+  void _reportArchived(String name, String archivedAs, {String? replacedFrom}) {
     FluentLog.issue(
       FluentIssueKind.columnArchived,
-      'Column "$name" of "$tableName" is no longer in the model; its data is kept in "$archivedAs".',
+      replacedFrom == null
+          ? 'Column "$name" of "$tableName" is no longer in the model; its data is kept in "$archivedAs".'
+          : 'Column "$name" of "$tableName" is replaced by the column renamed from "$replacedFrom" (oldName); its previous data is kept in "$archivedAs".',
       table: tableName,
       database: dbName,
       subject: name,

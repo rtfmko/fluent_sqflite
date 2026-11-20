@@ -39,7 +39,8 @@ void main() {
 
   test('an injected insert failure reaches the caller typed, writes nothing, and heal makes it work again', () async {
     await notes.save(note(1, 'a'));
-    faults.failWhere((c) => c.matches('INSERT'), times: 1);
+    // The table's own insert (the library may write its statistics in between when idle).
+    faults.failWhere((c) => c.matches('INTO "notes"'), times: 1);
     await expectLater(notes.save(note(2, 'b')), throwsA(isA<FluentException>()));
     expect(faults.injected, hasLength(1));
     expect(await notes.count(), 1, reason: 'G1: nothing of the failed save');
@@ -103,7 +104,10 @@ void main() {
   });
 
   test('runSequence reports the seed and the operations of a failing step', () async {
-    expect(fuzzSeeds(base: 5, count: 3), fuzzSeed() == null ? [5, 6, 7] : [fuzzSeed()]);
+    // A slice of a split run (FLUENT_FUZZ_FROM) and a test that runs a fifth of the sequences (share: 5).
+    final int n = fuzzRuns(), from = fuzzFrom();
+    expect(fuzzSeeds(base: 5), fuzzSeed() == null ? [for (int i = 0; i < n; i++) 5 + from + i] : [fuzzSeed()]);
+    expect(fuzzSeeds(base: 5, share: 5), fuzzSeed() == null ? [for (int i = 0; i < (n ~/ 5 < 1 ? 1 : n ~/ 5); i++) 5 + from ~/ 5 + i] : [fuzzSeed()]);
     await expectLater(
       runSequence(
         seed: 42,

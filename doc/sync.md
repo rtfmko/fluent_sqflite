@@ -19,7 +19,7 @@ final Stream<FluentRemoteEvent<Article>> events = articles.watchRemote(
 ```
 
 Each `FluentRemoteEvent` has `items` (the rows to show) and a `phase`: `cached` (the cache, before the fetch),
-`fetching` (the cache while `fetch` runs), `fresh` (the stored answer), `failed` (the cache, with `error`). Helpers:
+`fetching` (the cache while `fetch` runs), `fresh` (the stored answer), `failed` (the cache, with `error`: a `FluentSyncException`; the error `fetch` threw, e.g. a `TimeoutException`, is its `cause`). Helpers:
 `isFetching`, `isFresh`, `hasError`, `isEmpty`. While `keepWatching` (default) the stream stays open and emits the rows
 again after every change, keeping the last phase.
 
@@ -86,7 +86,8 @@ print('${result.pushed} sent, ${result.pulled} received, ${result.conflicts} con
 * **Push:** batches of `batchSize` (default 500, `null`: all at once), in key order. `FluentPushResult.accepted` may
   return the server's version of the rows (`updated`: its ids, times; stored as synced) and the keys it refused
   (`rejected`: they stay waiting, counted in `result.rejected`). `FluentPushResult.failed` or an exception keeps
-  everything pending.
+  everything pending.  A push commits a "sent" marker (`synced_version` -1) before `onPush`: a change whose answer is lost (cancel, failure
+  after the server stored it) stays pending and is deleted / sent again by the next push, never forgotten.
 * **Pull:** `hasMore` + `cursor` page through big answers; each page is stored when it arrives, and the `since` of the
   next pull moves only after the last page (the `serverTime` of the first page, else the device time when the pull
   started — a device clock ahead of the server skips changes, so return `serverTime`; the `pullClock` hint says so).
@@ -118,6 +119,13 @@ conflict. `keepLocal` and `merge` skip the server row (the merge callback is not
 it and drops the pending deletion. Rows received from the server keep the `createdAt` / `updatedAt` their model
 carries. Calling `syncWithServer` of the same provider from its own `onPush` / `onPull` / merge callback returns a
 failed result (`FluentSyncException`) at once instead of waiting for itself: start the next sync after it returned.
+
+A sync never reads uncommitted data: while a `FluentDb.transaction` runs on the same database, its reads (what to push,
+the local rows a merge combines, the time of the last pull) wait for the commit, also past `transactionWatchdog`, so a
+change that is rolled back is never sent or merged. A sync that waited longer than `FluentConfig.committedReadTimeout`
+(30 s) fails with `FluentErrorCode.databaseBusy` (nothing is lost; it is transient, so `retries` run it again later):
+otherwise a transaction that awaits a sync started outside it would never end. Call the sync inside the transaction
+(it then sees its changes) or after it.
 
 ### Server keys
 

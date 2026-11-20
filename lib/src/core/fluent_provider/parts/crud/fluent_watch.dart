@@ -166,6 +166,7 @@ extension FluentWatch<T extends FluentStorable> on FluentProvider<T> {
     data: () async {
       final String column = _expiryColumn.quotedIdentifier;
       final FluentFilter visible = _resolveRelated(_scoped(where, _visibility()).and(FluentFilter('$column IS NOT NULL')));
+      await _flushValueLists();
       final List<Map<String, Object?>> rows = await executor.rawQuery(
         'SELECT MIN($column) AS next FROM ${tableName.quotedIdentifier} WHERE ${visible.whereClause}',
         _sqlArgs(visible.whereArgs),
